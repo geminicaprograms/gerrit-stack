@@ -110,7 +110,7 @@ class SyntheticResults(unittest.TestCase):
                 {"name": "feature-3-concern", "aggregates": {"score": 0.9, "delta": 0.3},
                  "arms": {"with": [{"score": 1.0}, {"score": 0.8}],
                           "mcp-only": [{"score": 0.6}, {"score": 0.7}],
-                          "without": [{"score": 0.5}, {"score": 0.4, "costUsd": 0.2, "durationSeconds": 30, "numTurns": 9}]}},
+                          "without": [{"score": 0.5}, {"score": 0.4, "costUsd": 0.2, "durationSeconds": 30, "turns": 9}]}},
                 {"name": "bugfix-1-concern", "aggregates": {"score": 1.0},
                  "arms": {"with": [{"passed": True}]}},
             ],
@@ -182,11 +182,25 @@ class SyntheticResults(unittest.TestCase):
         self.assertEqual(r["dir"], "")
         self.assertEqual(r["cost_usd"], 0.2)
         self.assertEqual(r["wall_s"], 30)
+        # run.py writes the field as "turns" (not "numTurns"); this run has no trace.jsonl,
+        # so the value must come from the aggregate-result.json fallback.
         self.assertEqual(r["turns"], 9)
         self.assertIsNone(r["chain_length"])
         self.assertEqual(len(rows), 7)
         self.assertEqual(sources[0]["claudeVersion"], "2.1.284")
         self.assertEqual(sources[0]["overallScore"], 0.9)
+
+    def test_turns_falls_back_to_aggregate_entry_when_no_trace(self):
+        # Regression for a key mismatch: run.py's aggregate entries carry "turns", not
+        # "numTurns" — load_run must read agg_entry.get("turns") for the fallback to work
+        # when there is no trace.jsonl (aggregate-only run, or a run dir without a trace).
+        row = collect.load_run("", "case", "with", 1, {"turns": 7})
+        self.assertEqual(row["turns"], 7)
+        # A trace's own turns count (when present) still wins over the aggregate value.
+        row_dir = self.write_run("turns-fallback-case", "with", 1,
+                                 _trace_lines(0.1, 42, 1_000), None, None)
+        row2 = collect.load_run(row_dir, "case", "with", 1, {"turns": 7})
+        self.assertEqual(row2["turns"], 42)
 
     def test_hook_trace_parser_tolerates_blank_and_space_separated(self):
         p = os.path.join(self.tmp, "h.log")

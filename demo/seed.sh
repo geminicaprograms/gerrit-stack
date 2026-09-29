@@ -64,18 +64,26 @@ fail() {
 random_hex() { python3 -c 'import secrets; print(secrets.token_hex(16))'; }
 
 # rest <METHOD> <url> <json-body or ""> [curl args...] -> sets REST_CODE, REST_BODY (XSSI prefix stripped)
+# Bodies (which may carry a token) are written to a mode-600 temp file and sent with
+# --data @file, never on curl's argv, so a secret body never shows up in `ps`.
 REST_CODE=000
 REST_BODY=
 rest() {
   local method=$1 url=$2 body=$3
   shift 3
   local out=$tmpdir/rest.body
-  local args=(-sS -o "$out" -w '%{http_code}' -X "$method")
+  local body_file=
   if [ -n "$body" ]; then
-    args+=(-H 'Content-Type: application/json' --data "$body")
+    body_file=$(umask 077 && mktemp "$tmpdir/rest-body.XXXXXX")
+    printf '%s' "$body" > "$body_file"
+  fi
+  local args=(-sS -o "$out" -w '%{http_code}' -X "$method")
+  if [ -n "$body_file" ]; then
+    args+=(-H 'Content-Type: application/json' --data @"$body_file")
   fi
   : > "$out"
   REST_CODE=$(curl "${args[@]}" "$@" "$url" 2>>"$tmpdir/curl.err") || REST_CODE=000
+  [ -n "$body_file" ] && rm -f "$body_file"
   REST_BODY=$(sed "1s/^)]}'\$//" "$out")
   vlog "$method ${url#"$GERRIT_URL"} -> $REST_CODE"
 }
@@ -88,12 +96,14 @@ cookie_value() { awk -v n="$1" '$6 == n { v = $7 } END { print v }' "$jar" 2>/de
 
 # netrc_edit <write login password | drop>: replace/remove the localhost + 127.0.0.1 entries in ~/.netrc.
 # Other entries, comments and macdefs are kept byte for byte; the file ends up mode 600.
+# The password is passed via NETRC_TOKEN, an env var scoped to this one invocation, never as
+# a command argument, so it never shows up in `ps`.
 netrc_edit() {
-  python3 - "$netrc" "$netrc_backup" "$@" <<'PY'
+  local mode=$1 login=${2:-} password=${3:-}
+  NETRC_TOKEN="$password" python3 - "$netrc" "$netrc_backup" "$mode" "$login" <<'PY'
 import os, re, shutil, sys
-path, backup, mode = sys.argv[1:4]
-login = sys.argv[4] if len(sys.argv) > 4 else ""
-password = sys.argv[5] if len(sys.argv) > 5 else ""
+path, backup, mode, login = sys.argv[1:5]
+password = os.environ.get("NETRC_TOKEN", "")
 drop = {"localhost", "127.0.0.1"}
 text = ""
 if os.path.exists(path):

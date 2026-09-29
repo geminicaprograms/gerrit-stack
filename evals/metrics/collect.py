@@ -248,7 +248,7 @@ def load_run(run_dir, case, arm, n, agg_entry=None):
     row["score"] = _num(agg_entry.get("score"))
     if row["score"] is None and agg_entry.get("passed") is not None:
         row["score"] = 1.0 if agg_entry.get("passed") else 0.0
-    row["turns"] = trace["turns"] if trace["turns"] is not None else _num(agg_entry.get("numTurns"))
+    row["turns"] = trace["turns"] if trace["turns"] is not None else _num(agg_entry.get("turns"))
     row["tool_calls"] = float(trace["tool_calls"]) if trace["present"] else None
     row["bash_calls"] = float(trace["bash_calls"]) if trace["present"] else None
     row["git_commit_calls"] = float(trace["git_commit_calls"]) if trace["present"] else None

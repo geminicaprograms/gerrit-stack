@@ -23,7 +23,7 @@ Fan-out in progress (2026-09-29 evening): agents A0, A3, A4, A5, A6, A7, A8, A11
 | A2 tools | todo | | | |
 | A3 gerrit-rest.py | todo | | | |
 | A4 skill gerrit-stack | todo | | | |
-| A5 skill stack-planner | todo | | | |
+| A5 skill stack-planner | done (unreviewed) | wip | validate --strict ok; recipe exercised in scratch repo with real hook | open: headless evals must pre-approve the plan STOP; cross-layer 500 cap = planner judgement |
 | A6 skill gerrit-review | todo | | | |
 | A7 demo infra | todo | | | |
 | A8 demo skeleton (in-tree) | done (unreviewed) | wip | in-tree build+test 60 s cold / 1–2 s warm; quick-check 0.6 s; `bats`-free (java) | config keys are flat: `pingMessage`, greeting → `greetingPrefix` |

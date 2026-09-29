@@ -1,0 +1,41 @@
+# gerrit-stack demo: single Gerrit 3.14 instance for the stage demo and rehearsals.
+#
+#   docker compose -f demo/docker-compose.yml up -d     (make demo-up)
+#   bash demo/seed.sh                                   (make demo-seed)
+#   bash demo/reset.sh                                  (make demo-reset)
+#
+# ./etc is bind-mounted as a DIRECTORY on purpose: the image entrypoint runs
+# `gerrit.war init --batch` on first start and rewrites etc/gerrit.config with
+# `git config -f` (serverId, javaHome, javaOptions). A single-file mount would
+# fight that rewrite and an empty-dir mount would hide our auth settings.
+# Everything the init drops into ./etc besides gerrit.config is gitignored.
+name: gerrit-stack-demo
+
+services:
+  gerrit:
+    image: gerritcodereview/gerrit:3.14.4
+    container_name: gerrit-stack-demo
+    ports:
+      - "8080:8080"
+      - "29418:29418"
+    environment:
+      CANONICAL_WEB_URL: http://localhost:8080/
+    volumes:
+      - gerrit-git:/var/gerrit/git
+      - gerrit-index:/var/gerrit/index
+      - gerrit-cache:/var/gerrit/cache
+      - gerrit-db:/var/gerrit/db
+      - ./etc:/var/gerrit/etc
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/config/server/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  gerrit-git:
+  gerrit-index:
+  gerrit-cache:
+  gerrit-db:

@@ -26,7 +26,7 @@ Select with `git config gerrit-stack.commit-style <conventional|gerrit>` (defaul
 | Types | `feat` `fix` `refactor` `test` `docs` `build` `ci` `perf` `chore` | none; the verb carries the type |
 | Case | lowercase type and scope; subject lowercase unless it starts with a name | Capitalise the first word after the prefix |
 | Breaking | `type(scope)!: subject` + `BREAKING CHANGE:` footer | Say so in the body's first paragraph |
-| Examples | `feat(config): read greeting.prefix from plugin config` | `Read greeting.prefix from plugin config` |
+| Examples | `feat(config): read greetingPrefix from plugin config` | `Read greetingPrefix from plugin config` |
 | | `fix(rest): return 404 when project is unknown` | `REST: Return 404 when the project is unknown` |
 | | `test(ssh): cover greet command with no args` | `Cover the greet command with no arguments` |
 
@@ -47,7 +47,7 @@ characters, reads as the change's title in a list of five.
 ```
 # good
 Before this change the greeting was hard-coded, so every deployment showed the
-same text. Read `greeting.prefix` from the plugin config and fall back to the
+same text. Read `greetingPrefix` from the plugin config and fall back to the
 previous constant when it is unset.
 
 First of three: the REST endpoint and SSH command follow.
@@ -116,7 +116,7 @@ mixed with a behaviour change, unrelated files.
 | Mistake | Fix |
 |---|---|
 | Past tense ("Added option") | Imperative ("Add option") |
-| Subject describes the file ("Update GreetingConfig.java") | Describe the behaviour ("Read greeting.prefix from config") |
+| Subject describes the file ("Update GreetingConfig.java") | Describe the behaviour ("Read greetingPrefix from config") |
 | Body repeats the diff | Lead with the problem, then the decision |
 | `Release-Notes` repeats the subject | Summarise the user impact, or `skip` |
 | Footer required by config missing | Post-commit check reports it; `git commit --amend -F` with the trailer added (keep the Change-Id line) |

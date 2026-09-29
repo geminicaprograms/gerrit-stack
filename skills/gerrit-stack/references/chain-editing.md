@@ -88,7 +88,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/push-chain.sh"      # prints: git push <remo
 ```
 
 Run the printed line verbatim after the user's `y`. Gerrit matches commits to
-changes by Change-Id:
+changes by Change-Id (patch-set semantics: `/gerrit:gerrit-workflow`); in short:
 
 - commit unchanged (same sha) → no new patch set;
 - commit edited → new patch set;
@@ -179,6 +179,10 @@ Land the bottom first:
 ```
 git push <remote> <sha-of-commit-5>:refs/for/<branch>     # uploads commits 1–5 only; guard asks
 ```
+
+This is the one push line `push-chain.sh` does not print (it always uploads
+`HEAD`); take `<sha-of-commit-5>` from the `chain-status.sh` table and add the same
+`%…` grouping options the chain uses.
 
 Keep commits 6+ local. When 1–5 have merged: `git fetch <remote>`, `git rebase <base>`
 (merged commits drop out), and the remaining commits are chain 2 — push it via

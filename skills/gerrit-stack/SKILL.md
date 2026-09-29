@@ -70,7 +70,7 @@ configured (`/gerrit:setup`) or unreachable, use the fallback column:
 | Search | `query_changes(query)` | `query <q>` |
 | Review threads | `list_change_comments(change_id)` | `comments <n> --unresolved` |
 | Reply / comment | `post_review_comment(...)` | `review <n> …` |
-| Reviewer | `add_reviewer(change_id, reviewer)` | (none; ask the user to add in the UI) |
+| Reviewer | `add_reviewer(change_id, reviewer)` (`state="CC"` for a CC) | (none; ask the user to add in the UI) |
 | Topic after the fact | `set_topic(change_id, topic)` | `topic <n> <slug>` |
 | Hashtag after the fact | (no MCP tool) | `hashtags <n> --add <tag>` |
 | Rebase chain server-side | (no MCP tool) | `rebase-chain <tip>` |
@@ -137,12 +137,13 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
    A user who already named a topic or hashtag in the request has answered; persist
    it and mention the atomic-submit caveat in one line. Semantics:
    [references/push-options.md](references/push-options.md).
-4. **Push question** — ask exactly, with `[with <grouping>]` omitted for none:
+4. **Push question** — ask exactly:
 
-   > Push N changes to refs/for/`<b>` [with hashtag `<tag>` | with topic `<slug>`] on `<remote>`? (y/n/wip)
+   > Push N changes to refs/for/<b> [with <grouping>] on <remote>? (y/n/wip)
 
-   `y` → Phase 4. `wip` → Phase 4 with `--wip`. `n` → stop and report the chain.
-   The answer is valid for this turn only.
+   `[with <grouping>]` reads `with hashtag <tag>` or `with topic <slug>` and is
+   omitted for `none`. `y` → Phase 4. `wip` → Phase 4 with `--wip`. `n` → stop and
+   report the chain. The answer is valid for this turn only.
 
 ## Phase 4 — Push
 
@@ -158,7 +159,7 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
    (fallback `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/gerrit-rest.py" related <tip>`).
    All N changes must appear.
 5. Only if the user named reviewers: `add_reviewer(change_id, reviewer)` for each
-   change in the chain (reviewers are per change).
+   change in the chain (reviewers are per change; `state="CC"` for a CC).
 6. Only if grouping is `topic` and the pushed command lacked `%topic=`:
    `set_topic(change_id, topic)` per change (fallback `gerrit-rest.py topic <n> <slug>`).
 7. Report a table `change | subject | url` and the grouping used.
@@ -239,6 +240,11 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
 - A chain table with 6+ rows, or `fixup!` rows before a push
 - `chain-status.sh --verify-ids` printed `lost:` and you are still heading to push
 
+References: [push-options](references/push-options.md) ·
+[chain-editing](references/chain-editing.md) ·
+[commit-message](references/commit-message.md) ·
+[troubleshooting](references/troubleshooting.md)
+
 ## Pre-flight checklist (tick every box before `git push`)
 
 - [ ] `commit-msg` hook installed (`chain-status.sh --preflight` exit 0)
@@ -250,8 +256,3 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
 - [ ] The user answered `y` (or `wip`) to the push question **in this turn**
 - [ ] Change-Id set unchanged after any rebase (`chain-status.sh --verify-ids` → `ok`)
 - [ ] After the push: chain verified via `get_related_changes` (or `gerrit-rest.py related`)
-
-References: [push-options](references/push-options.md) ·
-[chain-editing](references/chain-editing.md) ·
-[commit-message](references/commit-message.md) ·
-[troubleshooting](references/troubleshooting.md)

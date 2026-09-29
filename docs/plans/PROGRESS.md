@@ -22,7 +22,7 @@ Links: [SPEC](/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/p
 | A1 hooks | todo | | | |
 | A2 tools | todo | | | |
 | A3 gerrit-rest.py | in-progress (partial: script + tests written, unverified) | wip | | relaunched 09-30 |
-| A4 skill gerrit-stack | in-progress (partial: SKILL.md + 4 refs, unverified) | wip | | relaunched 09-30 |
+| A4 skill gerrit-stack | done (unreviewed) | wip | validate --strict ok; audited vs SPEC 140–145 + contract; no `cd &&`, no trailers | open: chain-editing §8 copies an existing Change-Id back (recovery) — reviewer to confirm |
 | A5 skill stack-planner | done (unreviewed) | wip | validate --strict ok; recipe exercised in scratch repo with real hook | open: headless evals must pre-approve the plan STOP; cross-layer 500 cap = planner judgement |
 | A6 skill gerrit-review | in-progress (partial: SKILL.md + 2 refs, unverified) | wip | | wave 2 |
 | A7 demo infra | todo (agent died before writing) | | | relaunched 09-30 |

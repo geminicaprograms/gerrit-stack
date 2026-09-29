@@ -1,0 +1,16 @@
+# demo working clones and runtime state
+demo/work/
+demo/etc/*
+!demo/etc/gerrit.config
+!demo/etc/.gitkeep
+# bazel output symlinks
+bazel-*
+# python
+__pycache__/
+*.pyc
+.venv/
+# eval and benchmark run artifacts
+evals/results/
+# editors / os
+.DS_Store
+.idea/

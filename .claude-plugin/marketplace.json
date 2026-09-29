@@ -1,0 +1,17 @@
+{
+  "name": "gerrit-stack",
+  "owner": {
+    "name": "Jacek Centkowski",
+    "url": "https://github.com/geminicaprograms"
+  },
+  "plugins": [
+    {
+      "name": "gerrit-stack",
+      "source": "./",
+      "description": "Gerrit relation chains as the coding agent's default workflow.",
+      "version": "0.1.0",
+      "category": "productivity"
+    }
+  ],
+  "description": "Self-hosted marketplace for the gerrit-stack Claude Code plugin: Gerrit relation chains as the coding agent default workflow."
+}

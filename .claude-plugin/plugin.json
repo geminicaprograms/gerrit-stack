@@ -1,0 +1,11 @@
+{
+  "name": "gerrit-stack",
+  "description": "Make Gerrit relation chains the coding agent's default: plan atomic steps, one commit per concern with Change-Id from the commit-msg hook, push the chain to refs/for/<branch> (optionally grouped by hashtag or topic), iterate on review by amending middle changes, track chain status via the official Gerrit MCP.",
+  "version": "0.1.0",
+  "author": { "name": "Jacek Centkowski", "url": "https://github.com/geminicaprograms" },
+  "homepage": "https://github.com/geminicaprograms/gerrit-stack",
+  "repository": "https://github.com/geminicaprograms/gerrit-stack",
+  "license": "Apache-2.0",
+  "keywords": ["gerrit", "code-review", "stacked-changes", "relation-chain", "conventional-comments", "conventional-commits"],
+  "dependencies": ["gerrit@gerrit-mcp"]
+}

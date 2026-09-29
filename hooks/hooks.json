@@ -1,0 +1,17 @@
+{
+  "description": "gerrit-stack: Gerrit-aware guards for git commit/push, chain verification, session context, stop check",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh\"", "timeout": 10 } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [ { "type": "command", "if": "Bash(git *)", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/git-guard.sh\"", "timeout": 10 } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Bash", "hooks": [ { "type": "command", "if": "Bash(git *)", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/git-post.sh\"", "timeout": 10 } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-check.sh\"", "timeout": 10 } ] }
+    ]
+  }
+}

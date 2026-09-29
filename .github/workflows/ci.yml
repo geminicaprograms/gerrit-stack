@@ -1,0 +1,26 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shell tooling
+        run: sudo apt-get update && sudo apt-get install -y shellcheck jq bats
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Claude Code CLI (manifest validation only)
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Validate plugin manifests
+        run: claude plugin validate ./ --strict
+      - name: Lint
+        run: make lint
+      - name: Bats
+        run: make test
+      - name: Python unit tests
+        run: make test-py

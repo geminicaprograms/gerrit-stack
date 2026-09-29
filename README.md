@@ -1,0 +1,243 @@
+# gerrit-stack
+
+A Claude Code plugin that makes Gerrit relation chains — not GitHub-style pull
+requests — the coding agent's default output shape. Every stacking skill on
+the market today (gh-stack, the Graphite skill, GitButler's `but agent
+setup`, thoughtbot's atomic-commits hook, Cursor's `/split-to-prs`, PostHog's
+stacking-prs, Codex's change-size guidance) is PR-shaped: branches and pull
+requests. Gerrit works differently — one `Change-Id` per concern, chained by
+parent/child commits, uploaded with a single `git push … refs/for/<branch>` —
+and the official `gerrit@gerrit-mcp` plugin only covers the review side
+(`get_related_changes`, `set_topic`, `post_review_comment`, a
+`gerrit-workflow` skill) with no planning, splitting, or push step. No
+existing skill makes relation chains the agent's default; gerrit-stack fills
+that gap. It plans a chain of small, single-concern commits, gets each
+`Change-Id` from the real `commit-msg` hook (never hand-written), prints —
+never runs — the push command so a human confirms it, and iterates on review
+by amending the right commit and re-pushing the whole chain.
+
+## Requirements
+
+- Claude Code ≥ 2.1 (plugin manifest + hooks JSON format used here)
+- `git`, `jq`, `bash` (hook scripts are bash-3.2-compatible, macOS default
+  `/bin/bash`)
+- `python3` (`gerrit-rest.py`, evals runner, metrics collector — stdlib only)
+- The official [`gerrit@gerrit-mcp`](https://gerrit.googlesource.com/gerrit-mcp-server)
+  plugin, for the MCP tools the skills call first (`get_related_changes`,
+  `set_topic`, `post_review_comment`, …); gerrit-stack falls back to
+  `gerrit-rest.py` when a tool isn't available
+- [`uv`](https://docs.astral.sh/uv/), used by `gerrit@gerrit-mcp` to run its
+  MCP server (`uv run --directory ${CLAUDE_PLUGIN_ROOT} gerrit-mcp-server`)
+
+## Install
+
+```
+/plugin marketplace add https://gerrit.googlesource.com/gerrit-mcp-server
+/plugin install gerrit@gerrit-mcp
+/gerrit:setup
+/plugin marketplace add geminicaprograms/gerrit-stack
+/plugin install gerrit-stack@gerrit-stack
+```
+
+If `gerrit.googlesource.com` is unavailable (Gitiles has occasional outages),
+add the GitHub mirror instead of the first command:
+
+```
+/plugin marketplace add https://github.com/GerritCodeReview/gerrit-mcp-server
+```
+
+`/gerrit:setup` is `gerrit@gerrit-mcp`'s own setup skill — it writes the
+Gerrit host(s) and credentials both `gerrit@gerrit-mcp` and gerrit-stack's
+`gerrit-rest.py` fallback use. Run it before installing gerrit-stack.
+
+### Local development
+
+```
+claude --plugin-dir ~/workspace/open/gerrit-stack
+```
+
+Skip the marketplace steps for gerrit-stack itself; `gerrit@gerrit-mcp` still
+needs to be installed and configured as above.
+
+## Skills
+
+- **`/gerrit-stack:gerrit-stack`** — the default workflow for any code
+  change in a Gerrit-backed repo. Runs a preflight (`chain-status.sh
+  --preflight`), hands planning to `stack-planner`, builds the chain one
+  commit per concern (Change-Id from the hook, verified after each commit),
+  asks the grouping question and an explicit push confirmation before
+  printing `push-chain.sh`'s command, then iterates on review by amending
+  the right commit, re-verifying Change-Ids after rebase, and re-pushing the
+  whole chain.
+- **`/gerrit-stack:stack-planner`** — VCS-agnostic planning: splits a
+  feature, refactor, or bugfix into an ordered chain of small,
+  single-concern steps, each independently buildable, reviewable, and
+  revertable within a diff budget (default 50–150 lines / 2–8 files per
+  step, hard cap 200 lines single-layer). Used before writing code, or to
+  retro-split an existing oversized diff.
+- **`/gerrit-stack:gerrit-review`** — reads unresolved review threads on a
+  change or chain via `gerrit@gerrit-mcp` (falling back to `gerrit-rest.py`),
+  drafts replies and comments in Conventional Comments format, and posts
+  them only after the user approves the batch. Never votes labels, never
+  submits.
+
+## How it works
+
+### Hooks
+
+| Event | Script | Behavior |
+|---|---|---|
+| `SessionStart` | `session-start.sh` | Emits `additionalContext` beginning `[gerrit-stack] …` (remote/host/branch/project, commit-msg hook status, chain length vs base) only when the repo is Gerrit-backed; silent (no output) otherwise. |
+| `PreToolUse` (matcher `Bash`, `if: Bash(git *)`) | `git-guard.sh` | **deny** = stderr message + exit 2; **ask** = stdout JSON `permissionDecision: "ask"`; else exit 0 silently. Dispatches on `git commit`/`git push`; see the guard table below for every row. |
+| `PostToolUse` (matcher `Bash`, `if: Bash(git *)`, fires only when the `Bash` call succeeded) | `git-post.sh` | Feedback only — stderr + exit 2, never blocks. After `commit`: checks exactly one Change-Id, diff budget, required footers, refreshes the chain snapshot. After `rebase`: reports `lost:`/`new:` Change-Ids against the snapshot. After `push`: parses the pushed change numbers or explains `no new changes`. |
+| `Stop` | `stop-check.sh` | `{"decision":"block","reason":"…"}` only when this session committed (session marker set) and a non-fixup commit in the chain still lacks a Change-Id; exit 0 otherwise, and always when `stop_hook_active` is true. |
+
+`git-guard.sh` (`PreToolUse`) guard rows:
+
+| Condition | Decision | Reason |
+|---|---|---|
+| `commit` message already contains a `Change-Id:` trailer | deny | the hook adds it; remove the hand-written trailer |
+| `commit --no-verify` / `-n` | deny | skips the `commit-msg` hook, so no Change-Id is added |
+| `commit --amend -m` | deny | drops the existing Change-Id → Gerrit opens a **new** change; use `--amend --no-edit` or `-F` with a file that keeps the trailer |
+| `commit --amend -F` | ask | confirm the file preserves the current Change-Id |
+| `commit` and the `commit-msg` hook is missing | deny | run `install-commit-msg-hook.sh` first |
+| `push` to `refs/heads/*` or a bare branch, `gerrit-stack.allow-direct-push` ≠ `true` | deny | push the chain to `refs/for/<branch>` instead |
+| `push --force*` to `refs/for/*` | deny | force is meaningless against `refs/for` |
+| `push` to `refs/for/*` with a `fixup!`/`squash!` commit present | deny | run an autosquash rebase first |
+| `push` to `refs/for/*` with a commit missing a Change-Id | deny | lists the offending SHAs and the repair command (`git -c sequence.editor=true rebase -i --exec 'git commit --amend --no-edit' <base>`) |
+| `push` to `refs/for/*`, otherwise | **ask** | "Push N change(s) to `refs/for/<b>` [grouping: none / hashtag `<tag>` / topic `<slug>`]: sha7 subject…" — no warning when a topic is simply absent; if `%topic=` is present but `gerrit-stack.grouping` ≠ `topic`, the reason adds a `submitWholeTopic` warning |
+| anything else | exit 0 | no output |
+
+### Scripts
+
+| Script | Purpose | Flags |
+|---|---|---|
+| `chain-status.sh` | Table of the local chain: `sha7 \| Change-Id(short) \| +/- \| files \| subject`, header `chain: N change(s) on <remote>/<branch> (base <sha7>)`. | `[--preflight] [--json] [--snapshot] [--verify-ids]` — `--preflight` prints detection + hook + MCP status and exits 1 if the hook is missing; `--snapshot` records the Change-Id set; `--verify-ids` compares against it and exits 1 on drift. |
+| `push-chain.sh` | Validates the chain (non-empty, exactly one Change-Id per commit, no fixup/squash, grouping+name consistent) and **prints** the single `git push` command; never runs it. Exit 3 with reasons on stderr if validation fails. | `[--wip] [--grouping none\|hashtag\|topic] [--name <x>] [--branch <b>] [--remote <r>]` — flags override config for this print only; the script never writes config. |
+| `diff-budget.sh` | Reports `lines=<n> files=<m> budget=<L>/<F> hard=<H>` against `gerrit-stack.budget.*`. | `[<rev>\|--worktree\|--estimate <path>...]` — exit 0 within budget, 1 over the soft budget, 3 over the hard cap. |
+| `install-commit-msg-hook.sh` | Installs the real Gerrit `commit-msg` hook into the repo's hooks directory, `chmod +x`, self-tests it (Change-Id added; none added for `fixup!`), prints the installed path. | `[--host <url>] [--from <file>]` — source is `--from <file>` or `curl -fsSL <host>/tools/hooks/commit-msg` (`<host>` may be `file:///…`). |
+| `gerrit-rest.py` | MCP fallback: talks to the Gerrit REST API directly (`~/.netrc` auth when present, anonymous otherwise; strips the XSSI prefix). | `[--host URL] <cmd> …` — `related <change>`, `comments <change> [--unresolved]`, `review <change> --message M [--comment FILE:LINE:MSG]... [--in-reply-to ID] [--resolved]` (never sets labels), `rebase-chain <change>`, `topic <change> <topic>`, `hashtags <change> --add T...`, `submitted-together <change>`, `detail <change>`, `query <q>`. |
+
+Two libraries, `scripts/lib/gerrit-detect.sh` and `scripts/lib/chain.sh`, are
+`source`d by the hooks and tool scripts above and are not invoked directly.
+
+## Configuration
+
+All keys are read with `git config gerrit-stack.<key>`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Set `false` to disable gerrit-stack in a repo entirely. |
+| `remote` | auto | Which remote is the Gerrit remote; auto-detected when unset. |
+| `branch` | auto | Upload target branch; falls back through `.gitreview` `defaultbranch` → `remote.<r>.push` refspec → `origin/HEAD`. |
+| `host` | auto | Gerrit base URL for `gerrit-rest.py` and `install-commit-msg-hook.sh`; derived from the remote URL (http/https only) when unset. |
+| `grouping` | `none` | `none` \| `hashtag` \| `topic` — see below. |
+| `group-name` | unset | The hashtag or topic slug, once chosen. |
+| `default-wip` | `false` | Push new chains as work-in-progress (`%wip`) by default. |
+| `budget.lines` | `150` | Soft per-commit line budget. |
+| `budget.files` | `8` | Soft per-commit file-count budget. |
+| `budget.hard-lines` | `200` | Hard per-commit line cap (`diff-budget.sh` exits 3 past this). |
+| `commit-style` | `conventional` | Expected commit subject style. |
+| `footers` | unset | Comma-separated list of required trailers, e.g. `Release-Notes`. |
+| `allow-direct-push` | `false` | Allow `git push` straight to `refs/heads/*` (otherwise denied). |
+| `verify-cmd` | unset | Command run per-commit to check it builds/tests alone. |
+
+Grouping semantics: **none** (default) — a relation chain in one repo/branch
+is already grouped by parent-child, nothing extra is added. **hashtag**
+(`%t=<tag>`) — informational only, searchable via a `hashtag:` query, no
+submit semantics. **topic** (`%topic=<slug>`) — use when the chain spans
+repos or branches, or atomic submission is wanted; with
+`change.submitWholeTopic` enabled, all changes in the topic submit together.
+
+## Demo
+
+Bring up a local docker Gerrit 3.14 and seed it with an admin/reviewer
+account, a `demo-plugin` project, and a small Gerrit-plugin skeleton:
+
+```
+make demo-up demo-seed
+```
+
+The skeleton's Bazel build runs **in-tree** against a real Gerrit
+`stable-3.14` checkout (there's no `stable-3.14` branch of
+`cookbook-plugin`): `demo/gerrit-tree.sh <path-to-gerrit-3.14-checkout>`
+symlinks the skeleton into that checkout's `plugins/` directory and writes a
+cache-backed `user.bazelrc`, then `demo/warm-bazel.sh` builds and tests it.
+`demo/skeleton/tools/quick-check.sh` is a `javac`-only fallback for a faster
+per-commit `verify-cmd`.
+
+See `demo/RUN.md` for the full seeded walkthrough (stage script, timings,
+fallback triggers).
+
+## Tests & evals
+
+```
+make check       # validate + lint + bats + python unittest
+```
+
+`claude plugin eval` is early-access on some Claude Code installs (gated on
+the machine this plugin was built on); `evals/run.py` is a stdlib runner over
+the same case format (`prompt.md` frontmatter + `graders/*.md`) that drives
+`claude -p --plugin-dir … --output-format stream-json` directly, so the eval
+cases stay compatible with the official runner once it's available:
+
+```
+make eval         # python3 evals/run.py --runs 2 --threshold 0.8
+make bench         # python3 evals/run.py --bench --ablation --runs 3
+```
+
+The benchmark run (arm A vanilla, arm B vanilla + `gerrit@gerrit-mcp`, arm C
++ gerrit-stack) is reported in `docs/benchmark.md`.
+
+## Troubleshooting
+
+- **Hook missing / guard denies every commit** — run `bash
+  "${CLAUDE_PLUGIN_ROOT}/scripts/install-commit-msg-hook.sh"` (or invoke the
+  `gerrit-stack` skill, which runs it for you) to install the real
+  `commit-msg` hook, then commit again.
+- **`push-chain.sh` prints a command but the push says `no new changes`** —
+  the tip commit's Change-Id already matches the change on the server and
+  nothing changed since the last patch set; re-check `chain-status.sh` for
+  drift, or amend the intended commit first.
+- **Lost the Change-Id after `git commit --amend -m "…"`** — the guard
+  should have denied this; if it slipped through (e.g. `--no-verify`
+  bypass), the amended commit opened a new Gerrit change. Recover the
+  original trailer from the previous patch set (or `git reflog`) and
+  `git commit --amend -F <file-with-trailer>`.
+- **Guard denies a direct push to `refs/heads/*`** — this is intentional;
+  push chains to `refs/for/<branch>` instead, or set
+  `git config gerrit-stack.allow-direct-push true` if the repo genuinely
+  needs direct pushes.
+- **MCP not configured** — `gerrit@gerrit-mcp`'s `SessionStart` hook keeps
+  nagging until it is; run `/gerrit:setup`.
+
+## Design principles
+
+- Scripts never run `git commit`/`git push` themselves — the agent runs raw
+  `git …` so the `PreToolUse` guard fires; `push-chain.sh` only composes and
+  prints the command, and the push guard always asks for confirmation even
+  when `git push` is allow-listed.
+- Grouping is optional and asked, never assumed; the choice is persisted in
+  `git config gerrit-stack.grouping`/`gerrit-stack.group-name` and reused on
+  re-push.
+- Recipes always start with a literal `git` (e.g. `git -c
+  sequence.editor=true rebase …`, never `ENV=x git …`) so a single `"if":
+  "Bash(git *)"` hook filter matches, including `cd x && git …`.
+- One dispatcher script per hook event (`git-guard.sh`, `git-post.sh`),
+  routing internally on the parsed git verb.
+- Gerrit detection is layered and fails open (`gerrit-stack.enabled=false` →
+  off; explicit `remote` config; `.gitreview`; `remote.*.push=HEAD:refs/for/`;
+  remote URL pattern; else no-op) — `trap 'exit 0' ERR`, no network access.
+- Hook state lives in `.git/gerrit-stack/`: a Change-Id snapshot of the chain
+  and a per-session "committed" marker.
+- gerrit-stack never duplicates the `gerrit-workflow` skill's Change-Id and
+  patchset semantics — it links to it instead.
+- Default commit style is Conventional Commits; a `Release-Notes` footer (or
+  any other trailer) is opt-in via `git config gerrit-stack.footers`.
+- The three skills are symlinked into `~/claude-skills-hub/skills/` for local
+  development, not into `~/.claude/skills/` — a plugin install already
+  discovers them there, and adding both would register each skill twice.
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE).

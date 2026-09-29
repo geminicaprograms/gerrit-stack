@@ -119,6 +119,11 @@ makes it a file-level note. Author notes join the same batch preview and wait fo
 | "One more explanation will convince the reviewer" | Second round = escalate. The human decides. |
 | "`post_review_comment` is the tool the spec names, so use it for replies" | It cannot thread. Drafts + `publish_drafts` or the fallback `--in-reply-to`. |
 
+## References
+
+- `references/conventional-comments.md` — labels, decorations, reviewer label → author action, reply examples.
+- `references/review-json.md` — `CommentInfo`, `ReviewInput`/`CommentInput`, `RelatedChangesInfo`, identifiers, `gerrit-rest.py` subcommands.
+
 ## Pre-flight checklist (re-read before the batch preview and again before posting)
 
 - [ ] Target resolved via `get_related_changes`; only `NEW` changes in scope; stale patch sets flagged.
@@ -131,8 +136,3 @@ makes it a file-level note. Author notes join the same batch preview and wait fo
 - [ ] No `labels`, no vote, no submit, no WIP/ready/abandon/revert call anywhere in the batch.
 - [ ] The full batch (replies + author notes, with the `publish_drafts` warning) was shown and the user said yes this turn.
 - [ ] Recipes use `git -C`, not `cd … && git …`; no hand-written `Change-Id:`.
-
-## References
-
-- `references/conventional-comments.md` — labels, decorations, reviewer label → author action, reply examples.
-- `references/review-json.md` — `CommentInfo`, `ReviewInput`/`CommentInput`, `RelatedChangesInfo`, identifiers, `gerrit-rest.py` subcommands.

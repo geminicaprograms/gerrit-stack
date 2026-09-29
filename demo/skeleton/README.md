@@ -1,0 +1,9 @@
+# demo-plugin — skeleton for the gerrit-stack demo
+
+Minimal hand-written Gerrit 3.14 plugin (`Module` + `RestApiModule`, `SshModule`, a `@Singleton` config reader, JUnit 4 + Truth + Mockito tests). It answers `GET /projects/{name}/demo-plugin~ping` with `{"plugin":"demo-plugin","project":"<name>","message":"pong"}` and `ssh -p 29418 <host> demo-plugin ping <project>` with `pong <project>`; the message comes from `[plugin "demo-plugin"] pingMessage` in `gerrit.config`.
+
+**Build (in-tree, `cookbook-plugin` has no stable-3.14):** `bash demo/gerrit-tree.sh ~/workspace/open/gerrit-3.14` once (symlinks `<tree>/plugins/demo-plugin` here, writes `<tree>/user.bazelrc` with caches under `~/.cache/gerrit-stack-demo/`), then `bash tools/verify.sh` = `bazelisk build plugins/demo-plugin && bazelisk test plugins/demo-plugin:demo_plugin_tests` inside the tree. `bash demo/warm-bazel.sh` runs it twice and fails if the warm run takes > 20 s.
+
+**5-second fallback:** `bash tools/quick-check.sh` compiles `src/main/java` with `javac` against `gerrit-plugin-api-3.14.4.jar` from Maven Central (cached in `~/.cache/gerrit-stack-demo/`); the demo clone sets `git config gerrit-stack.verify-cmd 'bash tools/quick-check.sh'`.
+
+**How the greeting feature extends it (the demo's 3-change chain):** (1) `DemoPluginConfig` gains a `greetingPrefix` key (default e.g. `Hello`) next to `pingMessage`, with a test in `DemoPluginConfigTest`; (2) a `GreetingAction implements RestReadView<ProjectResource>` registered in `Module` as `get(PROJECT_KIND, "greeting")`, mirroring `PingAction` + `PingActionTest`; (3) a `GreetCommand extends SshCommand` (`demo-plugin greet <project>`) registered in `SshModule.configureCommands()`, mirroring `PingCommand`. Each step builds alone with `tools/verify.sh` or `tools/quick-check.sh`.

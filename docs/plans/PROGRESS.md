@@ -14,7 +14,7 @@ Fan-out in progress (2026-09-29 evening): agents A0, A3, A4, A5, A6, A7, A8, A11
 | P0.4 repo init | done | — | `git init -b main`, identity set | |
 | P0.5 Gerrit stable-3.14 checkout | done | — | `~/workspace/open/gerrit-3.14` head 0e3db2f7fd, Bazel 8.6.0, 14 submodules | |
 | P0.6a validate --strict + dependencies | done | — | exit 0 on dir and on plugin.json | marketplace needs `description` |
-| P0.6b eval hook-disable probe | blocked | — | `claude plugin eval` gated ("early access") | → own runner `evals/run.py` (A9) |
+| P0.6b eval hook-disable probe | blocked (documented) | — | official runner refuses Bash-granting runs here: `~/.docker/cli-plugins/*` symlinks (Docker Desktop); `DOCKER_CONFIG` does not bypass | → `evals/run.py` is the local runner; official `claude plugin eval --trust-plugin` in CI |
 | P0.6c CLAUDE_PLUGIN_ROOT in SKILL.md | done | — | `claude -p --plugin-dir . /gerrit-stack:probe` → `PLUGIN_ROOT=/Users/jcentkowski/workspace/open/gerrit-stack` | substituted inline in SKILL.md body |
 | P0.6d `if: Bash(git *)` compound | done | — | hook trace shows PreToolUse fired for `cd sub && git status` and `git -C sub status`, not for `echo hi` | single `if` entry suffices |
 | P1 foundation | in-progress | see git log | manifests, hooks.json, stubs, Makefile, CI, ledger committed; lib (A0) pending | |
@@ -26,7 +26,7 @@ Fan-out in progress (2026-09-29 evening): agents A0, A3, A4, A5, A6, A7, A8, A11
 | A5 skill stack-planner | todo | | | |
 | A6 skill gerrit-review | todo | | | |
 | A7 demo infra | todo | | | |
-| A8 demo skeleton (in-tree) | todo | | | |
+| A8 demo skeleton (in-tree) | done (unreviewed) | wip | in-tree build+test 60 s cold / 1–2 s warm; quick-check 0.6 s; `bats`-free (java) | config keys are flat: `pingMessage`, greeting → `greetingPrefix` |
 | A9 evals + runner | todo | | | |
 | A10 docs | done (unreviewed) | wip | README/CHANGELOG/jj-stretch written; review in P3 | flagged: jj upload flags uncertain |
 | A11 metrics/benchmark | todo | | | |
@@ -39,6 +39,7 @@ Fan-out in progress (2026-09-29 evening): agents A0, A3, A4, A5, A6, A7, A8, A11
 - gerrit-mcp: installed at `~/.claude/plugins/cache/gerrit-mcp/gerrit/<version-hash>/` (currently `70a4f8f7e72a`); config file = `<that dir>/gerrit_mcp_server/gerrit_config.json` (keys: `default_gerrit_base_url`, `gerrit_hosts[{name, external_url, authentication{type: http_basic, username?, auth_token?}}]`; omit username/token → curl `--netrc`); venv at `~/.claude/plugins/data/gerrit-gerrit-mcp/.venv` (prebuilt; `gerrit-check-config` exit 1 = missing config). SessionStart hook `check-config.sh` nags until config exists. MCP server name: `gerrit` → tools `mcp__gerrit__<tool>`.
 - Docker: `gerritcodereview/gerrit:3.14.4` pulled (arm64).
 - Gerrit tree for in-tree demo build: `~/workspace/open/gerrit-3.14` (stable-3.14, Bazel 8.6.0 via bazelisk).
+- Probe b (official eval): `claude plugin eval` 2.1.284 runs (needs `--trust-plugin` non-interactively) but any case granting `Bash` aborts with "the Docker (~/.docker, DOCKER_CONFIG) credential store on this machine holds a symbolic link inside it, so the Bash sandbox cannot reliably exclude it" — cause: Docker Desktop's `~/.docker/cli-plugins/*` symlinks; setting `DOCKER_CONFIG` to a plain dir did not help. Docs confirm official runs disable git hooks/credential helpers via `GIT_CONFIG_COUNT` env config and withhold the shell env (only `EVAL_*` pass). Case layout confirmed: `case.yaml` → `context.scaffold_script` (+ `context.add_dirs`, `context.history_file`); mocks register only for servers declared in the plugin's MCP config. Decision: local runs use `evals/run.py` (own env: hooks on, `GERRIT_STACK_TRACE`, arms with/without/mcp-only); CI (Linux) can use the official runner.
 - Probe c: `${CLAUDE_PLUGIN_ROOT}` **is** substituted inside a plugin SKILL.md body under `--plugin-dir` (printed the absolute plugin path). Skills write the literal `bash "${CLAUDE_PLUGIN_ROOT}/scripts/x.sh"`; no fallback.
 - Probe d: `if: "Bash(git *)"` fires the PreToolUse hook for `cd sub && git status` AND `git -C sub status`, and not for `echo hi`; the hook receives the whole command string. PostToolUse fired only for the command that actually ran. **Also learned:** Claude Code's own permission layer refused `cd sub && git status` under an allowlist of `Bash(git *)` ("changes directory before running git, which can execute untrusted hooks") → skill recipes use `git -C <dir> …`, never `cd <dir> && git …`. SessionStart and Stop hooks from the plugin ran in `-p` mode.
 

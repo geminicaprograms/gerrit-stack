@@ -297,7 +297,8 @@ class AuthTests(StubServerCase):
     def test_netrc_match_adds_prefix_and_basic_header(self):
         netrc_path = self.write_netrc()
         self.route("GET", "/a/changes/123/revisions/current/related", {"changes": []})
-        code, out, err = self.run_cli("--host", self.host, "related", "123", env={"NETRC": netrc_path})
+        code, out, err = self.run_cli("--host", self.host, "--table", "related", "123",
+                                      env={"NETRC": netrc_path})
         self.assertEqual(code, 0, err)
         self.assertEqual(self.last["path"], "/a/changes/123/revisions/current/related")
         expected = "Basic " + base64.b64encode(b"admin:s3cret").decode("ascii")
@@ -437,7 +438,7 @@ COMMENTS = {
 class SubcommandTests(StubServerCase):
     def test_related_table_marks_requested_change(self):
         self.route("GET", "/changes/123/revisions/current/related", RELATED)
-        code, out, err = self.run_cli("--host", self.host, "related", "123")
+        code, out, err = self.run_cli("--host", self.host, "--table", "related", "123")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.last["method"], "GET")
         self.assertIn("related: 3 change(s)", out)
@@ -448,7 +449,7 @@ class SubcommandTests(StubServerCase):
 
     def test_related_accepts_url_and_change_id(self):
         self.route("GET", f"/changes/demo~master~{CHANGE_ID}/revisions/current/related", RELATED)
-        code, out, _err = self.run_cli("--host", self.host, "related", f"demo~master~{CHANGE_ID}")
+        code, out, _err = self.run_cli("--host", self.host, "--table", "related", f"demo~master~{CHANGE_ID}")
         self.assertEqual(code, 0)
         self.assertTrue([line for line in out.splitlines() if line.startswith("*") and "123" in line], out)
         self.route("GET", "/changes/123/revisions/current/related", RELATED)
@@ -465,9 +466,20 @@ class SubcommandTests(StubServerCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out), RELATED)
 
+    def test_default_output_is_json(self):
+        """No --json/--table given: the interface contract says JSON to stdout by default."""
+        self.route("GET", "/changes/123/revisions/current/related", RELATED)
+        code, out, _err = self.run_cli("--host", self.host, "related", "123")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out), RELATED)
+        self.route("PUT", "/changes/123/topic", "stack-a")
+        code, out, _err = self.run_cli("--host", self.host, "topic", "123", "stack-a")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out), "stack-a")
+
     def test_comments_rows(self):
         self.route("GET", "/changes/123/comments", COMMENTS)
-        code, out, err = self.run_cli("--host", self.host, "comments", "123")
+        code, out, err = self.run_cli("--host", self.host, "--table", "comments", "123")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.last["method"], "GET")
         lines = out.splitlines()
@@ -480,7 +492,7 @@ class SubcommandTests(StubServerCase):
 
     def test_comments_unresolved_filter_and_json(self):
         self.route("GET", "/changes/123/comments", COMMENTS)
-        code, out, _err = self.run_cli("--host", self.host, "comments", "123", "--unresolved")
+        code, out, _err = self.run_cli("--host", self.host, "--table", "comments", "123", "--unresolved")
         self.assertEqual(code, 0)
         self.assertEqual(len(out.splitlines()), 3)
         self.assertNotIn("Done.", out)
@@ -492,7 +504,7 @@ class SubcommandTests(StubServerCase):
     def test_review_posts_message_and_nested_comments_without_labels(self):
         self.route("POST", "/changes/123/revisions/current/review", {"labels": {}})
         code, out, err = self.run_cli(
-            "--host", self.host, "review", "123", "--message", "Done.",
+            "--host", self.host, "--table", "review", "123", "--message", "Done.",
             "--comment", "src/a.py:10:nit: rename", "--comment", "src/a.py:20:praise: nice",
             "--comment", "src/b.py:0:question: why?", "--in-reply-to", "c1",
         )
@@ -533,7 +545,7 @@ class SubcommandTests(StubServerCase):
         payload = {"rebased_changes": [{"_number": 123, "status": "NEW", "project": "demo", "branch": "master",
                                         "subject": "second"}], "contains_git_conflicts": False}
         self.route("POST", "/changes/123/rebase:chain", payload)
-        code, out, err = self.run_cli("--host", self.host, "rebase-chain", "123")
+        code, out, err = self.run_cli("--host", self.host, "--table", "rebase-chain", "123")
         self.assertEqual(code, 0, err)
         self.assertEqual((self.last["method"], self.last["path"]), ("POST", "/changes/123/rebase:chain"))
         self.assertEqual(self.last["json"], {})
@@ -544,7 +556,7 @@ class SubcommandTests(StubServerCase):
 
     def test_topic(self):
         self.route("PUT", "/changes/123/topic", "stack-a")
-        code, out, err = self.run_cli("--host", self.host, "topic", "123", "stack-a")
+        code, out, err = self.run_cli("--host", self.host, "--table", "topic", "123", "stack-a")
         self.assertEqual(code, 0, err)
         self.assertEqual((self.last["method"], self.last["path"]), ("PUT", "/changes/123/topic"))
         self.assertEqual(self.last["json"], {"topic": "stack-a"})
@@ -552,14 +564,14 @@ class SubcommandTests(StubServerCase):
 
     def test_topic_removal_handles_empty_response(self):
         self.route("PUT", "/changes/123/topic", None, status=204)
-        code, out, _err = self.run_cli("--host", self.host, "topic", "123", "")
+        code, out, _err = self.run_cli("--host", self.host, "--table", "topic", "123", "")
         self.assertEqual(code, 0)
         self.assertEqual(self.last["json"], {"topic": ""})
         self.assertEqual(out.strip(), "topic: (removed)")
 
     def test_hashtags(self):
         self.route("POST", "/changes/123/hashtags", ["a", "b"])
-        code, out, err = self.run_cli("--host", self.host, "hashtags", "123", "--add", "a", "--add", "b",
+        code, out, err = self.run_cli("--host", self.host, "--table", "hashtags", "123", "--add", "a", "--add", "b",
                                       "--remove", "old")
         self.assertEqual(code, 0, err)
         self.assertEqual((self.last["method"], self.last["path"]), ("POST", "/changes/123/hashtags"))
@@ -572,7 +584,7 @@ class SubcommandTests(StubServerCase):
         payload = {"changes": [{"_number": 123, "status": "NEW", "project": "demo", "branch": "master",
                                 "subject": "second"}], "non_visible_changes": 1}
         self.route("GET", "/changes/123/submitted_together?o=NON_VISIBLE_CHANGES", payload)
-        code, out, err = self.run_cli("--host", self.host, "submitted-together", "123")
+        code, out, err = self.run_cli("--host", self.host, "--table", "submitted-together", "123")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.last["method"], "GET")
         self.assertEqual(self.last["path"], "/changes/123/submitted_together?o=NON_VISIBLE_CHANGES")
@@ -591,7 +603,7 @@ class SubcommandTests(StubServerCase):
             "reviewers": {"REVIEWER": [{"_account_id": 2, "name": "Rena"}]},
         }
         self.route("GET", "/changes/123/detail?o=CURRENT_REVISION&o=CURRENT_COMMIT", payload)
-        code, out, err = self.run_cli("--host", self.host, "detail", "123")
+        code, out, err = self.run_cli("--host", self.host, "--table", "detail", "123")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.last["path"], "/changes/123/detail?o=CURRENT_REVISION&o=CURRENT_COMMIT")
         self.assertIn("change 123  demo/master  NEW", out)
@@ -605,12 +617,13 @@ class SubcommandTests(StubServerCase):
     def test_query(self):
         payload = [{"_number": 7, "status": "NEW", "project": "demo", "branch": "master", "subject": "s"}]
         self.route("GET", "/changes/?q=owner%3Aself+status%3Aopen&n=5&o=CURRENT_REVISION", payload)
-        code, out, err = self.run_cli("--host", self.host, "query", "owner:self status:open", "--limit", "5")
+        code, out, err = self.run_cli("--host", self.host, "--table", "query", "owner:self status:open",
+                                      "--limit", "5")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.last["path"], "/changes/?q=owner%3Aself+status%3Aopen&n=5&o=CURRENT_REVISION")
         self.assertIn("      7  NEW       demo/master  s", out)
         self.route("GET", "/changes/?q=x&n=25&o=CURRENT_REVISION", [])
-        code, out, _err = self.run_cli("--host", self.host, "query", "x")
+        code, out, _err = self.run_cli("--host", self.host, "--table", "query", "x")
         self.assertEqual(code, 0)
         self.assertEqual(self.last["path"], "/changes/?q=x&n=25&o=CURRENT_REVISION")
         self.assertEqual(out.strip(), "(no changes)")

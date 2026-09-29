@@ -28,8 +28,9 @@ from an http(s) remote.origin.url (project path and /a/ stripped); otherwise exi
 Auth: the host's entry in ~/.netrc ($NETRC overrides the path) -> HTTP Basic + "/a/" prefix
 on every request; no entry, unreadable file, or --anonymous -> anonymous, no prefix.
 
-Output: --table (default for everything except review-metrics, which defaults to JSON lines)
-or --json (raw response, pretty-printed). -v prints "<METHOD> <URL>" to stderr.
+Output: JSON to stdout by default (pretty-printed; review-metrics streams one JSON object
+per change followed by a summary line), or --table for a compact human-readable rendering.
+-v prints "<METHOD> <URL>" to stderr.
 Exit codes: 0 ok, 1 HTTP/network/response error, 2 usage or configuration error.
 """
 
@@ -450,10 +451,11 @@ def render_query(data: Any) -> str:
 
 
 def emit(args: argparse.Namespace, data: Any, render: Callable[[Any], str]) -> None:
-    if args.fmt == "json":
-        print(json.dumps(data, indent=2, ensure_ascii=False))
-    else:
+    """Default to raw JSON (the interface contract); --table renders the compact form."""
+    if args.fmt == "table":
         print(render(data))
+    else:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
 
 
 # ---------------------------------------------------------------- review input
@@ -751,9 +753,9 @@ def _add_common(parser: argparse.ArgumentParser, suppress: bool) -> None:
     )
     fmt = parser.add_mutually_exclusive_group()
     fmt.add_argument("--json", dest="fmt", action="store_const", const="json", default=default,
-                     help="print the raw JSON response")
+                     help="print the raw JSON response (default)")
     fmt.add_argument("--table", dest="fmt", action="store_const", const="table", default=default,
-                     help="print a compact table (default)")
+                     help="print a compact table instead of JSON")
     parser.add_argument("--anonymous", action="store_true", default=flag_default,
                         help="ignore ~/.netrc; no Authorization header, no /a/ prefix")
     parser.add_argument("-v", "--verbose", action="store_true", default=flag_default,

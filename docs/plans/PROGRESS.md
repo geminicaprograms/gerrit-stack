@@ -3,7 +3,7 @@
 Links: [SPEC](/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/plans/2026-09-29-stack-changes-talk-and-gerrit-stack-plugin.md) · [Execution plan](/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/plans/2026-09-29-part1-execution-plan.md) · [Agent brief](AGENT-BRIEF.md)
 
 ## Resume here
-Fan-out in progress (2026-09-29 evening): agents A0, A3, A4, A5, A6, A7, A8, A11 running; A10 done. Probe (b) (official eval + git hooks) running. Next: when A0 finishes → launch A1 + A2; when probe (b) result known → launch A9; then Phase 3 reviews, Phase 4 integration. Uncommitted agent output = files present in the tree without a `wip(<WP>)` commit; `ls docs/plans/status/` shows who finished.
+2026-09-30: the 2026-09-29 fan-out was cut by the account session limit (HTTP 429) — agents A0, A3, A4, A6, A7, A9, A11 and two reviewers died mid-work; their partial files were committed as `wip(partial)`. Relaunch order: wave 1 = A0-lib (resume: tests exist, libs missing), A3-rest (verify/finish), A4-stack (verify/finish), A7-demo (fresh); wave 2 = A6-review (verify), A9-evals (fresh), A11-metrics (resume), then A1 + A2 (after A0), then Phase 3 reviews and Phase 4. Keep ≤ 4 agents concurrent to stay under the session limit.
 
 ## Phase status
 | Phase / WP | Status | Commit | Verified by | Notes |
@@ -18,18 +18,18 @@ Fan-out in progress (2026-09-29 evening): agents A0, A3, A4, A5, A6, A7, A8, A11
 | P0.6c CLAUDE_PLUGIN_ROOT in SKILL.md | done | — | `claude -p --plugin-dir . /gerrit-stack:probe` → `PLUGIN_ROOT=/Users/jcentkowski/workspace/open/gerrit-stack` | substituted inline in SKILL.md body |
 | P0.6d `if: Bash(git *)` compound | done | — | hook trace shows PreToolUse fired for `cd sub && git status` and `git -C sub status`, not for `echo hi` | single `if` entry suffices |
 | P1 foundation | in-progress | see git log | manifests, hooks.json, stubs, Makefile, CI, ledger committed; lib (A0) pending | |
-| A0 lib + test helpers | todo | | | |
+| A0 lib + test helpers | in-progress (partial: helpers.bash + lib.bats written, libs missing) | wip | | relaunched 09-30 |
 | A1 hooks | todo | | | |
 | A2 tools | todo | | | |
-| A3 gerrit-rest.py | todo | | | |
-| A4 skill gerrit-stack | todo | | | |
+| A3 gerrit-rest.py | in-progress (partial: script + tests written, unverified) | wip | | relaunched 09-30 |
+| A4 skill gerrit-stack | in-progress (partial: SKILL.md + 4 refs, unverified) | wip | | relaunched 09-30 |
 | A5 skill stack-planner | done (unreviewed) | wip | validate --strict ok; recipe exercised in scratch repo with real hook | open: headless evals must pre-approve the plan STOP; cross-layer 500 cap = planner judgement |
-| A6 skill gerrit-review | todo | | | |
-| A7 demo infra | todo | | | |
+| A6 skill gerrit-review | in-progress (partial: SKILL.md + 2 refs, unverified) | wip | | wave 2 |
+| A7 demo infra | todo (agent died before writing) | | | relaunched 09-30 |
 | A8 demo skeleton (in-tree) | done (unreviewed) | wip | in-tree build+test 60 s cold / 1–2 s warm; quick-check 0.6 s; `bats`-free (java) | config keys are flat: `pingMessage`, greeting → `greetingPrefix` |
-| A9 evals + runner | todo | | | |
+| A9 evals + runner | todo (agent died before writing) | | | wave 2 |
 | A10 docs | done (unreviewed) | wip | README/CHANGELOG/jj-stretch written; review in P3 | flagged: jj upload flags uncertain |
-| A11 metrics/benchmark | todo | | | |
+| A11 metrics/benchmark | in-progress (partial: chain-metrics.sh only) | wip | | wave 2 |
 | P3 review | todo | | | |
 | P4 integration | todo | | | |
 

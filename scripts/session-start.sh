@@ -1,7 +1,61 @@
 #!/usr/bin/env bash
-# STUB for Phase 0 probes — replaced by WP A1.
+# scripts/session-start.sh — SessionStart hook for gerrit-stack.
+#
+# Prints `additionalContext` describing the Gerrit setup of the session's cwd
+# (remote/host/branch/project, commit-msg hook state, local chain length) and
+# the default workflow. Silent (exit 0, no output) outside Gerrit repos.
+# Fail-open: any unexpected error exits 0 silently.
 set -uo pipefail
-input=$(cat)
-cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)
-if [ -n "${GERRIT_STACK_TRACE:-}" ]; then printf '%s\t%s\t%s\n' "session-start" "$(printf '%s' "$input" | jq -r '.hook_event_name // "?"')" "$cmd" >> "$GERRIT_STACK_TRACE"; fi
+trap 'exit 0' ERR
+
+command -v jq >/dev/null 2>&1 || exit 0
+input=$(cat 2>/dev/null) || exit 0
+[ -n "$input" ] || exit 0
+cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null) || exit 0
+[ -n "$cwd" ] || exit 0
+[ -d "$cwd" ] || exit 0
+cd "$cwd" || exit 0
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/chain.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/chain.sh"
+
+gs_detect || exit 0
+
+plugin_root=${CLAUDE_PLUGIN_ROOT:-}
+if [ -z "$plugin_root" ]; then
+  plugin_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P) || plugin_root=''
+fi
+install_cmd="bash \"${plugin_root}/scripts/install-commit-msg-hook.sh\""
+
+if [ "${GS_HOOK_OK:-0}" = 1 ]; then
+  hook_state="installed"
+else
+  hook_state="MISSING (run: $install_cmd)"
+fi
+
+# shellcheck disable=SC2119  # base defaults to $GS_BASE
+chain=$(gs_chain_commits)
+n=0
+if [ -n "$chain" ]; then n=$(printf '%s\n' "$chain" | grep -c '' || true); fi
+if [ -n "${GS_BASE:-}" ]; then
+  base_disp=${GS_BASE#refs/remotes/}
+  base_disp=${base_disp#refs/heads/}
+  chain_disp="$n ahead of $base_disp"
+else
+  chain_disp="unknown (no remote tracking base: fetch $GS_REMOTE first)"
+fi
+
+host_disp=${GS_HOST:-}
+[ -n "$host_disp" ] || host_disp="(not http)"
+
+text="[gerrit-stack] This repository pushes to Gerrit.
+remote: $GS_REMOTE; host: $host_disp; branch: $GS_BRANCH; project: $GS_PROJECT
+commit-msg hook: $hook_state
+local chain: $chain_disp
+Default workflow (not optional): for any change touching more than one file, invoke the gerrit-stack skill BEFORE editing. It plans a relation chain (stack-planner), one concern per commit (the Change-Id comes from the commit-msg hook — never write it by hand), and pushes HEAD:refs/for/$GS_BRANCH only after the user's explicit confirmation. Grouping (none / hashtag / topic) is the user's choice — never assume it. Review feedback: gerrit-review skill. Chain status: Gerrit MCP get_related_changes."
+
+gs_trace session-start start context
+jq -cn --arg ctx "$text" \
+  '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$ctx}}'
 exit 0

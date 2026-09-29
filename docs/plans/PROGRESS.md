@@ -27,7 +27,7 @@ Links: [SPEC](/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/p
 | A6 skill gerrit-review | done (unreviewed) | wip | validate --strict ok; tool signatures cross-checked against gerrit-mcp main.py | |
 | A7 demo infra | done (unreviewed) | wip | live: seed 2 s / re-seed 0.5 s idempotent; throwaway change 1 reviewed+abandoned; container healthy | ACL fix: admins lack push on refs/heads → seed grants on demo-plugin; container rewrites etc/gerrit.config (serverId) — pristine copy committed, live file left modified |
 | A8 demo skeleton (in-tree) | done (unreviewed) | wip | in-tree build+test 60 s cold / 1–2 s warm; quick-check 0.6 s; `bats`-free (java) | config keys are flat: `pingMessage`, greeting → `greetingPrefix` |
-| A9 evals + runner | todo (agent died before writing) | | | wave 2 |
+| A9 evals + runner | done (unreviewed) | wip | unittest 22/22; fixtures build; smoke trigger-stack-planner = 1.0 (8 turns, 32 s, $0.37) | full run in P4 |
 | A10 docs | done (unreviewed) | wip | README/CHANGELOG/jj-stretch written; review in P3 | flagged: jj upload flags uncertain |
 | A11 metrics/benchmark | done (unreviewed) | wip | bats 9/9, unittest 12/12, bench fixtures build, collect.py renders placeholder | full benchmark run in P4 |
 | P3 review | todo | | | |

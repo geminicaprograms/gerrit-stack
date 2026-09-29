@@ -20,7 +20,7 @@ Links: [SPEC](/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/p
 | P1 foundation | done | see git log | manifests, hooks.json, Makefile, CI, ledger, libs + test helpers | |
 | A0 lib + test helpers | done | feat | `bats tests/lib.bats` 37/37; shellcheck clean; helpers frozen | gs_detect never cd's; trailers via last-paragraph footer semantics |
 | A1 hooks | done (unreviewed) | feat | bats hooks 37/37 (suite 116/116); live `claude -p` smoke: push → ask, no refs/for on remote | budget check gated on diff-budget.sh being executable |
-| A2 tools | todo | | | |
+| A2 tools | done (unreviewed) | feat | bats tools 33/33 (also under /bin/bash 3.2); real 3-commit chain rendered in experiments/gerrit-split | diff-budget exit 2 = usage, 1/3 = budget verdicts |
 | A3 gerrit-rest.py | done (unreviewed) | wip | 55/55 unittest; CLI smoke incl. netrc auth, 404 → exit 1 | default output JSON, `--table` opt-in; review-metrics emits JSON Lines |
 | A4 skill gerrit-stack | done (unreviewed) | wip | validate --strict ok; audited vs SPEC 140–145 + contract; no `cd &&`, no trailers | open: chain-editing §8 copies an existing Change-Id back (recovery) — reviewer to confirm |
 | A5 skill stack-planner | done (unreviewed) | wip | validate --strict ok; recipe exercised in scratch repo with real hook | open: headless evals must pre-approve the plan STOP; cross-layer 500 cap = planner judgement |

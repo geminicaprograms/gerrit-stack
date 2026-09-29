@@ -104,6 +104,7 @@ fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/chain-metrics.XXXXXX") || die_usage "mktemp failed"
 WT=""
+# shellcheck disable=SC2329  # invoked via the EXIT trap
 cleanup() {
   if [ -n "$WT" ] && [ -d "$WT" ]; then
     git -C "$WT" rebase --abort >/dev/null 2>&1 || true
@@ -159,7 +160,10 @@ commit_message() { # <sha> -> message body on stdout (everything after the heade
   git cat-file commit "$1" | awk 'body { print; next } /^$/ { body = 1 }'
 }
 
-# Per-change rows: sha \t lines \t files \t cids \t type \t fixup \t within \t single \t subject
+# Per-change rows, TAB-separated: sha, lines, files, cids, type ("-" when the
+# subject is not a Conventional Commit: `read` with IFS=TAB collapses empty
+# fields, so a placeholder keeps the columns aligned), fixup, within, single,
+# subject (last field, may contain TABs/spaces).
 ROWS=$TMP/rows
 : > "$ROWS"
 CIDS=$TMP/cids
@@ -180,7 +184,7 @@ while IFS= read -r sha; do
     | awk '{ if ($1 != "-") a += $1; if ($2 != "-") a += $2; f++ } END { printf "%d %d\n", a + 0, f + 0 }')
   lines=${stat% *}
   files=${stat#* }
-  ctype=""
+  ctype="-"
   if [[ $subject =~ $CONV_RE ]]; then ctype=${BASH_REMATCH[1]}; fi
   fixup=false
   if [[ $subject =~ $FIXUP_RE ]]; then fixup=true; fi
@@ -188,7 +192,7 @@ while IFS= read -r sha; do
   if [ "$lines" -le "$BUDGET_LINES" ] && [ "$files" -le "$BUDGET_FILES" ]; then within=true; fi
   # single concern: a type, no " and ", at most one type token in the subject
   single=false
-  if [ -n "$ctype" ]; then
+  if [ "$ctype" != "-" ]; then
     lower=$(printf '%s' "$subject" | tr '[:upper:]' '[:lower:]')
     tokens=0
     for w in $subject; do
@@ -240,13 +244,11 @@ if [ -n "$VERIFY_CMD" ] && [ "$CHAIN_LENGTH" -gt 0 ]; then
   else
     VERIFY_ERROR="git worktree add failed"
   fi
-  cleanup_wt_now=1
-  if [ "$cleanup_wt_now" -eq 1 ]; then
-    git -C "$WT" rebase --abort >/dev/null 2>&1 || true
-    git worktree remove --force "$WT" >/dev/null 2>&1 || true
-    git worktree prune >/dev/null 2>&1 || true
-    WT=""
-  fi
+  # Drop the temporary worktree right away (cleanup() would too, on EXIT).
+  git -C "$WT" rebase --abort >/dev/null 2>&1 || true
+  git worktree remove --force "$WT" >/dev/null 2>&1 || true
+  git worktree prune >/dev/null 2>&1 || true
+  WT=""
 fi
 
 # ------------------------------------------------------------- hook trace ----
@@ -344,7 +346,7 @@ LINES_MAX=$(sorted_stat 2 max)
 FILES_MEDIAN=$(sorted_stat 3 median)
 WITHIN_PCT=$(pct_of "$(count_col_eq 7 true)")
 ONE_CID_PCT=$(pct_of "$(count_col_eq 4 1)")
-CONV_COUNT=$(awk -F'\t' '$5 != "" { c++ } END { print c + 0 }' "$ROWS")
+CONV_COUNT=$(awk -F'\t' '$5 != "-" { c++ } END { print c + 0 }' "$ROWS")
 CONV_PCT=$(pct_of "$CONV_COUNT")
 SINGLE_PCT=$(pct_of "$(count_col_eq 8 true)")
 FIXUPS_PRESENT=false
@@ -367,7 +369,7 @@ while IFS=$'\t' read -r sha lines files cids ctype fixup within single subject; 
       fail) builds=false ;;
     esac
   fi
-  if [ -n "$ctype" ]; then ctype_json="\"$ctype\""; else ctype_json=null; fi
+  if [ "$ctype" != "-" ]; then ctype_json="\"$ctype\""; else ctype_json=null; fi
   jq -cn --arg sha "$sha" --arg subject "$subject" --argjson lines "$lines" --argjson files "$files" \
     --argjson cids "$cids" --argjson ctype "$ctype_json" --argjson fixup "$fixup" \
     --argjson within "$within" --argjson single "$single" --argjson builds "$builds" '

@@ -29,7 +29,7 @@ Links: [SPEC](/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/p
 | A8 demo skeleton (in-tree) | done (unreviewed) | wip | in-tree build+test 60 s cold / 1–2 s warm; quick-check 0.6 s; `bats`-free (java) | config keys are flat: `pingMessage`, greeting → `greetingPrefix` |
 | A9 evals + runner | todo (agent died before writing) | | | wave 2 |
 | A10 docs | done (unreviewed) | wip | README/CHANGELOG/jj-stretch written; review in P3 | flagged: jj upload flags uncertain |
-| A11 metrics/benchmark | in-progress (partial: chain-metrics.sh only) | wip | | wave 2 |
+| A11 metrics/benchmark | done (unreviewed) | wip | bats 9/9, unittest 12/12, bench fixtures build, collect.py renders placeholder | full benchmark run in P4 |
 | P3 review | todo | | | |
 | P4 integration | todo | | | |
 

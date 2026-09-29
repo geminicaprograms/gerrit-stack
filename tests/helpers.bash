@@ -7,6 +7,9 @@
 # outside it. Change-Id trailers are never hand-written: fixtures install the
 # real Gerrit commit-msg hook from tests/fixtures/commit-msg.
 
+# `run --separate-stderr` (used by run_hook and the lib tests) needs this.
+bats_require_minimum_version 1.5.0
+
 REPO_ROOT=$(cd "${BATS_TEST_DIRNAME:?}/.." && pwd -P)
 export REPO_ROOT
 FIXTURE_HOOK="$REPO_ROOT/tests/fixtures/commit-msg"

@@ -17,8 +17,8 @@ Links: [SPEC](/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/p
 | P0.6b eval hook-disable probe | blocked (documented) | — | official runner refuses Bash-granting runs here: `~/.docker/cli-plugins/*` symlinks (Docker Desktop); `DOCKER_CONFIG` does not bypass | → `evals/run.py` is the local runner; official `claude plugin eval --trust-plugin` in CI |
 | P0.6c CLAUDE_PLUGIN_ROOT in SKILL.md | done | — | `claude -p --plugin-dir . /gerrit-stack:probe` → `PLUGIN_ROOT=/Users/jcentkowski/workspace/open/gerrit-stack` | substituted inline in SKILL.md body |
 | P0.6d `if: Bash(git *)` compound | done | — | hook trace shows PreToolUse fired for `cd sub && git status` and `git -C sub status`, not for `echo hi` | single `if` entry suffices |
-| P1 foundation | in-progress | see git log | manifests, hooks.json, stubs, Makefile, CI, ledger committed; lib (A0) pending | |
-| A0 lib + test helpers | in-progress (partial: helpers.bash + lib.bats written, libs missing) | wip | | relaunched 09-30 |
+| P1 foundation | done | see git log | manifests, hooks.json, Makefile, CI, ledger, libs + test helpers | |
+| A0 lib + test helpers | done | feat | `bats tests/lib.bats` 37/37; shellcheck clean; helpers frozen | gs_detect never cd's; trailers via last-paragraph footer semantics |
 | A1 hooks | todo | | | |
 | A2 tools | todo | | | |
 | A3 gerrit-rest.py | done (unreviewed) | wip | 55/55 unittest; CLI smoke incl. netrc auth, 404 → exit 1 | default output JSON, `--table` opt-in; review-metrics emits JSON Lines |

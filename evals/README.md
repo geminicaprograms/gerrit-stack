@@ -43,6 +43,11 @@ Exit codes: `0` overall score ≥ threshold · `1` below threshold · `2` partia
 | `mcp-only` | no | loaded via `--plugin-dir` | MCP tools but none of our skills/hooks |
 | `without` | no | not loaded | vanilla Claude Code |
 
+For `with` and `mcp-only` the runner also appends the permission rule `mcp__plugin_gerrit_gerrit`
+to `--allowedTools`, so the MCP server's tools are usable in a headless session (added
+2026-09-30; before that every `mcp__…` call was auto-denied — the earlier benchmark arms
+never used an MCP tool, see docs/benchmark-unprompted.md).
+
 `--ablation` = `with,without`. Per case the runner reports the score of each arm and
 `delta` = with − without (or with − mcp-only when `without` was not run).
 

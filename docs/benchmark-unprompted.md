@@ -15,6 +15,12 @@ Same prompts, same fixture repos (`evals/bench/*/fixture.sh` on the demo skeleto
 - **B — `mcp-only`**: vanilla + the official `gerrit@gerrit-mcp` plugin (its `gerrit-workflow` skill).
 - **C — `with`**: B + `gerrit-stack` (this plugin). **C vs B is the honest claim**; C vs A shows the floor.
 
+> **Caveat (found 2026-09-30):** the runs below were made before the runner allowed the
+> `mcp__plugin_gerrit_gerrit` tools in headless mode, so in arms B and C every MCP call would
+> have been auto-denied. The traces show no MCP call was attempted in these runs (the agents
+> worked with git and the skills alone), so B differed from A only by the `gerrit-workflow`
+> skill text. Rework-benchmark runs from `rework-smoke-2` on have the tools allowed.
+
 Outcome metrics come from `scripts/chain-metrics.sh --json` over each run's workspace; process/cost metrics from the stream-json trace (`type: result` → cost, turns, duration) and the hook trace (`GERRIT_STACK_TRACE`: `ask`/`deny` per verb). Cells are `mean / median` over runs; deltas are differences of means.
 
 ## Sources

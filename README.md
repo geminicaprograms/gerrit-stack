@@ -241,3 +241,6 @@ The benchmark run (arm A vanilla, arm B vanilla + `gerrit@gerrit-mcp`, arm C
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).
+
+| Gerrit MCP tools fail with `curl: (35) … tlsv1 alert protocol version` against a plain-HTTP Gerrit (e.g. the local demo) | The official server rewrites `http://` to `https://` for every host | Put TLS in front of the instance (see `demo/RUN.md`), or let the skills use the REST fallback (`gerrit-rest.py`, which honours `http://`) |
+| MCP tools are named `mcp__plugin_gerrit_gerrit__<tool>` | Plugin-scoped naming in Claude Code (`mcp__plugin_<plugin>_<server>__<tool>`) | Grant/allow them with that prefix, e.g. `--allowedTools mcp__plugin_gerrit_gerrit__get_related_changes` |

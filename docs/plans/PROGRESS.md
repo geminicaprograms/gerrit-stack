@@ -5,7 +5,7 @@ Links: [SPEC](/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/p
 ## Resume here
 **Part 1 complete (2026-09-30)** except two items: (1) M2 works only with the local gerrit-mcp patch (`demo/patch-gerrit-mcp.sh`; propose upstream); (2) eval and benchmark were run once per case (`--runs 1`); repeat with `--runs 2`/`3` before tagging v0.1.0. Next steps: W3 rehearsal with `demo/RUN.md` (demo Gerrit is up on :8080 with chain 2–4 pushed; `make demo-reset` for a clean slate), Part 2 deck. Follow-ups listed at the bottom.
 
-**Now resuming in the "Rework benchmark" phase below** (W1 runner, W2 cases, W3 collector, W4 docs building in parallel against the binding contract in `.claude/plans/2026-09-30-rework-benchmark-plan.md`); Batch 1 (smoke, `rate-limited-ping` only) is queued behind it.
+**Rework benchmark (2026-09-30): W1–W4 built, reviewed and committed (b51de8b → 2270d54); smoke pipeline verified live (`evals/results/rework-smoke-2`, changes 16–19, PS2 on 16). Batch 1 (12 pipelines on `rate-limited-ping`, `-j 3`) running into `evals/results/rework-batch-1`; if it is missing or partial, re-run the command in `evals/README.md` § Rework, then `collect.py` → `docs/benchmark-unprompted.md`, then greeting + maintenance-mode.**
 
 ## Rework benchmark
 
@@ -13,11 +13,11 @@ Extends the unprompted benchmark past "chain pushed" through review feedback →
 
 | Phase / WP | Status | Commit | Verified by | Notes |
 |---|---|---|---|---|
-| W1 runner (`evals/run.py`, `tests/test_run.py`) | in-progress | — | — | 2026-09-30 |
-| W2 cases (`evals/bench-unprompted/{greeting,rate-limited-ping,maintenance-mode}/`) | in-progress | — | — | 2026-09-30 |
-| W3 collector (`evals/metrics/collect.py`, `tests/test_collect.py`, `docs/benchmark-unprompted.md`) | in-progress | — | — | 2026-09-30 |
-| W4 docs (`evals/README.md`, `README.md`, `CHANGELOG.md`, this ledger) | in-progress | — | — | 2026-09-30 |
-| Batch 1 = smoke on `rate-limited-ping`, 12 pipelines | todo | — | — | fix+split × natural+nudged × 3 arms, 1 run/cell, ≈ $25; gates the full 3-case matrix |
+| W1 runner (`evals/run.py`, `tests/test_run.py`) | done | b51de8b, a5b4d7f | 59 unit tests; dry-run; live smoke 1+2 | smoke 1 found: MCP tools auto-denied (rule `mcp__plugin_gerrit_gerrit` added), plain-text file content, origin/master out of sync after the first push, reply regex; reviewer found the `no new changes` chain drop |
+| W2 cases (`evals/bench-unprompted/{greeting,rate-limited-ping,maintenance-mode}/`) | done | b51de8b, a5b4d7f | parse_yaml, dry-run, smoke 2 | fix demands rewritten to caps (10000 / 40 chars / 200 chars) after stage 1 pre-satisfied the first version |
+| W3 collector (`evals/metrics/collect.py`, `tests/test_collect.py`, `docs/benchmark-unprompted.md`) | done | b51de8b | 24 unit tests; legacy dirs render byte-identically; smoke 2 rendered | — |
+| W4 docs (`evals/README.md`, `README.md`, `CHANGELOG.md`, this ledger) | done | b51de8b, 2270d54 | make validate | MCP allowlist caveat added to docs/benchmark-unprompted.md |
+| Batch 1 = smoke on `rate-limited-ping`, 12 pipelines | in-progress | — | — | started 2026-09-30 20:30 into `evals/results/rework-batch-1`; fix+split × natural+nudged × 3 arms, 1 run/cell, ≈ $25; gates the full 3-case matrix |
 
 Decisions (user, 2026-09-30):
 - Feedback types: (1) local blocking fix on one concern, (2) "split this change" on the biggest change.
@@ -26,7 +26,7 @@ Decisions (user, 2026-09-30):
 - Cases: `greeting` (the original demo prompt `demo/feature-request.md`), `rate-limited-ping`, `maintenance-mode`; arms `with`, `mcp-only`, `without`.
 - Batch 1 = smoke on `rate-limited-ping` only, full matrix (fix+split × natural+nudged × 3 arms = 12 pipelines, ≈ $25, 1 run per cell); `greeting` + `maintenance-mode` follow once the pipeline and metrics are validated.
 - Implement `-j 3` in the runner (cases/pipelines parallel within an arm, arms sequential).
-- Status: plan approved for build; implementation not started (user asked to discuss first) as of the plan's own timestamp — W1–W4 have since started per the phase table above.
+- Status: built 2026-09-30 (see the phase table).
 
 ## Phase status
 | Phase / WP | Status | Commit | Verified by | Notes |

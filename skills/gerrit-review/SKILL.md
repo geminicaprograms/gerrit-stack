@@ -15,7 +15,7 @@ Change-Id and patch-set semantics. Do not restate either here — hand off.
 
 ## Tool map
 
-MCP tools are exposed as `mcp__gerrit__<name>`. If they are absent, use the fallback script
+MCP tools are exposed as `mcp__plugin_gerrit_gerrit__<name>`. If they are absent, use the fallback script
 (auth via `~/.netrc`, host from `--host` → `GERRIT_HOST` → `git config gerrit-stack.host` → remote URL).
 `change` = change number, Change-Id, or `project~branch~Change-Id`; from a URL `/c/<proj>/+/<n>` use `<n>`.
 

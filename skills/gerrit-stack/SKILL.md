@@ -60,7 +60,7 @@ branch is already grouped by parent-child; `none` is the recommended answer.
 | Compose the push command | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/push-chain.sh" [--wip]` |
 | REST fallback when MCP is unavailable | `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/gerrit-rest.py" <cmd> …` |
 
-MCP tools come from the `gerrit` server (`mcp__gerrit__*`). When the server is not
+MCP tools come from the `gerrit` server (`mcp__plugin_gerrit_gerrit__*`). When the server is not
 configured (`/gerrit:setup`) or unreachable, use the fallback column:
 
 | Need | MCP | Fallback (`gerrit-rest.py`) |
@@ -85,7 +85,7 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
    Prints remote, host, branch, project, hook status, MCP hint, chain length.
 2. Exit 1 with `hook: MISSING`: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-commit-msg-hook.sh"`,
    then re-run step 1. Do not commit until it reports installed.
-3. MCP: if `mcp__gerrit__*` tools are absent or a call fails, use the fallback column
+3. MCP: if `mcp__plugin_gerrit_gerrit__*` tools are absent or a call fails, use the fallback column
    for the rest of the session and tell the user once (`/gerrit:setup` fixes it).
 4. Existing chain (N > 0)? Show the table and ask whether the work continues it.
 

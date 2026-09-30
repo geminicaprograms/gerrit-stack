@@ -70,7 +70,7 @@ Threading algorithm on raw JSON:
 2. Sort the thread by `updated`; `thread.unresolved = last.unresolved`; `thread.reply_to = last.id`.
 3. `thread.summary` = first line of `root.message`; `thread.author` = `root.author.name`.
 
-**MCP output is text, not JSON.** `mcp__gerrit__list_change_comments` renders each comment as
+**MCP output is text, not JSON.** `mcp__plugin_gerrit_gerrit__list_change_comments` renders each comment as
 `L<line>: [<author name>] (<updated>) - UNRESOLVED|RESOLVED id=<id>` followed by the indented message,
 grouped under `File: <path>` headers, and **omits `in_reply_to`, `patch_set` and `range`**. Approximate
 threads by `(path, line)` in listed order and use the last entry's status; when a line carries

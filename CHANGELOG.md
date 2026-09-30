@@ -43,8 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plan-before-code, push-requires-confirm, no-manual-change-id,
   split-over-budget, review-reply-conventional) plus
   `evals/fixtures/gerrit-rest-stub.py`, and a stdlib `evals/run.py` runner
-  compatible with the official case format (used because `claude plugin
-  eval` is early-access on some Claude Code installs).
+  compatible with the official case format (needed where the official
+  sandbox refuses Bash-granting cases and for the three-arm benchmark).
 - Benchmark: `scripts/chain-metrics.sh`, three `evals/bench/` cases,
   `evals/metrics/collect.py`, and `docs/benchmark.md`, measuring
   gerrit-stack against vanilla Claude Code and vanilla + `gerrit@gerrit-mcp`.

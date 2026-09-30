@@ -175,11 +175,14 @@ fallback triggers).
 make check       # validate + lint + bats + python unittest
 ```
 
-`claude plugin eval` is early-access on some Claude Code installs (gated on
-the machine this plugin was built on); `evals/run.py` is a stdlib runner over
+`claude plugin eval` (Claude Code ≥ 2.1.269, pass `--trust-plugin` in CI) is
+the reference runner. Two reasons `evals/run.py` exists as well: on macOS with
+Docker Desktop the official sandbox refuses Bash-granting cases (symlinks under
+`~/.docker`), and the benchmark needs a third arm (gerrit-mcp only) that the
+official with/without ablation cannot express. `run.py` is a stdlib runner over
 the same case format (`prompt.md` frontmatter + `graders/*.md`) that drives
-`claude -p --plugin-dir … --output-format stream-json` directly, so the eval
-cases stay compatible with the official runner once it's available:
+`claude -p --plugin-dir … --output-format stream-json` directly, so the cases
+stay 100 % compatible with the official runner:
 
 ```
 make eval         # python3 evals/run.py --runs 2 --threshold 0.8

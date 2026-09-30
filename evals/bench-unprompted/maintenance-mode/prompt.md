@@ -4,7 +4,7 @@ name: maintenance-mode
 description: Unprompted variant, 5-6 concern feature — plain product request, no repo rules (maintenance mode with capability, REST toggle, ping 503, SSH).
 tags: [bench, unprompted, deep]
 runs: 3
-max_turns: 60
+max_turns: 80
 timeout_seconds: 1500
 allowed_tools: [Read, Glob, Grep, Edit, Write, Bash, Skill]
 ---

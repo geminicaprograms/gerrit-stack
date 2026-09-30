@@ -4,7 +4,7 @@ name: health-checks
 description: Unprompted variant, 5-6 concern feature — plain product request, no repo rules (health endpoint with pluggable checks, TTL cache, SSH).
 tags: [bench, unprompted, deep]
 runs: 3
-max_turns: 60
+max_turns: 80
 timeout_seconds: 1500
 allowed_tools: [Read, Glob, Grep, Edit, Write, Bash, Skill]
 ---

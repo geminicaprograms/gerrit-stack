@@ -4,7 +4,7 @@ name: ping-audit-persist
 description: Unprompted variant, 5-6 concern feature — plain product request, no repo rules (ping audit log with persistence, read views, owner-only clear).
 tags: [bench, unprompted, deep]
 runs: 3
-max_turns: 60
+max_turns: 80
 timeout_seconds: 1500
 allowed_tools: [Read, Glob, Grep, Edit, Write, Bash, Skill]
 ---

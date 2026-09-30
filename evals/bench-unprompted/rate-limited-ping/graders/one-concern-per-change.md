@@ -1,7 +1,6 @@
 ---
 type: llm
 weight: 3
-focus: commit structure and process discipline of a Gerrit relation chain
 ---
 
 The prompt was a plain product request with NO instructions about commits, chains,

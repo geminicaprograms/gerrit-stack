@@ -1,7 +1,6 @@
 ---
 type: llm
 weight: 3
-focus: commit structure and process discipline of a Gerrit relation chain
 ---
 
 Score the run against these criteria (all must hold for full marks; give

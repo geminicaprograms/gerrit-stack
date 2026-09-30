@@ -693,14 +693,23 @@ def _truncate(s: str, n: int) -> str:
     return s if len(s) <= n else s[:n] + f"… [+{len(s) - n} chars]"
 
 
+JUDGE_FOCUS_VALUES = ("all", "trace", "tools", "last_message", "files")
+
+
 def judge_prompt(rubric: str, focus: Any, ctx: GradeContext, max_calls: int = 120) -> str:
     focus = str(focus or "all")
+    hint = ""
+    if focus not in JUDGE_FOCUS_VALUES:
+        # Free-text focus (e.g. "commit structure"): keep it as a hint for the judge and show
+        # the full evidence; a typo must never silently strip the evidence.
+        hint, focus = focus, "all"
     parts = [
         "You are grading one run of an automated coding-agent evaluation. Decide whether the run satisfies "
         "the rubric below, judging only on the evidence shown. Do not use any tools.",
         "",
         "## Rubric",
         rubric.strip() or "(empty rubric)",
+        *(["", f"Focus on: {hint}"] if hint else []),
         "",
         "## Evidence",
     ]

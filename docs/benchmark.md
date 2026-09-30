@@ -4,6 +4,9 @@
 
 Does the plugin make an agent produce Gerrit relation chains that are smaller, correct, and cheaper to get to review than the same agent without it? Three arms on identical tasks; see targets at the bottom.
 
+
+> **Caveat for the 2026-09-30 run:** the `one-concern-per-change` llm grader carried a free-text `focus:` that the runner treated as a target name, so the judge received no evidence and failed every run; the *eval score* column (0.57 everywhere) is therefore meaningless for that run. Chain, cost and turn metrics are unaffected. Fixed in the runner and graders; re-run pending.
+
 ## Arms
 
 Same prompts, same fixture repos (`evals/bench/*/fixture.sh` on the demo skeleton, real commit-msg hook, local bare remote), three arms:

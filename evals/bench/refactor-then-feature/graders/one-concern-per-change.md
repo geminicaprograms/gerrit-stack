@@ -1,7 +1,6 @@
 ---
 type: llm
 weight: 3
-focus: refactor/feature separation and ordering in a relation chain
 ---
 
 Score the run against these criteria (all must hold for full marks; give

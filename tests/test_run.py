@@ -377,3 +377,21 @@ class AllowedToolsTerminationTest(unittest.TestCase):
             self.assertEqual(cmd[-1], "PROMPT")
             i = cmd.index("--allowedTools")
             self.assertTrue(cmd[i + 2].startswith("--"), cmd)
+
+
+class JudgeFocusTest(unittest.TestCase):
+    def test_free_text_focus_keeps_evidence(self):
+        import importlib.util, os
+        here = os.path.dirname(os.path.abspath(__file__))
+        spec = importlib.util.spec_from_file_location("run_mod2", os.path.join(here, "..", "evals", "run.py"))
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        class T:  # minimal trace stub
+            tool_calls = []
+            last_message = "FINAL MESSAGE TEXT"
+        class C:
+            trace = T()
+            def files_text(self): return ""
+        p = mod.judge_prompt("rubric", "commit structure and discipline", C())
+        self.assertIn("Focus on: commit structure", p)
+        self.assertIn("FINAL MESSAGE TEXT", p)
+        self.assertIn("Tool calls in order", p)

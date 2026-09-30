@@ -1,7 +1,6 @@
 ---
 type: llm
 weight: 3
-focus: whether a one-concern task stayed one small change
 ---
 
 Score the run against these criteria (all must hold for full marks; give

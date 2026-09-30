@@ -517,7 +517,7 @@ def _rework_case(tmp, name="rl", rework=True, graders_rework=True, prompt_overri
               "    message: \"issue (blocking): clamp it; add a test for `-1`.\"\n"
               "  split:\n"
               "    concerns: [setting, limiter, REST 429, SSH message, tests]\n"
-              "    message: \"issue (blocking): this change mixes {n} concerns ({concerns}); split it so each can be reviewed and reverted alone.\"\n")
+              "    message: \"issue (blocking): this change touches {n} production files ({files}) and mixes several concerns ({concerns}); split it so each concern can be reviewed and reverted alone.\"\n")
         if prompt_override:
             y += "  prompt: |\n    " + prompt_override + "\n"
         y += ("nudges:\n"
@@ -667,16 +667,18 @@ class TargetSelectionTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             run.select_target("fix", spec, [], self._files, lambda n, p: "")
 
-    def test_split_largest(self):
+    def test_split_most_production_files(self):
         spec = {"concerns": ["setting", "limiter", "REST 429", "SSH message", "tests"],
-                "message": "issue (blocking): this change mixes {n} concerns ({concerns}); split it."}
+                "message": "issue (blocking): this change touches {n} production files ({files}) and mixes several concerns ({concerns}); split it."}
         t = run.select_target("split", spec, CANNED_CHANGES, self._files, lambda n, p: "")
-        self.assertEqual(t["change"]["_number"], 22)
-        self.assertEqual(t["message"], "issue (blocking): this change mixes 5 concerns (setting, limiter, REST 429, SSH message, tests); split it.")
+        self.assertEqual(t["change"]["_number"], 22)  # RateLimiter.java + PingRest.java; 23 is tests only
+        self.assertEqual(t["message"], "issue (blocking): this change touches 2 production files (PingRest.java, RateLimiter.java) "
+                                       "and mixes several concerns (setting, limiter, REST 429, SSH message, tests); split it.")
         self.assertEqual(t["path"], "src/main/java/com/example/PingRest.java")
         self.assertEqual(t["line"], 1)
+        self.assertNotIn("skipped", t)
         d = run.select_target("split", {}, CANNED_CHANGES, self._files, lambda n, p: "")
-        self.assertIn("mixes 0 concerns", d["message"])
+        self.assertIn("touches 2 production files (PingRest.java, RateLimiter.java) and mixes several concerns ()", d["message"])
 
     def test_review_payload_is_minus_one_only(self):
         p = run.build_review_payload("src/A.java", 4, "issue (blocking): fix it")
@@ -1252,3 +1254,345 @@ class SmokeFollowupTest(unittest.TestCase):
         run.sync_origin_with_review(ws)
         self.assertEqual(git(ws, "rev-parse", "refs/remotes/origin/master"), git(ws, "rev-parse", "refs/remotes/review/master"))
         self.assertEqual(git(os.path.join(tmp, "origin.git"), "rev-parse", "refs/heads/master"), git(ws, "rev-parse", "HEAD"))
+
+
+# ==========================================================================
+# Batch-1 gaps (2026-09-30): uncommitted work, commits without Change-Id,
+# split applicability, stage-1 push failure recorded instead of raised.
+# ==========================================================================
+
+class LeftoverCommitTest(unittest.TestCase):
+    def test_commit_leftovers_through_hook(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        ws, (root, c1, c2) = make_chain_repo(tmp)
+        self.assertFalse(run.commit_leftovers(ws, "rl", 1))  # clean tree → nothing
+        self.assertEqual(_g(ws, "rev-parse", "HEAD"), c2)
+        with open(os.path.join(ws, "src/main/java/C.java"), "w") as fh:
+            fh.write("class C {}\n")
+        with open(os.path.join(ws, "src/main/java/A.java"), "a") as fh:
+            fh.write("// touched\n")
+        self.assertTrue(run.commit_leftovers(ws, "rl", 1))
+        head = _g(ws, "rev-parse", "HEAD")
+        self.assertEqual(_g(ws, "rev-parse", "HEAD^"), c2)  # one commit on top, never an amend
+        body = _g(ws, "show", "-s", "--format=%B", head)
+        self.assertTrue(body.startswith("feat: rl (left uncommitted by the agent; committed by the benchmark runner)"), body)
+        self.assertRegex(body, r"\nChange-Id: I[0-9a-f]{40}")  # the fixture hook ran
+        self.assertEqual(_g(ws, "status", "--porcelain"), "")
+        self.assertIn("C.java", _g(ws, "show", "--stat", "--format=", head))
+        with open(os.path.join(ws, "src/main/java/B.java"), "a") as fh:
+            fh.write("// stage 2\n")
+        self.assertTrue(run.commit_leftovers(ws, "rl", 2))
+        self.assertTrue(_g(ws, "show", "-s", "--format=%s", "HEAD").startswith("fix: rl (left uncommitted"))
+        self.assertEqual(_g(ws, "rev-parse", "HEAD^"), head)
+        chain = run.chain_commits(ws, root)
+        self.assertEqual(len(chain), 4)
+        self.assertTrue(all(c["change_id"] for c in chain))
+
+    def test_guardrail_left_uncommitted(self):
+        tr = run.parse_trace_lines(synthetic_trace())
+        g = run.stage_guardrails(tr, "/nonexistent", None, (None, None), (None, None), left_uncommitted=True)
+        self.assertEqual(g["bad_outcomes"]["left_uncommitted"], 1)
+        g0 = run.stage_guardrails(tr, "/nonexistent", None, (None, None), (None, None), left_uncommitted=False)
+        self.assertEqual(g0["bad_outcomes"]["left_uncommitted"], 0)
+        self.assertIsNone(run.stage_guardrails(tr, "/nonexistent", None, (None, None), (None, None))["bad_outcomes"]["left_uncommitted"])
+
+
+class SplitApplicabilityTest(unittest.TestCase):
+    def test_production_files(self):
+        files = {"src/main/java/A.java": {}, "src/main/resources/Documentation/about.md": {},
+                 "src/main/resources/static/x.js": {}, "src/test/java/T.java": {}, "README.md": {}, "/COMMIT_MSG": {}}
+        self.assertEqual(run.production_files(files), ["src/main/java/A.java", "src/main/resources/static/x.js"])
+
+    def test_split_target_by_production_files(self):
+        changes = [
+            {"_number": 1, "change_id": "I" + "1" * 40, "subject": "docs", "insertions": 500, "deletions": 0},
+            {"_number": 2, "change_id": "I" + "2" * 40, "subject": "two", "insertions": 10, "deletions": 0},
+            {"_number": 3, "change_id": "I" + "3" * 40, "subject": "two bigger", "insertions": 40, "deletions": 2},
+        ]
+        files = {1: {"src/main/resources/Documentation/a.md": {}, "src/main/resources/Documentation/b.md": {}, "README.md": {}},
+                 2: {"src/main/java/x/Limiter.java": {}, "src/main/java/x/Config.java": {}, "src/test/java/x/T.java": {}},
+                 3: {"src/main/java/x/Rest.java": {}, "src/main/java/x/Ssh.java": {}}}
+        spec = {"concerns": ["setting", "limiter"],
+                "message": "issue (blocking): this change touches {n} production files ({files}) and mixes several concerns ({concerns}); split it."}
+        t = run.select_target("split", spec, changes, lambda n: files[n], lambda n, p: "")
+        self.assertEqual(t["change"]["_number"], 3)  # tie on 2 production files → largest, docs-only change never wins
+        self.assertEqual(t["message"], "issue (blocking): this change touches 2 production files (Rest.java, Ssh.java) "
+                                       "and mixes several concerns (setting, limiter); split it.")
+        self.assertEqual(t["path"], "src/main/java/x/Rest.java")
+        self.assertEqual(t["production_files"], ["src/main/java/x/Rest.java", "src/main/java/x/Ssh.java"])
+        self.assertNotIn("skipped", t)
+        d = run.select_target("split", {}, changes, lambda n: files[n], lambda n, p: "")
+        self.assertIn("touches 2 production files (Rest.java, Ssh.java)", d["message"])
+
+    def test_split_not_applicable(self):
+        changes = [{"_number": 1, "change_id": "I" + "1" * 40, "insertions": 5, "deletions": 0},
+                   {"_number": 2, "change_id": "I" + "2" * 40, "insertions": 50, "deletions": 0}]
+        files = {1: {"src/main/java/A.java": {}, "src/test/java/AT.java": {}}, 2: {"src/main/java/B.java": {}, "docs/x.md": {}}}
+        t = run.select_target("split", {"concerns": ["a"]}, changes, lambda n: files[n], lambda n, p: "")
+        self.assertEqual(t["skipped"], run.SPLIT_NOT_APPLICABLE)
+        self.assertEqual(t["change"]["_number"], 2)
+        self.assertEqual(t["production_files"], ["src/main/java/B.java"])
+        none = run.select_target("split", {}, changes, lambda n: {"README.md": {}}, lambda n, p: "")
+        self.assertEqual(none["skipped"], run.SPLIT_NOT_APPLICABLE)
+        self.assertEqual(none["path"], "README.md")
+
+
+class ChangeIdRecoveryTest(unittest.TestCase):
+    def test_map_change_ids_by_sha(self):
+        chain = [{"sha": "a" * 40, "change_id": "I" + "1" * 40}, {"sha": "b" * 40, "change_id": None}, {"sha": "c" * 40, "change_id": None}]
+        gerrit = [{"_number": 5, "change_id": "I" + "1" * 40, "current_revision": "a" * 40},
+                  {"_number": 6, "change_id": "I" + "6" * 40, "current_revision": "b" * 40}]
+        self.assertEqual(run.map_change_ids_by_sha(chain, gerrit), 1)
+        self.assertEqual(chain[1]["change_id"], "I" + "6" * 40)
+        self.assertTrue(chain[1]["change_id_from_gerrit"])
+        self.assertIsNone(chain[2]["change_id"])
+        self.assertEqual(chain[0]["change_id"], "I" + "1" * 40)
+        self.assertNotIn("change_id_from_gerrit", chain[0])
+
+    def test_netrc_admin_and_require_change_id_toggle(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        netrc_path = os.path.join(d, "netrc")
+        with open(netrc_path, "w") as fh:
+            fh.write("machine localhost login admin password t0psecret\nmachine 127.0.0.1 login admin password t0psecret\n")
+        os.chmod(netrc_path, 0o600)
+        env = {"NETRC": netrc_path, "HOME": d}
+        self.assertEqual(run.netrc_auth("http://localhost:8080", env), ("admin", "t0psecret"))
+        self.assertIsNone(run.netrc_auth("http://gerrit.example.com", env))
+        self.assertIsNone(run.netrc_auth("http://localhost:8080", {"NETRC": os.path.join(d, "missing"), "HOME": d}))
+        calls = []
+        orig = run._urlopen
+
+        def fake(req, timeout=None):
+            calls.append((req.get_method(), req.full_url, json.loads(req.data) if req.data else None, req.get_header("Authorization")))
+            if "/config" in req.full_url and req.get_method() == "PUT":
+                return FakeResponse(b")]}'\n" + json.dumps({"require_change_id": {"value": True, "configured_value": json.loads(req.data)["require_change_id"]}}).encode())
+            raise urllib.error.HTTPError(req.full_url, 404, "nope", {}, io.BytesIO(b""))
+        run._urlopen = fake
+        self.addCleanup(setattr, run, "_urlopen", orig)
+        opts = argparse.Namespace(push_to=PUSH_URL)
+        import contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            restore = run.require_change_id_off(opts, env)
+            restore()
+        self.assertEqual([(m, u, b) for m, u, b, _ in calls],
+                         [("PUT", "http://localhost:8080/a/projects/demo-plugin/config", {"require_change_id": "FALSE"}),
+                          ("PUT", "http://localhost:8080/a/projects/demo-plugin/config", {"require_change_id": "INHERIT"})])
+        import base64 as _b
+        self.assertTrue(all(a == "Basic " + _b.b64encode(b"admin:t0psecret").decode() for *_, a in calls))
+        self.assertIn("demo-plugin -> FALSE", out.getvalue())
+        self.assertIn("demo-plugin -> INHERIT", out.getvalue())
+        self.assertNotIn("t0psecret", out.getvalue())
+        with self.assertRaises(ValueError):
+            run.set_require_change_id(run.GerritRest("http://x", "/a", "u", "p"), "p", "MAYBE")
+        # no netrc entry → no-op restore, nothing called
+        calls.clear()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            run.require_change_id_off(opts, {"NETRC": os.path.join(d, "missing"), "HOME": d})()
+        self.assertEqual(calls, [])
+        self.assertIn("no ~/.netrc entry", err.getvalue())
+        # REST failure on the PUT → warn, no restore call
+        def failing(req, timeout=None):
+            calls.append(req.get_method())
+            raise urllib.error.HTTPError(req.full_url, 403, "forbidden", {}, io.BytesIO(b"no"))
+        run._urlopen = failing
+        with contextlib.redirect_stderr(io.StringIO()):
+            run.require_change_id_off(opts, env)()
+        self.assertEqual(calls, ["PUT"])
+
+
+class PipelineGapsGlueTest(unittest.TestCase):
+    """run_pipeline against a real workspace with faked sessions/push/REST, for the batch-1 gaps."""
+
+    def _pipeline(self, scenario, *, stage1_edit=None, push1=None, files_for=None, nudged=False):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        case = _rework_case(tmp)
+        out_dir = os.path.join(tmp, "results", "run-9")
+        wstmp = tempfile.mkdtemp()
+        ws, (root, c1, c2) = make_chain_repo(wstmp)
+        state = {"stage": 0, "posts": [], "puts": []}
+
+        def fake_make_workspace(case_, opts, run_dir):
+            return wstmp, ws, {"EVAL_PLUGIN_ROOT": "x"}, None
+
+        def fake_run_stage(case_, prompt, graders, arm, ws_, env, stage_dir, opts, judge_factory, label, error=None, started=None):
+            state["stage"] += 1
+            os.makedirs(stage_dir, exist_ok=True)
+            lines = synthetic_trace(final="Draft reply: issue (blocking): done." if state["stage"] == 2 else "done")
+            with open(os.path.join(stage_dir, "trace.jsonl"), "w") as fh:
+                fh.write("\n".join(lines) + "\n")
+            if state["stage"] == 1 and stage1_edit:
+                stage1_edit(ws_)
+            if state["stage"] == 2:
+                chain = run.chain_commits(ws_, root)
+                _g(ws_, "checkout", "-q", chain[0]["sha"])
+                with open(os.path.join(ws_, "src/main/java/A.java"), "w") as fh:
+                    fh.write("class A {\n  int limit = Math.max(0, 1);\n}\n")
+                _g(ws_, "commit", "-q", "-a", "--amend", "--no-edit")
+                for c in chain[1:]:  # replay everything above the target unchanged
+                    _g(ws_, "cherry-pick", c["sha"])
+                _g(ws_, "branch", "-f", "master", "HEAD")
+                _g(ws_, "checkout", "-q", "master")
+            rec = run.new_stage_record(stage_dir, started or run._dt.datetime.now(run._dt.timezone.utc))
+            rec.update({"score": 1.0, "passed": True, "turns": 3, "costUsd": 0.2, "judgeCostUsd": 0.05, "model": "m",
+                        "subtype": "success", "changedFiles": []})
+            return rec
+
+        def fake_push(ws_, url, hashtags, log_path):
+            with open(log_path, "a") as fh:
+                fh.write("fake push\n")
+            if push1 is not None and state["stage"] == 1:
+                return dict(push1)
+            chain = run.chain_commits(ws_, root)
+            return {"numbers": [11 + i for i in range(len(chain))], "new": [], "updated": [], "ok": True, "error": None,
+                    "head": _g(ws_, "rev-parse", "HEAD"), "base": root}
+
+        def fake_query(rest, project, hashtags):
+            chain = run.chain_commits(ws, root)
+            out = []
+            for i, c in enumerate(chain):
+                out.append({"_number": 11 + i, "change_id": c["change_id"] or ("I" + c["sha"]), "subject": c["subject"],
+                            "insertions": 5 + i, "deletions": 0, "current_revision": c["sha"], "messages": [], "labels": {}})
+            return out
+
+        def fake_get(self_, path):
+            if path == "/accounts/self":
+                return {"_account_id": 1000001}
+            if path.endswith("/branches/master"):
+                return {"revision": "deadbeef"}
+            if path.endswith("/comments"):
+                return {}
+            if path.endswith("/revisions/current/files"):
+                n = int(path.split("/")[2])
+                if files_for:
+                    return files_for(n)
+                return {"src/main/java/A.java": {}, "src/main/java/A2.java": {}} if n == 11 else {"src/main/java/B.java": {}}
+            if path.endswith("/content"):
+                return "class A {\n  int limit = 1;\n}\n"
+            raise run.RestError("unexpected GET " + path)
+
+        def fake_post(self_, path, body):
+            state["posts"].append((path, body))
+            return {"labels": {"Code-Review": -1}}
+
+        for name, fn in (("make_workspace", fake_make_workspace), ("run_stage", fake_run_stage),
+                         ("push_workspace_for_review_ex", fake_push), ("query_changes_by_hashtags", fake_query),
+                         ("read_token", lambda p: "tok"), ("remote_master_sha", lambda w: "aaa")):
+            self.addCleanup(setattr, run, name, getattr(run, name))
+            setattr(run, name, fn)
+        self.addCleanup(setattr, run.GerritRest, "get", run.GerritRest.get)
+        self.addCleanup(setattr, run.GerritRest, "post", run.GerritRest.post)
+        run.GerritRest.get = fake_get
+        run.GerritRest.post = fake_post
+        opts = argparse.Namespace(push_to=PUSH_URL, rena_token="/nonexistent", plugin_dir=ROOT, model=None, mcp_dir=None,
+                                  threshold=0.8, keep=True, runs=None, jobs=1, scenario_list=[scenario], variant_list=["natural"],
+                                  max_cost_usd=None)
+        import contextlib
+        with contextlib.redirect_stdout(io.StringIO()):
+            rec = run.run_pipeline(run.Pipeline(case, scenario, "nudged" if nudged else "natural"), "without", 1, opts, out_dir, None)
+        run_dir = os.path.join(out_dir, "runs", f"rl@{scenario}-{'nudged' if nudged else 'natural'}", "without", "1")
+        return rec, state, run_dir, (root, c1, c2)
+
+    def test_uncommitted_work_is_committed_and_flagged(self):
+        def dirty(ws):
+            with open(os.path.join(ws, "src/main/java/C.java"), "w") as fh:
+                fh.write("class C {}\n")
+        rec, state, run_dir, (root, c1, c2) = self._pipeline("fix", stage1_edit=dirty)
+        self.assertIsNone(rec["error"], rec.get("error"))
+        self.assertTrue(rec["runnerCommitted"])
+        self.assertEqual(rec["guardrails"]["stage1"]["bad_outcomes"]["left_uncommitted"], 1)
+        self.assertEqual(len(rec["stage1Chain"]), 3)
+        self.assertTrue(all(c["changeId"] for c in rec["stage1Chain"]))
+        self.assertIn("committed by the benchmark runner", rec["stage1Chain"][2]["subject"])
+        self.assertEqual(rec["pushed"], [11, 12, 13])
+        self.assertFalse(rec["stage2"]["runnerCommitted"])
+        self.assertEqual(rec["guardrails"]["stage2"]["bad_outcomes"]["left_uncommitted"], 0)
+        rw = rec["rework"]
+        self.assertTrue(rw["stage1_runner_committed"])
+        self.assertFalse(rw["stage2_runner_committed"])
+        self.assertIsNone(rw["stage1_push_error"])
+        self.assertIsNone(rw["stage2_push_error"])
+        self.assertIsNone(rw["split_applicable"])
+        self.assertTrue(rw["fixup_on_target"])
+        self.assertTrue(rw["change_id_set_preserved"])
+        self.assertEqual(len(state["posts"]), 1)
+
+    def test_commit_without_change_id_mapped_by_sha(self):
+        def no_verify(ws):
+            with open(os.path.join(ws, "src/main/java/D.java"), "w") as fh:
+                fh.write("class D {}\n")
+            _g(ws, "add", "-A")
+            _g(ws, "commit", "-q", "--no-verify", "-m", "feat: d without hook")
+        rec, state, run_dir, _ = self._pipeline("fix", stage1_edit=no_verify)
+        self.assertIsNone(rec["error"], rec.get("error"))
+        self.assertFalse(rec["runnerCommitted"])
+        chain = rec["stage1Chain"]
+        self.assertEqual(len(chain), 3)
+        self.assertEqual(chain[2]["number"], 13)
+        self.assertEqual(chain[2]["changeId"], "I" + chain[2]["sha"])  # from Gerrit's current_revision, not a trailer
+        self.assertEqual(rec["review"]["stage1Changes"], [11, 12, 13])
+        rw = rec["rework"]
+        self.assertEqual(rw["stage1_changes"], [11, 12, 13])
+        # stage 2 rebased the no-Change-Id commit: Gerrit sees a new change → honest metrics
+        self.assertFalse(rw["change_id_set_preserved"])
+        self.assertEqual(rw["new_changes_opened"], 1)
+        self.assertEqual(rw["lost_change_ids"], ["I" + chain[2]["sha"]])
+        self.assertEqual(len(rw["stage2_changes"]), 3)
+        self.assertTrue(rw["fixup_on_target"])
+        self.assertEqual(rw["descendants_rebased"], 1)  # B (with its trailer) survived the rebase unchanged
+
+    def test_split_not_applicable_skips_review_and_stage2(self):
+        rec, state, run_dir, _ = self._pipeline("split", files_for=lambda n: {"src/main/java/Only.java": {}, "src/test/java/T.java": {}})
+        self.assertIsNone(rec["error"], rec.get("error"))
+        self.assertEqual(state["posts"], [])  # no vote, no comment
+        self.assertNotIn("stage2", rec)
+        self.assertEqual(rec["review"]["skipped"], "already split (max 1 production file per change)")
+        self.assertEqual(rec["review"]["productionFiles"], ["src/main/java/Only.java"])
+        self.assertNotIn("payload", rec["review"])
+        with open(os.path.join(run_dir, "review.json")) as fh:
+            self.assertEqual(json.load(fh)["skipped"], run.SPLIT_NOT_APPLICABLE)
+        rw = rec["rework"]
+        self.assertFalse(rw["split_applicable"])
+        self.assertEqual(rw["stage1_changes"], [11, 12])
+        self.assertIsNone(rw["fixup_on_target"])
+        self.assertIsNone(rw["stage2_changes"])
+        self.assertEqual(rw["target_change"], 12)  # largest of the tied single-file changes
+        with open(os.path.join(run_dir, "rework-metrics.json")) as fh:
+            self.assertFalse(json.load(fh)["split_applicable"])
+        self.assertAlmostEqual(rec["pipelineCostUsd"], 0.25, places=6)  # stage 1 only
+        self.assertFalse(os.path.exists(os.path.join(run_dir, "stage2", "trace.jsonl")))
+        self.assertIsNone(rec["guardrails"]["stage2"])
+        self.assertIsNotNone(rec["guardrails"]["stage1"])
+
+    def test_split_applicable_posts_and_runs_stage2(self):
+        rec, state, run_dir, _ = self._pipeline("split")
+        self.assertIsNone(rec["error"], rec.get("error"))
+        self.assertEqual(len(state["posts"]), 1)
+        self.assertEqual(state["posts"][0][0], "/changes/11/revisions/current/review")  # A.java + A2.java
+        self.assertIn("touches 2 production files (A.java, A2.java)", rec["review"]["message"])
+        self.assertTrue(rec["rework"]["split_applicable"])
+        self.assertIn("stage2", rec)
+
+    def test_stage1_push_failure_recorded_not_raised(self):
+        failed = {"numbers": [], "new": [], "updated": [], "ok": False, "error": "nothing to push", "head": None, "base": None}
+        rec, state, run_dir, _ = self._pipeline("fix", push1=failed)
+        self.assertIn("stage 1 pushed no change", rec["error"])
+        self.assertIn("nothing to push", rec["error"])
+        self.assertFalse(rec["passed"])
+        self.assertEqual(state["posts"], [])
+        self.assertIsNone(rec["stage2"])
+        self.assertIsNone(rec["review"])
+        rw = rec["rework"]
+        self.assertEqual(rw["stage1_push_error"], "nothing to push")
+        self.assertEqual(rw["stage1_changes"], [])
+        self.assertFalse(rw["stage1_runner_committed"])
+        self.assertIsNone(rw["split_applicable"])
+        with open(os.path.join(run_dir, "rework-metrics.json")) as fh:
+            self.assertEqual(json.load(fh)["stage1_push_error"], "nothing to push")
+        self.assertIsNotNone(rec["guardrails"]["stage1"])
+        self.assertIn("bad_outcomes", rec["guardrails"]["stage1"])
+        self.assertAlmostEqual(rec["pipelineCostUsd"], 0.25, places=6)

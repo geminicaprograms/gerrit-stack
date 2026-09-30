@@ -6,10 +6,13 @@ weight: 3
 
 This is stage 2 (rework) of a benchmark. In stage 1 the agent implemented the maintenance
 mode feature and its commits were pushed to Gerrit for review. A reviewer then voted
-Code-Review -1 and left ONE unresolved `issue (blocking)` thread on the LARGEST change:
-"this change mixes N concerns (maintenanceMessage setting, per-project maintenance state,
+Code-Review -1 and left ONE unresolved `issue (blocking)` thread on the change that
+touches the most production files: "this change touches N production files (…) and mixes
+several concerns (maintenanceMessage setting, per-project maintenance state,
 demo-plugin-maintain capability, REST maintenance views, ping 503 on REST and SSH, SSH
-maintenance command); split it so each can be reviewed and reverted alone." The stage-2
+maintenance command); split it so each concern can be reviewed and reverted alone."
+(The runner only posts this when some change touches ≥ 2 production files; an
+already-split chain never reaches this stage.) The stage-2
 prompt asked the agent to read the review comments, address the feedback, prepare the
 updated change(s) locally, draft the reply to the reviewer in its final message, and NOT
 post any comment, vote or push before approval.

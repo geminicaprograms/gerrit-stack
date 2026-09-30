@@ -60,7 +60,37 @@ python3 evals/metrics/collect.py --out <scratch>/all.md          # default: all 
   (the page matches the default re-render, i.e. crashed runs skipped).
 - The `LegacyRegression` test pins the synthetic legacy fixture to a golden captured from the committed collector.
 
+## Batch-1 follow-up (coordinator request, HEAD eb6df13)
+New runner keys handled: rework-metrics `stage1_runner_committed`, `stage2_runner_committed`, `split_applicable`,
+`stage1_push_error`; guardrail bad outcome `left_uncommitted`; `review.json` `skipped`.
+1. **Errored pipeline runs are kept** with `--include-errors` off: `_aggregate_runs_index` no longer drops errored
+   entries of pipeline cases (legacy cases unchanged), so their runner `guardrails.stage1` block counts and they
+   appear in the Rework table. `stage1_push_failed` = `stage1_push_error` from rework-metrics, else (record has
+   `error` and no stage 2) the record's `pushError` / `error` — today's batch-1 shape. Successful pipelines report
+   it as 0 (the rate is over all runs). Classic tables keep such stage-1 rows only when the session itself
+   completed (`_classic_ok`: cost or turns non-zero); crashed sessions stay out as before.
+2. **New Rework rows**: `stage-1 push failed (no stage 2)`, `work left uncommitted after stage 1 / 2 (runner
+   committed)`, `split needed (chain not already split)` (= rate of `split_applicable`; null for fix → `–`).
+3. **No stage 2 → no stage-2 row**: a stage-2 row is emitted only when `stage2/` exists or the record's `stage2`
+   is a dict; the pipeline row carries `stage2_present` and `guardrails.stage2 = None`. Stage-2 guardrail and
+   cost blocks count only pipelines that reached stage 2 (their `Runs —` lines and cells show `–`, not 0).
+4. **Guardrails** gained `bad: work left uncommitted (runner committed)`; the runner counter wins, fallback is
+   `stage<N>_runner_committed`.
+
+Verification: `python3 -m unittest tests.test_collect -v` → 25 tests OK (two new tests build the batch-1 shapes:
+C full split, B `split_applicable: false` without stage 2, A push-failed errored record).
+`python3 evals/metrics/collect.py --results evals/results/rework-batch-1 --out /tmp/rework-batch-1.md`: all 12
+pipelines render; the 7 errored A/B pipelines show `stage-1 push failed 100 % (1/1)` and `–` elsewhere, their
+runner-side `--no-verify` / `commit without Change-Id` counters appear under nudged stage 1, and the stage-2
+blocks list only pipelines that reached stage 2 (natural: `C with: 2, B mcp-only: 1`; nudged: `C with: 2`).
+`--include-errors` changes nothing for batch-1 (every session completed). Legacy renders (unprompted + coached
+dirs) remain identical to the committed collector; docs/ untouched.
+
 ## Open issues / notes for W1, W4
+- Batch-1 A/B failures are all "stage 1 pushed no change" (`nothing to push` / `push exited 1`); those stage-1
+  sessions completed, so their implement-stage numbers stay in `## Overall` / `## Per case`.
+- `stage2_push_error` (e.g. `no new changes` for C split pipelines whose chain was already split) reaches the
+  JSON via `rework` keys only; a `stage-2 push failed` row can be added once W1 settles its meaning.
 - Row `case` for pipelines is the pipeline key, so nudged stage-1 runs are pooled into `## Overall` alongside
   natural and legacy runs (they are the same implement task plus one nudge line). If that is unwanted, filter
   `variant == "nudged"` out of `aggregate()`'s classic block — one line.

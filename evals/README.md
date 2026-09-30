@@ -185,7 +185,7 @@ One pipeline = one case × one arm × one scenario × one variant:
 2. **Reviewer step, as `rena`.** The runner posts `Code-Review -1` plus one
    unresolved thread over REST, authenticated as the demo's `rena` reviewer
    account: `fix` comments on the change matching the case's `anchor_*`
-   regexes; `split` comments on the largest stage-1 change. This is the
+   regexes; `split` comments on the stage-1 change touching the most production files (≥ 2, else the pipeline stops after stage 1 as "already split"). This is the
    *only* vote the runner ever casts.
 3. **Stage 2 — rework.** A second `claude -p` session in the same workspace,
    pointed at the demo Gerrit (`gerrit-stack.host` / netrc / MCP config), is
@@ -207,7 +207,7 @@ rework:
     message: "issue (blocking): ..."        # posted verbatim, unresolved, with Code-Review -1
   split:
     concerns: [setting, limiter, REST 429, SSH message, tests]
-    message: "issue (blocking): this change mixes {n} concerns ({concerns}); split it so each can be reviewed and reverted alone."
+    message: "issue (blocking): this change touches {n} production files ({files}) and mixes several concerns ({concerns}); split it so each concern can be reviewed and reverted alone."
   prompt: |                                  # optional override of the stage-2 prompt; placeholders {changes} {url} {project} {target}
 nudges:
   stage1: "..."
@@ -216,7 +216,7 @@ nudges:
 
 Target-change selection: `fix` picks the stage-1 change whose current-revision
 file list matches `anchor_file` (fallback: the change touching the most
-`src/main` files, then the largest); `split` picks the largest change (by
+`src/main` files, then the largest); `split` picks the change with the most production files under `src/main/` (ties → largest by
 insertions + deletions). For arms A/B, which push a single monolithic change,
 both scenarios necessarily target that one change. Stage-2 graders live in
 `graders-rework/*.md` — same grader format as `graders/`, with an optional

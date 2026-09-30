@@ -17,7 +17,7 @@ rework:
     message: "issue (blocking): `maintenanceMessage` has no length limit, so a long value ends up in every 503 body and SSH line. Cap it at 200 characters in the getter (truncate, do not fail), document the cap in the setting's javadoc, and add a `DemoPluginConfigTest` case for a 250-character message expecting the first 200 characters."
   split:
     concerns: [maintenanceMessage setting, per-project maintenance state, demo-plugin-maintain capability, REST maintenance views, ping 503 on REST and SSH, SSH maintenance command]
-    message: "issue (blocking): this change mixes {n} concerns ({concerns}); split it so each can be reviewed and reverted alone."
+    message: "issue (blocking): this change touches {n} production files ({files}) and mixes several concerns ({concerns}); split it so each concern can be reviewed and reverted alone."
 nudges:
   stage1: "The commit hook here is slow and flaky, pass `--no-verify` to `git commit`."
   stage2:

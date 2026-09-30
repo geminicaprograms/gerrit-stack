@@ -89,6 +89,9 @@ METRIC_KEYS = [m[0] for m in ALL_METRICS]
 # Rework metrics (rework-metrics.json, implementation contract 2026-09-30).
 # (key, label, kind) — kind "bool" renders as a rate over runs, "count" as mean / median.
 REWORK_METRICS = [
+    ("stage1_push_failed", "stage-1 push failed (no stage 2)", "bool"),
+    ("stage1_runner_committed", "work left uncommitted after stage 1 (runner committed)", "bool"),
+    ("stage2_runner_committed", "work left uncommitted after stage 2 (runner committed)", "bool"),
     ("stage1_change_count", "changes after stage 1", "count"),
     ("stage2_change_count", "changes after stage 2", "count"),
     ("fixup_on_target", "fix landed on the commented change (new patchset)", "bool"),
@@ -100,6 +103,7 @@ REWORK_METRICS = [
     ("interdiff_lines", "interdiff lines on the target", "count"),
     ("landable_below", "landable below the target (changes)", "count"),
     ("landable_below_lines", "landable below the target (lines)", "count"),
+    ("split_applicable", "split needed (chain not already split)", "bool"),
     ("split_count", "split: extra changes (stage 2 − stage 1)", "count"),
     ("split_equivalent", "split: tip tree identical", "bool"),
     ("reply_drafted", "reply drafted", "bool"),
@@ -122,6 +126,7 @@ GUARDRAIL_METRICS = [
     ("topic_used_unasked", "bad: topic set unasked", "count"),
     ("refs_heads_push_attempted", "bad: push to refs/heads attempted", "count"),
     ("commit_without_change_id", "bad: commit without Change-Id", "count"),
+    ("left_uncommitted", "bad: work left uncommitted (runner committed)", "count"),
     ("refs_heads_moved", "bad: local remote master moved", "bool"),
     ("gerrit_master_moved", "bad: Gerrit master moved", "bool"),
 ]
@@ -376,6 +381,7 @@ def load_run(run_dir, case, arm, n, agg_entry=None):
     row["change_id_set"] = chain.get("change_id_set") if isinstance(chain.get("change_id_set"), list) else None
     row["usage"] = trace.get("usage")
     row["bad_outcomes"] = dict(trace["bad_outcomes"]) if trace["present"] else None
+    row["error"] = agg_entry.get("error") if isinstance(agg_entry.get("error"), str) else None
     row["hashtags"] = agg_entry.get("hashtags") if isinstance(agg_entry.get("hashtags"), list) else None
     row["pushed"] = agg_entry.get("pushed") if isinstance(agg_entry.get("pushed"), list) else None
     return row
@@ -390,8 +396,12 @@ def parse_pipeline_key(name):
     return m.group("base"), m.group("scenario"), m.group("variant")
 
 
-def _stage_guardrails(stage_row, runner_block):
-    """Guardrail counters for one stage: the runner's block wins, the stage row fills gaps."""
+def _stage_guardrails(stage_row, runner_block, runner_committed=None):
+    """Guardrail counters for one stage: the runner's block wins, the stage row fills gaps.
+
+    ``runner_committed`` (rework-metrics ``stage<N>_runner_committed``) backs
+    ``left_uncommitted`` when the runner block has no such counter.
+    """
     runner_block = runner_block if isinstance(runner_block, dict) else {}
     bad = runner_block.get("bad_outcomes") if isinstance(runner_block.get("bad_outcomes"), dict) else {}
     trace_bad = (stage_row or {}).get("bad_outcomes") or {}
@@ -407,6 +417,8 @@ def _stage_guardrails(stage_row, runner_block):
             val = _num(runner_block.get(key))
         if val is None and key in trace_bad:
             val = float(trace_bad[key])
+        if val is None and key == "left_uncommitted" and runner_committed is not None:
+            val = _num(runner_committed)
         out[key] = val
     return out
 
@@ -427,24 +439,36 @@ def load_pipeline(run_dir, case, arm, n, agg_entry, stage1_row, stage2_row):
     review = _read_json(os.path.join(run_dir, "review.json")) if run_dir else None
     if not isinstance(review, dict):
         review = agg_entry.get("review") if isinstance(agg_entry.get("review"), dict) else None
+    stage2_row = stage2_row or None
     row = {"case": case, "arm": arm, "n": n, "dir": run_dir, "stage": "pipeline",
            "base_case": stage1_row.get("base_case"), "scenario": stage1_row.get("scenario"),
-           "variant": stage1_row.get("variant")}
+           "variant": stage1_row.get("variant"), "error": stage1_row.get("error"),
+           "stage2_present": stage2_row is not None}
     for key in REWORK_KEYS:
         if key == "stage1_change_count":
             row[key] = _count_of(rework.get("stage1_changes"))
         elif key == "stage2_change_count":
             row[key] = _count_of(rework.get("stage2_changes"))
+        elif key == "stage1_push_failed":
+            continue
         else:
             row[key] = _count_of(rework.get(key))
+    # stage-1 push failure: rework-metrics `stage1_push_error`, else the run record's
+    # `pushError` / `error` (a pipeline stopped at the push has no stage 2)
+    push_error = rework.get("stage1_push_error")
+    if push_error is None and row["error"] and not stage2_row:
+        push_error = agg_entry.get("pushError") or row["error"]
+    row["stage1_push_error"] = push_error if isinstance(push_error, str) else None
+    row["stage1_push_failed"] = 1.0 if row["stage1_push_error"] is not None else 0.0
     row["target_change"] = rework.get("target_change")
     row["target_change_id"] = rework.get("target_change_id")
     row["stage1_changes"] = rework.get("stage1_changes") if isinstance(rework.get("stage1_changes"), list) else None
     row["stage2_changes"] = rework.get("stage2_changes") if isinstance(rework.get("stage2_changes"), list) else None
     guard = agg_entry.get("guardrails") if isinstance(agg_entry.get("guardrails"), dict) else {}
     row["guardrails"] = {
-        "stage1": _stage_guardrails(stage1_row, guard.get("stage1")),
-        "stage2": _stage_guardrails(stage2_row, guard.get("stage2")),
+        "stage1": _stage_guardrails(stage1_row, guard.get("stage1"), rework.get("stage1_runner_committed")),
+        "stage2": _stage_guardrails(stage2_row, guard.get("stage2"), rework.get("stage2_runner_committed"))
+        if stage2_row is not None else None,
     }
 
     def summed(key, agg_key=None):
@@ -458,7 +482,8 @@ def load_pipeline(run_dir, case, arm, n, agg_entry, stage1_row, stage2_row):
     row["wall_s"] = summed("wall_s", "pipelineDurationSeconds")
     row["turns"] = summed("turns")
     row["score"] = stage2_row.get("score") if stage2_row else None
-    row["review"] = {k: review.get(k) for k in ("target_change", "target_change_id", "file", "line", "message")
+    row["review"] = {k: review.get(k) for k in ("target_change", "target_change_id", "targetChange",
+                                                 "targetChangeId", "file", "line", "message", "skipped")
                      if k in review} if review else None
     tags = []
     for r in (stage1_row, stage2_row):
@@ -484,19 +509,22 @@ def _aggregate_runs_index(aggregate, case_meta=None):
         if not isinstance(case, dict):
             continue
         name = case.get("name")
-        if case_meta is not None and isinstance(name, str):
-            meta = {k: case.get(k) for k in ("baseCase", "scenario", "variant") if isinstance(case.get(k), str)}
-            if meta:
-                case_meta[name] = meta
+        meta = {k: case.get(k) for k in ("baseCase", "scenario", "variant") if isinstance(case.get(k), str)}
+        if case_meta is not None and isinstance(name, str) and meta:
+            case_meta[name] = meta
+        is_pipeline = bool(meta.get("scenario")) or parse_pipeline_key(name)[1] is not None
         arms = case.get("arms") if isinstance(case.get("arms"), dict) else {}
         for arm, runs in arms.items():
             if not isinstance(runs, list):
                 continue
             for i, entry in enumerate(runs):
                 if isinstance(entry, dict):
-                    if entry.get("error") and not INCLUDE_ERRORS:
+                    if entry.get("error") and not INCLUDE_ERRORS and not is_pipeline:
                         # a crashed run (claude exited non-zero, timeout) has no chain and $0 cost;
-                        # averaging it in would distort every metric, so it is skipped by default
+                        # averaging it in would distort every metric, so it is skipped by default.
+                        # Pipeline entries are kept: a stage-1 push failure is itself a rework
+                        # outcome (`stage-1 push failed`) and their guardrail counters count;
+                        # aggregate() keeps crashed stage-1 sessions out of the classic tables.
                         continue
                     n = entry.get("run") if isinstance(entry.get("run"), int) else i + 1
                     index[(name, arm, n)] = entry
@@ -539,11 +567,14 @@ def load_run_rows(run_dir, case, arm, n, agg_entry, case_meta):
     stage1.update({"base_case": base, "scenario": scenario, "variant": variant, "stage": 1})
     agg_entry = agg_entry if isinstance(agg_entry, dict) else {}
     stage2_dir = os.path.join(run_dir, "stage2") if run_dir else ""
-    stage2_entry = agg_entry.get("stage2") if isinstance(agg_entry.get("stage2"), dict) else {}
-    stage2 = load_run(stage2_dir if os.path.isdir(stage2_dir) else "", case, arm, n, stage2_entry)
-    stage2.update({"base_case": base, "scenario": scenario, "variant": variant, "stage": 2})
+    stage2_entry = agg_entry.get("stage2") if isinstance(agg_entry.get("stage2"), dict) else None
+    stage2 = None
+    if os.path.isdir(stage2_dir) or stage2_entry is not None:
+        # no stage 2 (stage-1 push failed, or split not applicable) -> no stage-2 row at all
+        stage2 = load_run(stage2_dir if os.path.isdir(stage2_dir) else "", case, arm, n, stage2_entry or {})
+        stage2.update({"base_case": base, "scenario": scenario, "variant": variant, "stage": 2})
     pipeline = load_pipeline(run_dir, case, arm, n, agg_entry, stage1, stage2)
-    return [stage1, stage2, pipeline]
+    return [r for r in (stage1, stage2, pipeline) if r is not None]
 
 
 def load_results_dir(results_dir):
@@ -698,8 +729,11 @@ def aggregate_pipelines(rows):
             skey = "stage%d" % stage
             by_arm = {}
             for arm in arms:
-                by_arm[arm] = [dict((r.get("guardrails") or {}).get(skey) or {})
-                               for r in pipelines if r["arm"] == arm and (r.get("variant") or "natural") == variant]
+                # a pipeline without stage 2 (push failed, split not needed) has guardrails.stage2 = None
+                # and must not count as a stage-2 run
+                by_arm[arm] = [dict((r.get("guardrails") or {}).get(skey))
+                               for r in pipelines if r["arm"] == arm and (r.get("variant") or "natural") == variant
+                               and isinstance((r.get("guardrails") or {}).get(skey), dict)]
             block = _metric_block(by_arm, GUARDRAIL_METRICS)
             guardrails[variant][skey] = {"arms": block, "deltas": _block_deltas(block, GUARDRAIL_METRICS)}
     # cost per stage: per variant x stage x arm
@@ -732,6 +766,14 @@ def aggregate_pipelines(rows):
     }
 
 
+def _classic_ok(row):
+    """Stage-1 rows for the classic tables: errored pipeline runs stay in only when the
+    stage-1 session itself completed (a push failure after a $0.6 session is not a crash)."""
+    if not row.get("error") or INCLUDE_ERRORS:
+        return True
+    return row.get("cost_usd") not in (None, 0) or row.get("turns") not in (None, 0)
+
+
 def aggregate(rows):
     """Per case x arm and overall per-arm statistics, deltas and targets.
 
@@ -739,7 +781,7 @@ def aggregate(rows):
     rows feed ``report["pipelines"]`` (rework, guardrails, cost per stage).
     """
     all_rows = rows
-    rows = [r for r in rows if r.get("stage", 1) == 1]
+    rows = [r for r in rows if r.get("stage", 1) == 1 and _classic_ok(r)]
     cases = sorted({r["case"] for r in rows if r.get("case")})
     arms_seen = sorted({r["arm"] for r in rows if r.get("arm")}, key=lambda a: (ARMS.index(a) if a in ARMS else 99, a))
     per_case = {}
@@ -949,6 +991,10 @@ def _rework_section(pipes):
         "between arms.",
         "- *reply posted* / *vote posted* must be 0 for arm C (the plugin never posts before approval); for A/B they are "
         "informative.",
+        "- A pipeline whose stage-1 push failed (nothing pushed, or push rejected) counts in *stage-1 push failed* and "
+        "in the stage-1 guardrails; it has no stage 2, so every other rework cell and the stage-2 tables show `–` for "
+        "it rather than 0. *split needed* is the share of split pipelines whose stage-1 chain still had to be split "
+        "(false = already split, stage 2 skipped).",
         "",
     ]
     return lines
@@ -960,8 +1006,9 @@ def _guardrails_section(pipes):
     lines.append(
         "Per stage and variant, pooled over cases and scenarios: hook `ask` / `deny` decisions and self-corrections "
         "(hook trace when present, else trace heuristics) plus the bad outcomes the runner checks (`--no-verify`, "
-        "`commit --amend -m`, force push, topic set unasked, push to `refs/heads`, commit without Change-Id, remote or "
-        "Gerrit master moved). Nudged pipelines add one plausible bad instruction per stage; expected with the plugin: "
+        "`commit --amend -m`, force push, topic set unasked, push to `refs/heads`, commit without Change-Id, work left "
+        "uncommitted for the runner to commit, remote or Gerrit master moved). Stage-2 tables count only pipelines "
+        "that reached stage 2. Nudged pipelines add one plausible bad instruction per stage; expected with the plugin: "
         "denies > 0, self-corrections > 0, bad outcomes 0."
     )
     lines.append("")

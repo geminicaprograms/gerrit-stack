@@ -560,21 +560,156 @@ class PipelineResults(unittest.TestCase):
         self.assertLess(md.index("## Guardrails"), md.index("## Cost per stage"))
         self.assertLess(md.index("## Cost per stage"), md.index("## Reproduce"))
 
-    def test_split_rows_render_when_present(self):
-        d = os.path.join(self.results, "runs", "rate-limited-ping@split-natural", "with", "1")
-        os.makedirs(d)
+    # ---- batch-1 shapes: errored push, no stage 2, split_applicable, runner-committed ----
+    def write_split_pipelines(self):
+        """rate-limited-ping@split-natural: C full (split needed, stage 2 left work uncommitted),
+        B chain already split (split_applicable false, no stage 2), A stage-1 push failed
+        (today's runner shape: `error` + `pushError`, no rework-metrics.json, no stage2/)."""
+        key = "rate-limited-ping@split-natural"
+        arms = {}
+        # C: full pipeline
+        d = os.path.join(self.results, "runs", key, "with", "1")
+        os.makedirs(os.path.join(d, "stage2"))
+        with open(os.path.join(d, "trace.jsonl"), "w") as fh:
+            fh.write(_trace_lines(1.2, 22, 120_000, commits=4))
+        with open(os.path.join(d, "stage2", "trace.jsonl"), "w") as fh:
+            fh.write(_trace_lines(0.4, 9, 40_000, commits=1))
+        rw = _rework("with", "split")
+        rw.update({"split_applicable": True, "stage1_runner_committed": False, "stage2_runner_committed": True,
+                   "stage1_push_error": None})
         with open(os.path.join(d, "rework-metrics.json"), "w") as fh:
-            json.dump(_rework("with", "split"), fh)
+            json.dump(rw, fh)
+        g = _guardrails("with")
+        g["stage1"]["bad_outcomes"]["left_uncommitted"] = 0        # runner counter present -> wins
+        arms["with"] = [{"score": 1.0, "turns": 22, "costUsd": 1.2, "durationSeconds": 120, "pushed": [11, 12, 13],
+                         "hashtags": ["bench-rate-limited-ping-with", "run-20260930-120000", "scn-split-natural", "rep-1"],
+                         "stage2": {"score": 1.0, "turns": 9, "costUsd": 0.4, "durationSeconds": 40,
+                                    "pushed": [11, 12, 13, 14, 15, 16]},
+                         "guardrails": g, "pipelineCostUsd": 1.6, "pipelineDurationSeconds": 160}]
+        # B: chain already split -> stage 2 skipped
+        d = os.path.join(self.results, "runs", key, "mcp-only", "1")
+        os.makedirs(d)
+        with open(os.path.join(d, "trace.jsonl"), "w") as fh:
+            fh.write(_trace_lines(0.7, 15, 90_000, commits=3))
+        rw = {"target_change": 21, "stage1_changes": [21, 22, 23], "stage2_changes": None, "split_applicable": False,
+              "stage1_runner_committed": True, "stage2_runner_committed": None, "stage1_push_error": None,
+              "fixup_on_target": None, "reply_drafted": None}
+        with open(os.path.join(d, "rework-metrics.json"), "w") as fh:
+            json.dump(rw, fh)
+        with open(os.path.join(d, "review.json"), "w") as fh:
+            json.dump({"skipped": "chain already split"}, fh)
+        gb = _guardrails("mcp-only")
+        gb["stage2"] = None
+        arms["mcp-only"] = [{"score": 1.0, "turns": 15, "costUsd": 0.7, "durationSeconds": 90, "pushed": [21, 22, 23],
+                             "hashtags": ["bench-rate-limited-ping-mcp-only", "run-20260930-120000", "scn-split-natural", "rep-1"],
+                             "stage2": None, "rework": rw, "guardrails": gb, "pipelineCostUsd": 0.7,
+                             "pipelineDurationSeconds": 91}]
+        # A: stage-1 push failed (batch-1 shape)
+        d = os.path.join(self.results, "runs", key, "without", "1")
+        os.makedirs(d)
+        with open(os.path.join(d, "trace.jsonl"), "w") as fh:
+            fh.write(_trace_lines(0.65, 12, 110_000, commits=1))
+        ga = _guardrails("without")
+        ga["stage1"]["bad_outcomes"].update({"no_verify_used": 1, "commit_without_change_id": 1})
+        ga["stage2"] = None
+        arms["without"] = [{"score": 0.5714, "turns": 12, "costUsd": 0.65, "durationSeconds": 110, "pushed": [],
+                            "error": "pipeline error: RuntimeError('stage 1 pushed no change to http://gerrit (push exited 1)')",
+                            "pushError": "push exited 1", "subtype": "success",
+                            "hashtags": ["bench-rate-limited-ping-without", "run-20260930-120000", "scn-split-natural", "rep-1"],
+                            "stage2": None, "review": None, "rework": None, "guardrails": ga,
+                            "pipelineCostUsd": 0.66, "pipelineDurationSeconds": 111}]
+        with open(os.path.join(self.results, "aggregate-result.json")) as fh:
+            aggregate = json.load(fh)
+        aggregate["cases"].append({"name": key, "baseCase": "rate-limited-ping", "scenario": "split",
+                                   "variant": "natural", "aggregates": {"score": 0.86}, "arms": arms})
+        with open(os.path.join(self.results, "aggregate-result.json"), "w") as fh:
+            json.dump(aggregate, fh)
+        return key
+
+    def test_errored_push_pipeline_is_kept_without_include_errors(self):
+        key = self.write_split_pipelines()
+        rows, _ = self.rows()
+        self.assertFalse(collect.INCLUDE_ERRORS)
+        a_rows = [r for r in rows if r["case"] == key and r["arm"] == "without"]
+        self.assertEqual([r["stage"] for r in a_rows], [1, "pipeline"])        # no stage-2 row at all
+        s1, p = a_rows
+        self.assertIn("stage 1 pushed no change", s1["error"])
+        self.assertEqual(s1["turns"], 12)
+        self.assertEqual(p["stage1_push_failed"], 1.0)
+        self.assertEqual(p["stage1_push_error"], "push exited 1")
+        self.assertFalse(p["stage2_present"])
+        self.assertIsNone(p["fixup_on_target"])
+        self.assertIsNone(p["split_applicable"])
+        self.assertIsNone(p["guardrails"]["stage2"])
+        self.assertEqual(p["guardrails"]["stage1"]["no_verify_used"], 1)        # runner block of an errored record
+        self.assertEqual(p["guardrails"]["stage1"]["commit_without_change_id"], 1)
+        self.assertAlmostEqual(p["cost_usd"], 0.66)
+        # successful pipelines report the failure rate as 0, not None
+        ok = self.row(rows, key, "with", "pipeline")
+        self.assertEqual(ok["stage1_push_failed"], 0.0)
+        self.assertIsNone(ok["stage1_push_error"])
+        # classic tables keep the completed stage-1 session of the errored pipeline
+        rep = collect.aggregate(rows)
+        self.assertEqual(rep["per_case"][key]["without"]["runs"], 1)
+        self.assertEqual(rep["runs_total"], 7)
+        # ... but a crashed stage-1 session ($0, no turns) still stays out
+        crashed = dict(s1, cost_usd=0.0, turns=None)
+        self.assertFalse(collect._classic_ok(crashed))
+        self.assertTrue(collect._classic_ok(s1))
+
+    def test_split_applicable_false_has_no_stage2_and_new_rows(self):
+        key = self.write_split_pipelines()
         rows, sources = self.rows()
-        p = self.row(rows, "rate-limited-ping@split-natural", "with", "pipeline")
-        self.assertEqual((p["scenario"], p["variant"]), ("split", "natural"))   # parsed from the dir name
-        self.assertEqual(p["split_count"], 3)
-        self.assertEqual(p["stage2_change_count"], 6)
-        self.assertIsNone(p["cost_usd"])                                        # no traces, no aggregate entry
+        b_rows = [r for r in rows if r["case"] == key and r["arm"] == "mcp-only"]
+        self.assertEqual([r["stage"] for r in b_rows], [1, "pipeline"])
+        p = b_rows[1]
+        self.assertEqual(p["split_applicable"], 0.0)
+        self.assertEqual(p["stage1_runner_committed"], 1.0)
+        self.assertIsNone(p["stage2_runner_committed"])
+        self.assertIsNone(p["stage2_change_count"])
+        self.assertEqual(p["review"]["skipped"], "chain already split")
+        self.assertIsNone(p["guardrails"]["stage2"])
+        self.assertEqual(p["guardrails"]["stage1"]["left_uncommitted"], 1.0)   # fallback from stage1_runner_committed
+        c = self.row(rows, key, "with", "pipeline")
+        self.assertEqual(c["split_applicable"], 1.0)
+        self.assertEqual(c["split_count"], 3)
+        self.assertEqual(c["guardrails"]["stage1"]["left_uncommitted"], 0.0)   # runner counter wins over the flag
+        self.assertEqual(c["guardrails"]["stage2"]["left_uncommitted"], 1.0)   # fallback: stage2_runner_committed
+        pipes = collect.aggregate(rows)["pipelines"]
+        blk = pipes["rework"][key]
+        self.assertEqual(blk["arms"]["without"]["runs"], 1)                    # errored arm present in the table
+        self.assertEqual(blk["arms"]["with"]["metrics"]["split_applicable"]["rate_pct"], 100.0)
+        self.assertEqual(blk["arms"]["mcp-only"]["metrics"]["split_applicable"]["rate_pct"], 0.0)
+        self.assertEqual(blk["arms"]["without"]["metrics"]["split_applicable"]["n"], 0)
+        self.assertEqual(blk["arms"]["without"]["metrics"]["stage1_push_failed"]["rate_pct"], 100.0)
+        self.assertAlmostEqual(blk["deltas"]["with-without"]["stage1_push_failed"], -100.0)
+        self.assertAlmostEqual(blk["deltas"]["with-mcp-only"]["split_applicable"], 100.0)
+        # stage-2 guardrails / cost count only pipelines that reached stage 2
+        g2 = pipes["guardrails"]["natural"]["stage2"]["arms"]
+        self.assertEqual(g2["with"]["runs"], 2)                                 # fix-natural + split-natural
+        self.assertEqual(g2["without"]["runs"], 1)                              # fix-natural only
+        self.assertNotIn("mcp-only", g2)                                        # never reached stage 2
+        self.assertEqual(pipes["guardrails"]["natural"]["stage1"]["arms"]["without"]["runs"], 2)
+        self.assertEqual(pipes["guardrails"]["natural"]["stage1"]["arms"]["without"]["metrics"]["no_verify_used"]["mean"], 0.5)
+        c2 = pipes["cost_per_stage"]["natural"]["2"]["arms"]
+        self.assertNotIn("mcp-only", c2)
+        self.assertEqual(c2["without"]["runs"], 1)
         md = collect.render_markdown(collect.aggregate(rows), sources, generated="now")
         self.assertIn("### rate-limited-ping — split, natural", md)
-        self.assertIn("| split: extra changes (stage 2 − stage 1) | 3 / 3 | – | – | – |", md)
-        self.assertIn("| split: tip tree identical | 100 % (1/1) | – | – | – |", md)
+        self.assertIn("Runs — C with: 1, B mcp-only: 1, A without: 1 · Gerrit: `hashtag:scn-split-natural`", md)
+        self.assertIn("| stage-1 push failed (no stage 2) | 0 % (0/1) | 0 % (0/1) | 100 % (1/1) | 0 % | -100 % |", md)
+        self.assertIn("| work left uncommitted after stage 1 (runner committed) | 0 % (0/1) | 100 % (1/1) | – | -100 % | – |", md)
+        self.assertIn("| work left uncommitted after stage 2 (runner committed) | 100 % (1/1) | – | – | – | – |", md)
+        self.assertIn("| split needed (chain not already split) | 100 % (1/1) | 0 % (0/1) | – | +100 % | – |", md)
+        self.assertIn("| split: extra changes (stage 2 − stage 1) | 3 / 3 | – | – | – | – |", md)
+        self.assertIn("| split: tip tree identical | 100 % (1/1) | – | – | – | – |", md)
+        self.assertIn("| fix landed on the commented change (new patchset) | 100 % (1/1) | – | – | – | – |", md)
+        self.assertIn("| bad: work left uncommitted (runner committed) | 0 / 0 | 1 / 1 | – | -1 | – |", md)  # natural stage 1
+        # the natural stage-2 guardrail block lists only arms that reached stage 2
+        s2 = md[md.index("### natural — stage 2 (rework)"):md.index("### nudged — stage 1")]
+        self.assertIn("Runs — C with: 2, A without: 1", s2)
+        self.assertIn("| natural | stage 2 (rework) | $0.450 · 9.5 turns · 45 s | – | $0.300 · 10 turns · 50 s | – | +$0.150 |", md)
+        self.assertIn("counts in *stage-1 push failed*", md)
 
     def test_main_json_has_pipeline_aggregates(self):
         out_md = os.path.join(self.tmp, "bench.md")

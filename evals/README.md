@@ -36,13 +36,17 @@ Exit codes: `0` overall score ≥ threshold · `1` below threshold · `2` partia
 
 | arm | `--plugin-dir` | gerrit-mcp | meaning |
 |---|---|---|---|
-| `with` (default) | yes | enabled | the plugin under test + the official Gerrit MCP |
-| `mcp-only` | no | enabled | MCP tools but none of our skills/hooks |
-| `without` | no | disabled (`claude plugin disable gerrit@gerrit-mcp` for the duration, re-enabled in `finally`) | vanilla Claude Code |
+| `with` (default) | yes | loaded via `--plugin-dir` | the plugin under test + the official Gerrit MCP |
+| `mcp-only` | no | loaded via `--plugin-dir` | MCP tools but none of our skills/hooks |
+| `without` | no | not loaded | vanilla Claude Code |
 
 `--ablation` = `with,without`. Per case the runner reports the score of each arm and
-`delta` = with − without (or with − mcp-only when `without` was not run). Arms are the
-outer loop so the plugin is toggled once per arm, not once per run.
+`delta` = with − without (or with − mcp-only when `without` was not run).
+
+Every run passes `--setting-sources project,local`, so the user's own `~/.claude/CLAUDE.md`,
+hooks and user-scope plugins never reach the agent under test; the official gerrit-mcp plugin is
+loaded explicitly with `--plugin-dir <its cache dir>` (`--mcp-plugin-dir` overrides the
+auto-detected `~/.claude/plugins/cache/gerrit-mcp/gerrit/<hash>`). Nothing global is toggled.
 
 ### What one run does
 

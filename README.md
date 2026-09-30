@@ -192,6 +192,12 @@ make bench         # python3 evals/run.py --bench --ablation --runs 3 (add --pus
 The benchmark run (arm A vanilla, arm B vanilla + `gerrit@gerrit-mcp`, arm C
 + gerrit-stack) is reported in `docs/benchmark.md`.
 
+A second benchmark extends this past "chain pushed" through a scripted
+review round — reviewer comment, rework, re-push, read-back — to measure
+how cheaply each arm gets a change re-reviewable and whether the guard holds
+under guardrail-pressure nudges; see "Rework + guardrail pipelines" in
+`evals/README.md` (per the 2026-09-30 rework-benchmark plan, `docs/plans/PROGRESS.md`).
+
 ## Troubleshooting
 
 - **Hook missing / guard denies every commit** — run `bash

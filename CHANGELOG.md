@@ -59,3 +59,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `README.md` (install, skills, hooks/scripts reference, configuration,
   demo, tests, troubleshooting, design principles) and
   `docs/jj-stretch.md` (deferred jj-mode design note).
+- Rework + guardrail benchmark (in progress, per
+  `.claude/plans/2026-09-30-rework-benchmark-plan.md`): extends
+  `evals/run.py` with `--scenarios fix,split`, `--variants natural,nudged`
+  and `-j/--jobs N` to drive a second stage — reviewer feedback (posted as
+  `rena`), rework, re-push, Gerrit read-back — after the existing
+  implement-and-push stage, plus `rework:`/`nudges:` blocks in
+  `case.yaml`, `graders-rework/`, rework-correctness and guardrail-counter
+  metrics, and a `## Rework`/`## Guardrails` section in
+  `evals/metrics/collect.py`'s output. Documented in `evals/README.md`
+  ("Rework + guardrail pipelines"); batch 1 is a 12-pipeline smoke on
+  `rate-limited-ping` alone before the full 3-case matrix.

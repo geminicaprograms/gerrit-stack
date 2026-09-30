@@ -7,7 +7,8 @@ set -uo pipefail
 results=${1:?results dir}; case_name=${2:?case}; url=${3:-http://localhost:8080/a/demo-plugin}; n=${4:-1}
 run_id=$(basename "${results%/}")
 for arm in with mcp-only without; do
-  ws="$results/runs/$case_name/$arm/$n/workspace"
+  ws="$results/runs/$case_name/$arm/$n/workspace/workspace"   # --keep moves the temp dir, repo is one level down
+  [ -d "$ws/.git" ] || ws="$results/runs/$case_name/$arm/$n/workspace"
   if [ ! -d "$ws/.git" ]; then echo "$arm: no kept workspace at $ws (run with --keep)"; continue; fi
   tag="bench-$case_name-$arm"
   run_tag="run-$run_id"

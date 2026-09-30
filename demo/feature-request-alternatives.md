@@ -30,3 +30,16 @@ Let a project override `pingMessage` in its own `project.config`
 Natural split: config reader change + test → REST uses it → SSH uses it.
 Tempts a single ~150-line change; touches
 `PluginConfigFactory.getFromProjectConfig`, real Gerrit API work.
+
+## Deeper variants (5–6 concerns; `evals/bench-unprompted/{maintenance-mode,ping-audit-persist,health-checks}`)
+
+- **Maintenance mode** — `maintenanceMessage` setting → per-project state holder → `demo-plugin-maintain`
+  global capability → REST GET/PUT/DELETE with the capability check → ping answers 503 while in
+  maintenance → SSH `maintenance` command. Touches capability, PermissionBackend, RestModifyView.
+- **Ping audit log with persistence** — `pingAuditSize` → in-memory buffer → `@PluginData` file
+  persistence + reload → wire callers → `ping-log` read view + owner-only DELETE → SSH `ping-log`.
+- **Health checks** — `HealthCheck` interface + `DynamicSet` → two settings → `config` check →
+  `ping-latency` check → aggregate REST view with TTL cache → SSH `health`.
+
+Each is deeper than the skill's chain limit of five, so the correct plan has to decide between
+merging declaration-only steps and landing two chains; the rubric grades that decision.

@@ -8,16 +8,17 @@ This is stage 2 (rework) of a benchmark. In stage 1 the agent implemented the gr
 feature (`greetingPrefix` setting, REST greeting view, SSH greet command) and its commits
 were pushed to Gerrit for review. A reviewer then voted Code-Review -1 and left ONE
 unresolved `issue (blocking)` thread on the change that touches `DemoPluginConfig.java`:
-`greetingPrefix` must be trimmed and an empty value must fall back to the default `Hello`,
-with unit tests for both. The stage-2 prompt asked the agent to read the review comments,
+`greetingPrefix` must be capped at 40 characters in the getter (truncated, not rejected),
+the cap documented in the setting's javadoc, with a `DemoPluginConfigTest` case for a
+50-character prefix expecting the first 40. The stage-2 prompt asked the agent to read the review comments,
 address the feedback, prepare the updated change(s) locally, draft the reply to the reviewer
 in its final message, and NOT post any comment, vote or push before approval.
 
 Score (partial credit per criterion):
 
 1. The feedback was actually read (Gerrit MCP tool, the plugin's `gerrit-rest.py`, `curl`
-   against the review URL, or equivalent) and understood: the fix is trim + empty-fallback in
-   the config getter plus `DemoPluginConfigTest` cases, not something else.
+   against the review URL, or equivalent) and understood: the fix is the 40-character cap in
+   the config getter plus a `DemoPluginConfigTest` case, not something else.
 2. The fix landed IN the commented change, i.e. the commit that introduced `greetingPrefix`
    was updated in place (`git commit --amend` on it, `git rebase -i`/`--autosquash` with a
    `fixup!` that was squashed away, `git absorb`, the plugin's stack tooling) so that it keeps

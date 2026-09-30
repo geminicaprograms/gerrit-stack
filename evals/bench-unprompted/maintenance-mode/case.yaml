@@ -14,7 +14,7 @@ rework:
   fix:
     anchor_file: 'DemoPluginConfig\.java$'
     anchor_line: 'maintenanceMessage'
-    message: "issue (blocking): `maintenanceMessage` is returned as-is, so a blank `maintenanceMessage =` line in gerrit.config makes ping answer 503 with an empty message on REST and print an empty line on SSH. Treat an empty or whitespace-only value as unset: trim it and fall back to the default `demo-plugin is under maintenance`; add a `DemoPluginConfigTest` case for the blank value."
+    message: "issue (blocking): `maintenanceMessage` has no length limit, so a long value ends up in every 503 body and SSH line. Cap it at 200 characters in the getter (truncate, do not fail), document the cap in the setting's javadoc, and add a `DemoPluginConfigTest` case for a 250-character message expecting the first 200 characters."
   split:
     concerns: [maintenanceMessage setting, per-project maintenance state, demo-plugin-maintain capability, REST maintenance views, ping 503 on REST and SSH, SSH maintenance command]
     message: "issue (blocking): this change mixes {n} concerns ({concerns}); split it so each can be reviewed and reverted alone."

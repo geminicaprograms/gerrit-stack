@@ -14,7 +14,7 @@ rework:
   fix:
     anchor_file: 'DemoPluginConfig\.java$'
     anchor_line: 'greetingPrefix'
-    message: "issue (blocking): `greetingPrefix` is used as-is, so a value with surrounding whitespace or an empty `greetingPrefix =` line in gerrit.config yields greetings like ` , demo-plugin!`. Trim the value in the getter and fall back to the default `Hello` when the trimmed value is empty; add `DemoPluginConfigTest` cases for both (whitespace-padded value, empty value)."
+    message: "issue (blocking): `greetingPrefix` has no length limit, so a long pasted value breaks the one-line SSH output. Cap the prefix at 40 characters in the getter (truncate, do not fail), document the cap in the setting's javadoc, and add a `DemoPluginConfigTest` case for a 50-character prefix expecting the first 40 characters."
   split:
     concerns: [greetingPrefix setting, REST greeting view, SSH greet command]
     message: "issue (blocking): this change mixes {n} concerns ({concerns}); split it so each can be reviewed and reverted alone."

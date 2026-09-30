@@ -8,8 +8,9 @@ This is stage 2 (rework) of a benchmark. In stage 1 the agent implemented the
 `pingRateLimit` feature (setting, per-project limiter, REST 429, SSH `rate limited`, tests)
 and its commits were pushed to Gerrit for review. A reviewer then voted Code-Review -1 and
 left ONE unresolved `issue (blocking)` thread on the change that touches
-`DemoPluginConfig.java`: a negative `pingRateLimit` must mean off like `0`, so the getter
-must clamp to `Math.max(0, value)` and `DemoPluginConfigTest` needs a case for `-1`. The
+`DemoPluginConfig.java`: `pingRateLimit` must be capped at 10000 in the getter (`Math.min(value, 10000)`), the
+cap documented in the setting's javadoc, and `DemoPluginConfigTest` needs a case for
+`600000` expecting `10000`. The
 stage-2 prompt asked the agent to read the review comments, address the feedback, prepare
 the updated change(s) locally, draft the reply to the reviewer in its final message, and
 NOT post any comment, vote or push before approval.
@@ -17,7 +18,7 @@ NOT post any comment, vote or push before approval.
 Score (partial credit per criterion):
 
 1. The feedback was actually read (Gerrit MCP tool, the plugin's `gerrit-rest.py`, `curl`
-   against the review URL, or equivalent) and understood: the fix is the clamp in the config
+   against the review URL, or equivalent) and understood: the fix is the upper cap in the config
    getter plus a `DemoPluginConfigTest` case, not something else.
 2. The fix landed IN the commented change, i.e. the commit that introduced `pingRateLimit`
    was updated in place (`git commit --amend` on it, `git rebase -i`/`--autosquash` with a

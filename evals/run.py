@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import concurrent.futures
 import datetime as _dt
 import difflib
@@ -58,7 +59,8 @@ SCENARIOS = ("fix", "split")
 VARIANTS = ("natural", "nudged")
 REVIEWER = "rena"
 REVIEW_MESSAGE = "Reviewed as rena"
-CONVENTIONAL_RE = re.compile(r"^(praise|nitpick|suggestion|issue|todo|question|thought|chore|note)( \([^)]*\))?:", re.M)
+CONVENTIONAL_RE = re.compile(r"(?:^|[\s|>*_`(\"'])(praise|nitpick|suggestion|issue|todo|question|thought|chore|note)( \([^)]*\))?:", re.M)
+MCP_TOOL_RULE = "mcp__plugin_gerrit_gerrit"  # permission rule: all tools of the gerrit-mcp plugin's server
 DEFAULT_STAGE2_PROMPT = (
     "Reviewer feedback arrived on the change(s) you pushed for review to {url} (project {project}, "
     "change(s) {changes}). Read the review comments, address the feedback and prepare the updated "
@@ -866,9 +868,12 @@ def build_claude_cmd(prompt: str, case: Case, arm: str, plugin_dir: Optional[str
     # --setting-sources project,local keeps the user's own CLAUDE.md, hooks and user-scope
     # plugins out of the run, so every arm sees only what the case declares; the official
     # gerrit-mcp plugin is therefore loaded explicitly for the arms that want it.
+    tools = list(case.allowed_tools)
+    if arm in ("with", "mcp-only") and mcp_plugin_dir and MCP_TOOL_RULE not in tools:
+        tools.append(MCP_TOOL_RULE)  # every tool of the plugin's `gerrit` MCP server
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose",
            "--setting-sources", "project,local",
-           "--allowedTools", ",".join(case.allowed_tools),
+           "--allowedTools", ",".join(tools),
            "--max-turns", str(max_turns or case.max_turns)]
     m = model or case.model
     if m:
@@ -1161,6 +1166,17 @@ def commit_lines(ws: str, sha: str) -> int:
     return total
 
 
+def sync_origin_with_review(ws: str) -> None:
+    """The stage-1 push rebased the workspace onto review/master (the demo Gerrit's history),
+    so the fixture's local bare remote would no longer share a base with HEAD and every chain
+    tool would count Gerrit's root commits as part of the chain. Point origin's master at
+    review/master (a bare repo we own) and refresh origin/master."""
+    if _git(ws, "rev-parse", "--verify", "-q", "refs/remotes/review/master").returncode != 0:
+        return
+    _git(ws, "push", "-q", "--force", "origin", "refs/remotes/review/master:refs/heads/master")
+    _git(ws, "fetch", "-q", "origin")
+
+
 def tag_chain(ws: str, chain: list[dict], prefix: str = "refs/bench/stage1") -> None:
     for i, c in enumerate(chain, 1):
         _git(ws, "update-ref", f"{prefix}/{i}", c["sha"])
@@ -1418,9 +1434,13 @@ def change_file_content(rest: GerritRest, number: int, path: str) -> str:
     data = rest.get(f"/changes/{number}/revisions/current/files/{_q(path)}/content")
     if not isinstance(data, str):
         return ""
+    # Gerrit documents base64 here but the demo instance answers with the plain text when
+    # the client accepts JSON; only decode what is strictly base64 (no newlines, valid alphabet).
+    if "\n" in data or not re.fullmatch(r"[A-Za-z0-9+/=\s]+", data):
+        return data
     try:
-        return base64.b64decode(data).decode("utf-8", errors="replace")
-    except (ValueError, TypeError):
+        return base64.b64decode(data, validate=True).decode("utf-8", errors="replace")
+    except (ValueError, TypeError, binascii.Error):
         return data
 
 
@@ -1868,9 +1888,10 @@ def run_pipeline(pipe: Pipeline, arm: str, n: int, opts: argparse.Namespace, out
         rec["hashtags"] = tags
         rec["pushError"] = push1["error"]
         log(f"{label}: stage-1 push {push1['numbers'] or 'nothing'} ({push1['error'] or 'ok'})")
-        stage1_chain = chain_commits(ws, push1["base"]) if push1["ok"] else []
+        pushed1 = push1["ok"] or push1["error"] == "no new changes"  # identical patchset already there
+        stage1_chain = chain_commits(ws, push1["base"]) if pushed1 else []
         tag_chain(ws, stage1_chain)
-        gerrit_changes = query_changes_by_hashtags(rest, project, tags) if (push1["ok"] or push1["error"] == "no new changes") else []
+        gerrit_changes = query_changes_by_hashtags(rest, project, tags) if pushed1 else []
         by_cid = {c.get("change_id"): c for c in gerrit_changes}
         stage1_numbers = {c["change_id"]: int(by_cid[c["change_id"]]["_number"]) for c in stage1_chain
                           if c.get("change_id") in by_cid}
@@ -1905,6 +1926,7 @@ def run_pipeline(pipe: Pipeline, arm: str, n: int, opts: argparse.Namespace, out
         log(f"{label}: rena -1 on change {t_num} {target['path']}:{target['line']} ({target['reason']})")
         # ---- stage 2 prep
         _git(ws, "config", "gerrit-stack.host", base_url)
+        sync_origin_with_review(ws)
         _git(ws, "remote", "remove", "review")
         env2 = dict(env)
         env2["GERRIT_HOST"] = base_url

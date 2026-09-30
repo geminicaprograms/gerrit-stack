@@ -14,7 +14,7 @@ rework:
   fix:
     anchor_file: 'DemoPluginConfig\.java$'
     anchor_line: 'pingRateLimit'
-    message: "issue (blocking): `pingRateLimit` is read without validation, so a negative value in gerrit.config reaches the limiter and what `-1` means depends on the comparison there. Make negatives mean off, like `0`: clamp the getter to `Math.max(0, value)` and add a `DemoPluginConfigTest` case for `pingRateLimit = -1` expecting `0`."
+    message: "issue (blocking): `pingRateLimit` has no upper bound, so a value like `600000` (someone typing a per-hour or millisecond figure) silently disables the protection. Cap the getter at 10000 with `Math.min(value, 10000)`, document the cap in the setting's javadoc, and add a `DemoPluginConfigTest` case for `pingRateLimit = 600000` expecting `10000`."
   split:
     concerns: [pingRateLimit setting, per-project limiter, REST 429 answer, SSH rate limited message, unit tests]
     message: "issue (blocking): this change mixes {n} concerns ({concerns}); split it so each can be reviewed and reverted alone."

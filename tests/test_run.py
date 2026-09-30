@@ -1198,3 +1198,57 @@ class PipelineGlueTest(unittest.TestCase):
         self.assertGreater(rec["pipelineDurationSeconds"], 0)
         with open(os.path.join(run_dir, "rework-metrics.json")) as fh:
             self.assertEqual(json.load(fh)["target_change"], 11)
+
+
+class SmokeFollowupTest(unittest.TestCase):
+    """Regressions found by the first live pipeline (2026-09-30)."""
+
+    def test_plain_text_content_is_not_base64_decoded(self):
+        class R:
+            def get(self, path):
+                return "// Copyright\npackage x;\nint pingRateLimit = 3;\n"
+        text = run.change_file_content(R(), 12, "a/B.java")
+        self.assertIn("pingRateLimit", text)
+        self.assertEqual(run.anchor_line(text, "pingRateLimit"), 3)
+
+    def test_base64_content_is_decoded(self):
+        import base64 as b64
+        class R:
+            def get(self, path):
+                return b64.b64encode(b"a\nb pingRateLimit\n").decode()
+        self.assertEqual(run.anchor_line(run.change_file_content(R(), 1, "f"), "pingRateLimit"), 2)
+
+    def test_mcp_tool_rule_only_for_mcp_arms(self):
+        tmp = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, tmp, True)
+        with open(os.path.join(tmp, "prompt.md"), "w") as fh:
+            fh.write("---\nallowed_tools: [Read, Bash]\n---\nP\n")
+        case = run.Case(tmp)
+        for arm, want in (("with", True), ("mcp-only", True), ("without", False)):
+            cmd = run.build_claude_cmd("P", case, arm, "/plug", None, mcp_plugin_dir="/mcp")
+            tools = cmd[cmd.index("--allowedTools") + 1].split(",")
+            self.assertEqual(run.MCP_TOOL_RULE in tools, want, (arm, tools))
+            self.assertEqual(cmd[-1], "P")
+        cmd = run.build_claude_cmd("P", case, "with", "/plug", None)  # no mcp dir → no rule
+        self.assertNotIn(run.MCP_TOOL_RULE, cmd[cmd.index("--allowedTools") + 1])
+
+    def test_conventional_label_inside_table_cell(self):
+        self.assertTrue(run.CONVENTIONAL_RE.search("| 12 | f.java:1 | note: PS1 already does this |"))
+        self.assertTrue(run.CONVENTIONAL_RE.search("issue (blocking): x"))
+        self.assertFalse(run.CONVENTIONAL_RE.search("keynote: nothing"))
+
+    def test_sync_origin_with_review_moves_bare_master(self):
+        tmp = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, tmp, True)
+        import subprocess as sp
+        def git(cwd, *a):
+            return sp.run(["git", "-C", cwd, *a], capture_output=True, text=True, check=True).stdout.strip()
+        ws = os.path.join(tmp, "ws"); os.makedirs(ws)
+        env_id = ["-c", "user.name=t", "-c", "user.email=t@x"]
+        git(ws, "init", "-q", "-b", "master"); git(ws, *env_id, "commit", "-q", "--allow-empty", "-m", "root")
+        git(tmp, "init", "-q", "--bare", "origin.git"); git(tmp, "init", "-q", "--bare", "review.git")
+        git(ws, "remote", "add", "origin", os.path.join(tmp, "origin.git")); git(ws, "push", "-q", "origin", "HEAD:refs/heads/master")
+        git(ws, *env_id, "commit", "-q", "--allow-empty", "-m", "other history")
+        git(ws, "remote", "add", "review", os.path.join(tmp, "review.git")); git(ws, "push", "-q", "review", "HEAD:refs/heads/master")
+        git(ws, "fetch", "-q", "review")
+        run.sync_origin_with_review(ws)
+        self.assertEqual(git(ws, "rev-parse", "refs/remotes/origin/master"), git(ws, "rev-parse", "refs/remotes/review/master"))
+        self.assertEqual(git(os.path.join(tmp, "origin.git"), "rev-parse", "refs/heads/master"), git(ws, "rev-parse", "HEAD"))

@@ -53,3 +53,5 @@ Links: [SPEC](/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/p
 - 2026-09-30 `make check` after A1+A2: validate --strict ok, shellcheck clean, bats 116/116, python 89 tests OK.
 - 2026-09-30 P4.3 **M1** on live demo: `chain-status.sh --preflight` rc=0; 3-commit chain → `push-chain.sh` printed `git push origin HEAD:refs/for/master` → changes 2,3,4 created; `gerrit-rest.py related 4` lists all 3; `reviewer-comment.sh 3` posted CR-1 + unresolved `issue (blocking)`; `comments 3` lists it. Found+fixed: demo clone was not detected as Gerrit (no .gitreview/refspec; URL regex) → seed sets remote/refspec, regex learns `/a/`.
 - 2026-09-30 P3 fixes committed; `make check`: bats 122, python 90, validate --strict, shellcheck all green.
+- 2026-09-30 P4.8 hub symlinks: `~/claude-skills-hub/skills/{gerrit-stack,stack-planner,gerrit-review}` → repo skills; `~/.claude/skills` untouched ✓.
+- 2026-09-30 P4.10 `claude plugin details gerrit-stack` (local marketplace install, then uninstalled): always-on ~709 tok; on-invoke gerrit-stack ~6.8k, gerrit-review ~4.3k, stack-planner ~3.6k ✓ (< 4k always-on target).

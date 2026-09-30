@@ -5,9 +5,10 @@
 #   commit       mark the session, check exactly one Change-Id on HEAD, run
 #                diff-budget.sh HEAD when present (exit 3 → retro-split hint),
 #                check required footers (gerrit-stack.footers), refresh the
-#                Change-Id snapshot
+#                Change-Id snapshot; fixup!/squash! commits: mark + snapshot only
 #   rebase / cherry-pick / reset
-#                compare the chain's Change-Id set with the snapshot (lost:/new:)
+#                compare the chain's Change-Id set with the snapshot (lost:/new:);
+#                the snapshot is refreshed only when nothing drifted
 #   push         to refs/for: report the /c/<proj>/+/<n> change numbers found
 #                in the tool response, or explain "no new changes"
 # Feedback = message on stderr + exit 2 (never blocks); otherwise exit 0 silent.
@@ -52,6 +53,13 @@ post_commit() {
   [ -n "$session" ] && gs_session_mark "$session"
 
   if gs_git_args_have "$args" --dry-run; then return 0; fi
+
+  # fixup!/squash!/amend! commits legitimately carry no Change-Id (the hook
+  # skips them; autosquash folds them away): no id or footer check for those.
+  if gs_is_fixup HEAD; then
+    gs_snapshot_write
+    return 0
+  fi
 
   ids=$(gs_change_ids_of HEAD)
   n=0
@@ -100,11 +108,16 @@ post_rewrite() {
     || [ -f "$gitdir/CHERRY_PICK_HEAD" ]; then
     return 0
   fi
-  diff=$(gs_snapshot_diff) && return 0
+  # No drift: refresh the snapshot (a no-op for the id set). On drift leave it
+  # untouched so chain-status.sh --verify-ids keeps reporting the same lost:/new:
+  # lines until the user repaired the chain and ran --snapshot explicitly.
+  if diff=$(gs_snapshot_diff); then
+    gs_snapshot_write
+    return 0
+  fi
   feedback "after '$verb' the local chain's Change-Id set differs from the snapshot taken at the last commit:
 $diff
-'lost:' ids no longer exist in ${GS_BASE#refs/remotes/}..HEAD (dropped or rewritten commits — Gerrit will see NEW changes instead of new patchsets); 'new:' ids appeared. If this is unintended, restore from the reflog (git reflog) or re-apply the original Change-Id lines with git commit --amend. Snapshot refreshed to the current chain."
-  gs_snapshot_write
+'lost:' ids no longer exist in ${GS_BASE#refs/remotes/}..HEAD (dropped or rewritten commits — Gerrit will see NEW changes instead of new patchsets); 'new:' ids appeared. If this is unintended, restore from the reflog (git reflog) or re-apply the original Change-Id lines with git commit --amend. The snapshot was NOT refreshed: chain-status.sh --verify-ids repeats this drift until you run chain-status.sh --snapshot after repairing (or after confirming the change is intended)."
   return 0
 }
 

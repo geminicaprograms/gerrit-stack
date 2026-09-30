@@ -233,6 +233,40 @@ assert_gs_unset() {
   assert_eq refs/remotes/origin/master "$GS_BASE" GS_BASE
 }
 
+@test "gs_detect: branch resolves from HEAD's @{upstream} on <remote>, ahead of .gitreview defaultbranch" {
+  local repo
+  repo=$(make_gerrit_repo)
+  cd "$repo"
+  git branch -q stable-1
+  git push -q origin stable-1:refs/heads/stable-1
+  git checkout -q stable-1
+  git branch -q --set-upstream-to=origin/stable-1
+  gs_detect
+  assert_eq stable-1 "$GS_BRANCH" GS_BRANCH
+  assert_eq refs/remotes/origin/stable-1 "$GS_BASE" GS_BASE
+}
+
+@test "gs_detect: branch stays on .gitreview defaultbranch when HEAD has no upstream" {
+  local repo
+  repo=$(make_gerrit_repo)
+  cd "$repo"
+  run --separate-stderr git rev-parse --abbrev-ref --symbolic-full-name @{upstream}
+  assert_eq 128 "$status"   # sanity: master has no upstream configured
+  gs_detect
+  assert_eq master "$GS_BRANCH" GS_BRANCH
+  assert_eq refs/remotes/origin/master "$GS_BASE" GS_BASE
+}
+
+@test "gs_detect: gerrit-stack.branch config wins over HEAD's @{upstream}" {
+  local repo
+  repo=$(make_gerrit_repo)
+  cd "$repo"
+  git branch -q --set-upstream-to=origin/master
+  git config gerrit-stack.branch foo
+  gs_detect
+  assert_eq foo "$GS_BRANCH" GS_BRANCH
+}
+
 @test "gs_detect: gerrit-stack.enabled=false disables and clears stale exports" {
   local repo
   repo=$(make_gerrit_repo)
@@ -652,4 +686,14 @@ EOF
   gs_snapshot_write
   after="$(set +o) $(pwd -P)"
   assert_eq "$before" "$after"
+}
+
+@test "gs_detect: http remote with Gerrit /a/ auth prefix is a Gerrit signal (host and project derived)" {
+  local repo="$BATS_TEST_TMPDIR/aprefix"
+  mkdir -p "$repo" && git -C "$repo" init -q -b master
+  git -C "$repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
+  git -C "$repo" remote add origin http://localhost:8080/a/demo-plugin
+  run bash -c "source '$REPO_ROOT/scripts/lib/gerrit-detect.sh'; cd '$repo' && gs_detect && printf '%s|%s|%s|%s' \"\$GS_REMOTE\" \"\$GS_HOST\" \"\$GS_PROJECT\" \"\$GS_BRANCH\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "origin|http://localhost:8080|demo-plugin|master" ]
 }

@@ -20,7 +20,7 @@
 #   gs_trace <script> <verb> <decision>   appends a TAB-separated line to
 #                          $GERRIT_STACK_TRACE when that variable is set.
 
-_GS_GERRIT_URL_RE='(review\.|gerrit|googlesource\.com|gerrithub\.io|:29418/)'
+_GS_GERRIT_URL_RE='(review\.|gerrit|googlesource\.com|gerrithub\.io|:29418/|^https?://[^/]+/a/)'
 _GS_VARS='GS_TOPLEVEL GS_REMOTE GS_HOST GS_BRANCH GS_PROJECT GS_BASE GS_HOOK_OK GS_HOOKS_DIR GS_STATE_DIR'
 
 # ---------------------------------------------------------------- internals
@@ -250,8 +250,15 @@ gs_detect() {
   _gs_remote_url "$top" "$remote"
   url=$_gs_remote_url_out
 
-  # branch: config → .gitreview defaultbranch → push refspec → <remote>/HEAD → master
+  # branch: config → upstream of HEAD (when it tracks <remote>) →
+  #         .gitreview defaultbranch → push refspec → <remote>/HEAD → master
   branch=$(git -C "$top" config --get gerrit-stack.branch 2>/dev/null) || branch=''
+  if [ -z "$branch" ]; then
+    r=$(git -C "$top" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) || r=''
+    case "$r" in
+      "$remote"/*) branch=${r#"$remote"/} ;;
+    esac
+  fi
   [ -n "$branch" ] || branch=$gr_branch
   if [ -z "$branch" ]; then
     _gs_push_branch "$top" "$remote"

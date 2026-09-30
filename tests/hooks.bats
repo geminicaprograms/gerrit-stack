@@ -434,9 +434,47 @@ trace_has() {
   assert_eq 2 "$status"
   assert_contains "$stderr" "lost: $id2"
   trace_has $'git-post\trebase\tfeedback'
-  # an unchanged chain after the refreshed snapshot is silent again
+  # the snapshot is NOT refreshed on drift: --verify-ids still reports the loss
+  cd "$repo"
+  run --separate-stderr bash "$REPO_ROOT/scripts/chain-status.sh" --verify-ids
+  assert_eq 1 "$status" "verify-ids status"
+  assert_contains "$output" "lost: $id2" "verify-ids output"
+  # ... and so does the next rewrite hook, until --snapshot is run explicitly
+  run_hook "$POST" "$(hook_json PostToolUse "$repo" 'git rebase origin/master')"
+  assert_eq 2 "$status"
+  assert_contains "$stderr" "lost: $id2"
+  run --separate-stderr bash "$REPO_ROOT/scripts/chain-status.sh" --snapshot
+  assert_eq 0 "$status" "snapshot status"
   run_hook "$POST" "$(hook_json PostToolUse "$repo" 'git rebase origin/master')"
   assert_silent
+}
+
+@test "post: rebase without drift refreshes the snapshot and stays silent" {
+  local repo
+  repo=$(make_gerrit_repo)
+  commit_file "$repo" a.txt a "feat: first" >/dev/null
+  run_hook "$POST" "$(hook_json PostToolUse "$repo" 'git commit -m "feat: first"')"
+  assert_silent
+  run_hook "$POST" "$(hook_json PostToolUse "$repo" 'git rebase origin/master')"
+  assert_silent
+  [ -s "$repo/.git/gerrit-stack/chain-ids" ] || fail "snapshot missing"
+  trace_has $'git-post\trebase\tsilent'
+}
+
+@test "post: git commit --fixup=<sha> (no Change-Id by design) → silent, marker + snapshot written" {
+  local repo sha
+  repo=$(make_gerrit_repo)
+  sha=$(commit_file "$repo" a.txt a "feat: first")
+  printf 'a2\n' > "$repo/a.txt"
+  git -C "$repo" add a.txt
+  git -C "$repo" commit -q --fixup="$sha"
+  assert_eq "fixup! feat: first" "$(git -C "$repo" log -1 --format=%s)" subject
+  assert_eq 0 "$(git -C "$repo" log -1 --format=%B | grep -c '^Change-Id:')" "fixup has no id"
+  run_hook "$POST" "$(hook_json PostToolUse "$repo" "git commit --fixup=$sha" sess-fx)"
+  assert_silent
+  [ -f "$repo/.git/gerrit-stack/session-sess-fx" ] || fail "session marker missing"
+  [ -s "$repo/.git/gerrit-stack/chain-ids" ] || fail "snapshot missing"
+  trace_has $'git-post\tcommit\tsilent'
 }
 
 @test "post: push response with /c/demo/+/12 → feedback lists 12 and get_related_changes" {

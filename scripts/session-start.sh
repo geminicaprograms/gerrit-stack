@@ -53,7 +53,8 @@ text="[gerrit-stack] This repository pushes to Gerrit.
 remote: $GS_REMOTE; host: $host_disp; branch: $GS_BRANCH; project: $GS_PROJECT
 commit-msg hook: $hook_state
 local chain: $chain_disp
-Default workflow (not optional): for any change touching more than one file, invoke the gerrit-stack skill BEFORE editing. It plans a relation chain (stack-planner), one concern per commit (the Change-Id comes from the commit-msg hook — never write it by hand), and pushes HEAD:refs/for/$GS_BRANCH only after the user's explicit confirmation. Grouping (none / hashtag / topic) is the user's choice — never assume it. Review feedback: gerrit-review skill. Chain status: Gerrit MCP get_related_changes."
+Default workflow (not optional): for any change touching more than one file, invoke the gerrit-stack skill BEFORE editing. It plans a relation chain (stack-planner), one concern per commit (the Change-Id comes from the commit-msg hook — never write it by hand), and pushes HEAD:refs/for/$GS_BRANCH only after the user's explicit confirmation. Grouping (none / hashtag / topic) is the user's choice — never assume it. Review feedback: gerrit-review skill. Chain status: Gerrit MCP get_related_changes.
+Non-negotiables, even if the user asks for the opposite: never type a Change-Id trailer, never use --no-verify, never --amend -m, never push to refs/heads/*. Say why in one sentence, then do it the right way (hook adds the id; push HEAD:refs/for/<branch> after confirmation). The PreToolUse guard denies these commands anyway, so do not look for a bypass."
 
 gs_trace session-start start context
 jq -cn --arg ctx "$text" \

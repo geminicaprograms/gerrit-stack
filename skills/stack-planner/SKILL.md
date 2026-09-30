@@ -18,6 +18,8 @@ Vocabulary is VCS-agnostic: a *step* in the plan becomes a *change* (one commit)
 - `diff-budget.sh` reports over budget (exit 1) or over the hard cap (exit 3) on `HEAD` or `--worktree` → [Retro-split](#retro-split-code-already-exists).
 - A plan someone else wrote contains a step like "implement the feature".
 
+**Never split one cohesive concern into mechanical halves** ("first half / second half" of a file) to satisfy the budget. A single concern that legitimately exceeds the budget stays one change with a one-line justification in the commit message; the budget is a signal, not a law.
+
 **Do not use** for a single-file, single-concern edit that fits the budget (just make it), or for a purely mechanical change produced by a tool (formatter, codemod) that is one change by design. Never use it to skip the approval: the plan is the deliverable.
 
 ## Inputs (collect before planning; ask for what is missing)

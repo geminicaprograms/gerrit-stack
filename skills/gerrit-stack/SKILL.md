@@ -56,6 +56,7 @@ branch is already grouped by parent-child; `none` is the recommended answer.
 | Chain table (`sha7 \| Change-Id \| +/- \| files \| subject`) | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh"` |
 | Snapshot / verify Change-Id set | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh" --snapshot` / `--verify-ids` |
 | Size of the last commit | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" HEAD` |
+   Over budget for a single cohesive concern? Keep it one change and justify it in the message; never split a concern into mechanical halves (see stack-planner).
 | Install the commit-msg hook | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-commit-msg-hook.sh"` |
 | Compose the push command | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/push-chain.sh" [--wip]` |
 | REST fallback when MCP is unavailable | `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/gerrit-rest.py" <cmd> …` |

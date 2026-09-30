@@ -1,10 +1,9 @@
 ---
 type: regex
-pattern: '^[ \t>*_|`"-]*(issue|suggestion|question|nit|nitpick|praise|thought|note|todo|chore)\b'
-flags: m
+pattern: '\b(issue|suggestion|question|nit|nitpick|praise|thought|note|todo|chore)(\s*\([^)]*\))?:'
 target: last_message
 match: contains
 weight: 2
 ---
-At least one drafted reply line starts with a Conventional Comments label (list bullets, table
-pipes, bold markers and quotes before the label are tolerated).
+At least one drafted reply carries a Conventional Comments label (`label:` or `label (decoration):`),
+anywhere in the message — replies are usually shown inside a table cell, so no line anchor.

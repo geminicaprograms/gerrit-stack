@@ -199,18 +199,20 @@ _gen_lines() {
 }
 
 # make_dirty_diff <lines> — an uncommitted change of about <lines> lines spread
-# over three independent concerns (logging, config parsing, docs+tests) plus a
+# over four independent concerns (logging, config parsing, config tests, docs), each
+# under the 150-line soft budget, plus a
 # one-line wiring edit in greet.sh. Nothing is staged.
 make_dirty_diff() {
   local total=${1:-600} third
-  third=$((total / 3))
+  # each concern stays within the soft budget (<=150 lines) so a by-concern split is possible
+  third=$((total / 4))
   mkdir -p lib docs tests
   printf '#!/usr/bin/env bash\n# lib/logging.sh — structured logging helpers (concern: logging)\n' > lib/logging.sh
-  _gen_lines lib/logging.sh "$((third - 2))" log "logging"
+  _gen_lines lib/logging.sh "$((third - 6))" log "logging"
   printf '#!/usr/bin/env bash\n# lib/config.sh — key=value config parsing (concern: configuration)\n' > lib/config.sh
-  _gen_lines lib/config.sh "$((third - 2))" cfg "config"
+  _gen_lines lib/config.sh "$((third - 6))" cfg "config"
   printf '#!/usr/bin/env bash\n# tests/test_config.sh — tests for lib/config.sh (concern: docs + tests)\n' > tests/test_config.sh
-  _gen_lines tests/test_config.sh "$((third / 2 - 2))" test_cfg "config test"
+  _gen_lines tests/test_config.sh "$((third * 2 / 3 - 2))" test_cfg "config test"
   {
     printf '# Usage guide\n\n'
     local i=1

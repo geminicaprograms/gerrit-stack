@@ -49,3 +49,7 @@ Links: [SPEC](/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/p
 ## Verification log
 - 2026-09-29 `claude plugin validate ./ --strict` → "Validation passed".
 - 2026-09-29 probe c/d via `claude -p --plugin-dir` with stub hooks + `GERRIT_STACK_TRACE` → see Phase 0 findings.
+- 2026-09-30 P4.2(a) plain repo + `claude -p --plugin-dir`: no hook trace, no `[gerrit-stack]` context → silent ✓. P4.2(b) `experiments/gerrit`: SessionStart context injected (remote/host/branch/project, hook installed, chain 1 ahead) ✓; finding: branch resolved to `.gitreview defaultbranch` (master) while checkout is stable-3.12 → fix: prefer HEAD's upstream branch.
+- 2026-09-30 `make check` after A1+A2: validate --strict ok, shellcheck clean, bats 116/116, python 89 tests OK.
+- 2026-09-30 P4.3 **M1** on live demo: `chain-status.sh --preflight` rc=0; 3-commit chain → `push-chain.sh` printed `git push origin HEAD:refs/for/master` → changes 2,3,4 created; `gerrit-rest.py related 4` lists all 3; `reviewer-comment.sh 3` posted CR-1 + unresolved `issue (blocking)`; `comments 3` lists it. Found+fixed: demo clone was not detected as Gerrit (no .gitreview/refspec; URL regex) → seed sets remote/refspec, regex learns `/a/`.
+- 2026-09-30 P3 fixes committed; `make check`: bats 122, python 90, validate --strict, shellcheck all green.

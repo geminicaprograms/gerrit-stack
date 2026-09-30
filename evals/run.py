@@ -805,6 +805,18 @@ def run_process(cmd: list[str], cwd: str, env: dict, timeout: float, stdout_path
             return proc.returncode if proc.returncode is not None else -9, True
 
 
+
+def _extract_verdict(text: str) -> str:
+    """Return 'PASS' or 'FAIL' when one of the last three non-empty lines is exactly that
+    token (after stripping markdown emphasis/punctuation); '' otherwise."""
+    lines = [ln.strip().strip("*`._:-").upper() for ln in text.splitlines() if ln.strip()]
+    for ln in reversed(lines[-3:]):
+        if ln in ("PASS", "FAIL"):
+            return ln
+        if ln.startswith(("PASS", "FAIL")) and len(ln) <= 12:
+            return ln[:4]
+    return ""
+
 def make_judge(model: str, votes: int, cwd: str, log_dir: str) -> Callable[[str], tuple[bool, str, float]]:
     counter = {"n": 0}
 
@@ -831,10 +843,28 @@ def make_judge(model: str, votes: int, cwd: str, log_dir: str) -> Callable[[str]
             except (ValueError, OSError):
                 pass
             cost += c
-            last = next((ln.strip().strip("*`.").upper() for ln in reversed(text.splitlines()) if ln.strip()), "")
+            last = _extract_verdict(text)
+            if not last:
+                # Judge did not end with PASS/FAIL: retry once with a stricter format demand
+                # instead of scoring a formatting slip as a real FAIL.
+                counter["n"] += 1
+                base2 = os.path.join(log_dir, f"judge-{counter['n']:02d}-retry")
+                strict = prompt + "\n\nFORMAT REMINDER: your reply MUST end with a final line that is exactly PASS or FAIL (nothing else on that line)."
+                cmd2 = cmd[:-1] + [strict]
+                rc, timed_out = run_process(cmd2, cwd, env, 300, base2 + ".json", base2 + ".stderr")
+                try:
+                    with open(base2 + ".json", encoding="utf-8", errors="replace") as fh:
+                        data = json.loads(fh.read() or "{}")
+                    if isinstance(data, list):
+                        data = next((d for d in data if isinstance(d, dict) and d.get("type") == "result"), {})
+                    text = str(data.get("result") or "")
+                    cost += float(data.get("total_cost_usd") or 0.0)
+                except (ValueError, OSError):
+                    text = ""
+                last = _extract_verdict(text)
             verdict = last.startswith("PASS")
-            if not last.startswith(("PASS", "FAIL")):
-                details.append(f"vote {v + 1}: no PASS/FAIL verdict (rc={rc}, timed_out={timed_out}) -> FAIL")
+            if not last:
+                details.append(f"vote {v + 1}: no PASS/FAIL verdict after retry (rc={rc}, timed_out={timed_out}) -> FAIL")
             else:
                 reason = " ".join(text.strip().splitlines()[:-1]).strip()
                 details.append(f"vote {v + 1}: {last[:4]} — {_truncate(reason, 300)}")

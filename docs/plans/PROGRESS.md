@@ -3,7 +3,7 @@
 Links: [SPEC](/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/plans/2026-09-29-stack-changes-talk-and-gerrit-stack-plugin.md) · [Execution plan](/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/plans/2026-09-29-part1-execution-plan.md) · [Agent brief](AGENT-BRIEF.md)
 
 ## Resume here
-**Part 1 complete (2026-09-30)** except two items: (1) M2 "MCP get_related_changes against localhost" is blocked by the official gerrit-mcp forcing https (decision needed: TLS sidecar / upstream change / REST fallback on stage); (2) eval and benchmark were run once per case (`--runs 1`); repeat with `--runs 2`/`3` before tagging v0.1.0. Next steps: W3 rehearsal with `demo/RUN.md` (demo Gerrit is up on :8080 with chain 2–4 pushed; `make demo-reset` for a clean slate), Part 2 deck. Follow-ups listed at the bottom.
+**Part 1 complete (2026-09-30)** except two items: (1) M2 works only with the local gerrit-mcp patch (`demo/patch-gerrit-mcp.sh`; propose upstream); (2) eval and benchmark were run once per case (`--runs 1`); repeat with `--runs 2`/`3` before tagging v0.1.0. Next steps: W3 rehearsal with `demo/RUN.md` (demo Gerrit is up on :8080 with chain 2–4 pushed; `make demo-reset` for a clean slate), Part 2 deck. Follow-ups listed at the bottom.
 
 ## Phase status
 | Phase / WP | Status | Commit | Verified by | Notes |
@@ -31,7 +31,7 @@ Links: [SPEC](/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/p
 | A10 docs | done (refreshed after P4) | wip | README/CHANGELOG/jj-stretch written; review in P3 | flagged: jj upload flags uncertain |
 | A11 metrics/benchmark | done (collector fixes applied) | wip | bats 9/9, unittest 12/12, bench fixtures build, collect.py renders placeholder | full benchmark run in P4 |
 | P3 review | done | see fix commits | skills review (15 findings), python/demo review (3 findings) | A8 java/scripts review not re-run after rate-limit kill |
-| P4 integration | done except M2 (blocked) | see verification log | make check; hook e2e; M1 live chain; headless demo run; evals 7/7; benchmark 3 arms; hub symlinks; context cost | |
+| P4 integration | done (M2 via local gerrit-mcp patch) | see verification log | make check; hook e2e; M1 live chain; headless demo run; evals 7/7; benchmark 3 arms; hub symlinks; context cost | |
 
 ## Phase 0 findings
 - `claude plugin validate ./ --strict`: passes with `"dependencies": ["gerrit@gerrit-mcp"]` in plugin.json; marketplace.json needs a `description` or strict fails.
@@ -63,7 +63,8 @@ Links: [SPEC](/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/p
 ## Follow-ups
 - Benchmark prompts currently include the repo rules ("one concern per change…"); add an *unprompted* variant of each bench case (plain product request) — that is where the plugin's delta should show.
 - Re-run the A8 (Java skeleton + scripts) code review; the reviewer agent was killed by the rate limit.
-- gerrit-mcp https rewrite: pick TLS sidecar vs upstream change vs fallback for the stage demo.
+- Send the `_normalize_gerrit_url` http-preservation change upstream to gerrit-mcp-server (local patch in `demo/patches/`).
 - `evals/run.py -j N`: run cases in parallel within an arm (workspaces are already isolated per run); keep arms sequential because the `without` arm toggles the user-level gerrit-mcp plugin. Same token spend, ~N× faster, more rate-limit pressure (2–3 is the sweet spot on this account).
 - 2026-09-30 P4.7b benchmark (`evals/run.py --bench --runs 1 --arms with,mcp-only,without`, 9 valid runs; first A/B attempt crashed on a runner arg-order bug, fixed): arm C vs B — turns 13 vs 17, wall 147 s vs 199 s, cost $0.68 vs $0.69 (−2 %), chain length 2 vs 1, budget/one-Change-Id/conventional 100 % in all arms (bench prompts spell out the repo rules, so parity on correctness is expected; the 7 behavioural evals carry the differentiation). `docs/benchmark.md` rendered; targets: budget PASS, Change-Id PASS, violations PASS, cost overhead PASS.
 - Spend this session (approx.): evals $3.6 + benchmark $7.0 + demo/probe runs ≈ $2 → ≈ $13 of API usage, plus subagent tokens.
+- 2026-09-30 P4.4 **M2** passes with a local gerrit-mcp patch (`demo/patch-gerrit-mcp.sh`, diff in `demo/patches/`): keep an explicit `http://` host instead of rewriting to https. `get_related_changes(4)` lists 4→3→2 and `list_change_comments(3)` shows rena's thread against the demo. `claude plugin update` reverts it; re-apply with the script (apply/check/revert all exercised). Proposed upstream change: gerrit-mcp-server `_normalize_gerrit_url` — only add `https://` when no scheme is given.

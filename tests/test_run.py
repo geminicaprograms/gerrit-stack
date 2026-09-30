@@ -371,8 +371,7 @@ class AllowedToolsTerminationTest(unittest.TestCase):
         here = os.path.dirname(os.path.abspath(__file__))
         spec = importlib.util.spec_from_file_location("run_mod", os.path.join(here, "..", "evals", "run.py"))
         mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-        case = mod.Case.__new__(mod.Case)
-        case.max_turns, case.model, case.allowed_tools = 5, None, ["Read", "Bash"]
+        case = mod.Case(os.path.join(here, "..", "evals", "trigger-stack-planner"))
         for arm, pd in (("with", "/p"), ("mcp-only", "/p"), ("without", None)):
             cmd = mod.build_claude_cmd("PROMPT", case, arm, pd, None)
             self.assertEqual(cmd[-1], "PROMPT")

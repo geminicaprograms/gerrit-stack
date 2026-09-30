@@ -772,16 +772,32 @@ def score_graders(results: list[dict]) -> float:
 # claude invocations
 # --------------------------------------------------------------------------
 
+def find_mcp_plugin_dir() -> Optional[str]:
+    """Newest installed gerrit-mcp plugin checkout (~/.claude/plugins/cache/gerrit-mcp/gerrit/<hash>)."""
+    base = os.path.join(os.path.expanduser("~"), ".claude", "plugins", "cache", "gerrit-mcp", "gerrit")
+    try:
+        dirs = sorted(d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d)))
+    except OSError:
+        return None
+    return os.path.join(base, dirs[-1]) if dirs else None
+
+
 def build_claude_cmd(prompt: str, case: Case, arm: str, plugin_dir: Optional[str], model: Optional[str],
-                     max_turns: Optional[int] = None) -> list[str]:
+                     max_turns: Optional[int] = None, mcp_plugin_dir: Optional[str] = None) -> list[str]:
     # --allowedTools is variadic: it swallows every following bare argument, so it must be
     # followed by another option (--max-turns is always present) before the prompt goes last.
+    # --setting-sources project,local keeps the user's own CLAUDE.md, hooks and user-scope
+    # plugins out of the run, so every arm sees only what the case declares; the official
+    # gerrit-mcp plugin is therefore loaded explicitly for the arms that want it.
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose",
+           "--setting-sources", "project,local",
            "--allowedTools", ",".join(case.allowed_tools),
            "--max-turns", str(max_turns or case.max_turns)]
     m = model or case.model
     if m:
         cmd += ["--model", m]
+    if arm in ("with", "mcp-only") and mcp_plugin_dir:
+        cmd += ["--plugin-dir", mcp_plugin_dir]
     if arm == "with" and plugin_dir:
         cmd += ["--plugin-dir", plugin_dir]
     cmd.append(prompt)
@@ -838,7 +854,7 @@ def make_judge(model: str, votes: int, cwd: str, log_dir: str) -> Callable[[str]
             base = os.path.join(log_dir, f"judge-{counter['n']:02d}")
             with open(base + ".prompt.md", "w", encoding="utf-8") as fh:
                 fh.write(prompt)
-            cmd = ["claude", "-p", "--model", model, "--max-turns", "1", "--output-format", "json",
+            cmd = ["claude", "-p", "--setting-sources", "project,local", "--model", model, "--max-turns", "1", "--output-format", "json",
                    "--no-session-persistence", prompt]
             env = dict(os.environ)
             env.pop("GERRIT_STACK_TRACE", None)
@@ -918,33 +934,11 @@ def set_plugin(name: str, enabled: bool) -> bool:
 
 
 def arm_plugin_state(arm: str, mcp_plugin: str, dry_run: bool) -> Callable[[], None]:
-    """Put gerrit-mcp in the state the arm needs; return a restore callable."""
-    if not mcp_plugin:
-        return lambda: None
-    want = arm in ("with", "mcp-only")
+    """Arms no longer toggle the user-scope plugin: runs use --setting-sources project,local and
+    load gerrit-mcp explicitly with --plugin-dir, so there is no global state to flip or restore."""
     if dry_run:
-        print(f"# arm {arm}: claude plugin {'enable' if want else 'disable'} {mcp_plugin} (restored afterwards)")
-        return lambda: None
-    current = plugin_enabled(mcp_plugin)
-    if current is None:
-        warn(f"could not determine state of plugin {mcp_plugin}; arm {arm} runs with whatever is installed")
-        return lambda: None
-    if current == want:
-        return lambda: None
-    log(f"arm {arm}: {'enabling' if want else 'disabling'} {mcp_plugin}")
-    if not set_plugin(mcp_plugin, want):
-        return lambda: None
-
-    def restore() -> None:
-        log(f"restoring {mcp_plugin} -> {'enabled' if current else 'disabled'}")
-        set_plugin(mcp_plugin, current)
-
-    return restore
-
-
-# --------------------------------------------------------------------------
-# Running one case × arm × n
-# --------------------------------------------------------------------------
+        print(f"# arm {arm}: user settings excluded; gerrit-mcp {'loaded via --plugin-dir' if arm != 'without' else 'not loaded'}")
+    return lambda: None
 
 def snapshot(ws: str) -> dict[str, tuple[int, int]]:
     out: dict[str, tuple[int, int]] = {}
@@ -1029,7 +1023,7 @@ def run_one(case: Case, arm: str, n: int, opts: argparse.Namespace, out_dir: str
                 error = f"fixture exited {rc}" + (" (timeout)" if timed_out else "")
         before = snapshot(ws)
         if error is None:
-            cmd = build_claude_cmd(case.prompt, case, arm, opts.plugin_dir, opts.model)
+            cmd = build_claude_cmd(case.prompt, case, arm, opts.plugin_dir, opts.model, mcp_plugin_dir=opts.mcp_dir)
             with open(os.path.join(run_dir, "command.txt"), "w", encoding="utf-8") as fh:
                 fh.write(shlex.join(cmd) + "\n")
             log(f"{case.name}/{arm}/{n}: {shlex.join(cmd)[:160]}…")
@@ -1235,6 +1229,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--judge-model", default="haiku")
     ap.add_argument("--judge-votes", type=int, default=1)
     ap.add_argument("--plugin-dir", default=os.path.dirname(here), help="plugin root for the `with` arm")
+    ap.add_argument("--mcp-plugin-dir", default=None, help="installed gerrit-mcp plugin dir for the with/mcp-only arms (default: newest ~/.claude/plugins/cache/gerrit-mcp/gerrit/*)")
     ap.add_argument("--mcp-plugin", default="gerrit@gerrit-mcp", help="plugin toggled per arm ('' = never touch)")
     ap.add_argument("--keep", action="store_true", help="keep run workspaces under the run dir")
     ap.add_argument("--dry-run", action="store_true", help="print the commands, run nothing")
@@ -1242,6 +1237,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--out-dir", default=None, help="default evals/results/<timestamp>")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
+    args.mcp_dir = args.mcp_plugin_dir or find_mcp_plugin_dir()
+    if args.mcp_dir is None:
+        warn('gerrit-mcp plugin dir not found; the with/mcp-only arms run without the official MCP')
     args.plugin_dir = os.path.abspath(args.plugin_dir)
     arms = [a.strip() for a in args.arms.split(",") if a.strip()]
     if args.ablation:
@@ -1276,7 +1274,7 @@ def main(argv=None) -> int:
                           f"{', '.join(g.name for g in case.graders) or 'none'})")
                     if case.scaffold_script:
                         print(f"bash {shlex.quote(case.scaffold_script)}")
-                    print(shlex.join(build_claude_cmd(case.prompt, case, arm, opts.plugin_dir, opts.model)))
+                    print(shlex.join(build_claude_cmd(case.prompt, case, arm, opts.plugin_dir, opts.model, mcp_plugin_dir=opts.mcp_dir)))
         print(f"# out-dir would be {out_dir}")
         return 0
 

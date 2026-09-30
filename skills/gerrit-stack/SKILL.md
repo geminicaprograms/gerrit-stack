@@ -112,7 +112,7 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
    (or `git commit -m '<subject>' -m '<body>'` for short ones).
 5. `bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh"` — the new row must show
    exactly one Change-Id. Missing → hook problem, see troubleshooting; do not continue.
-6. `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" HEAD`
+6. Before committing: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" --cached` — over budget (exit 1) means put the one-line justification into this commit message now (a later `--amend -F` is allowed only when the file keeps the Change-Id line). After committing: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" HEAD`
    - exit 0: within budget
    - exit 1: over the soft budget — justify in one line or split
    - exit 3: over the hard cap — retro-split now via `/gerrit-stack:stack-planner`

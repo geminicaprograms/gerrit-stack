@@ -34,6 +34,7 @@ decision=silent      # overall: silent | ask | deny
 deny_msg=''
 ask_reason=''
 inv_decision=silent  # per invocation
+inv_dir='.'          # dir of the invocation being judged (relative to cwd)
 
 deny() {
   decision=deny
@@ -50,6 +51,20 @@ ask() {
 
 # ---------------------------------------------------------------- commit
 
+# _gs_message_file_arg <args> — value of -F <file> / -F<file> / --file <file> / --file=<file>
+_gs_message_file_arg() {
+  local prev='' tok
+  for tok in $1; do
+    case "$prev" in -F|--file) printf '%s' "$tok"; return 0 ;; esac
+    case "$tok" in
+      --file=*) printf '%s' "${tok#--file=}"; return 0 ;;
+      -F?*) printf '%s' "${tok#-F}"; return 0 ;;
+    esac
+    prev=$tok
+  done
+  return 1
+}
+
 guard_commit() {
   local args="$1"
   case "$cmd" in
@@ -63,7 +78,16 @@ guard_commit() {
     if gs_git_args_have "$args" -m || gs_git_args_have "$args" --message; then
       deny "'git commit --amend -m' replaces the whole message and drops the existing Change-Id, so Gerrit would open a NEW change instead of a new patchset. Use 'git commit --amend --no-edit', or '--amend -F <file>' where the file keeps the current Change-Id: line."
     elif gs_git_args_have "$args" -F || gs_git_args_have "$args" --file; then
-      ask "git commit --amend -F: confirm the message file preserves the current Change-Id: line of HEAD ($(gs_change_ids_of HEAD | head -n 1)); otherwise Gerrit opens a NEW change instead of a new patchset."
+      local head_id msg_file
+      head_id=$(gs_change_ids_of HEAD | head -n 1)
+      msg_file=$(_gs_message_file_arg "$args")
+      case "$msg_file" in ''|/*) ;; *) msg_file="${inv_dir:-.}/$msg_file" ;; esac
+      if [ -n "$head_id" ] && [ -n "$msg_file" ] && [ -f "$msg_file" ] \
+         && grep -q -F -x "Change-Id: $head_id" "$msg_file"; then
+        : # the file keeps HEAD's Change-Id line verbatim: same change, new patchset
+      else
+        ask "git commit --amend -F: confirm the message file preserves the current Change-Id: line of HEAD (${head_id:-none}); otherwise Gerrit opens a NEW change instead of a new patchset."
+      fi
     fi
   fi
   if [ "${GS_HOOK_OK:-0}" != 1 ]; then
@@ -281,6 +305,7 @@ lines=$(gs_parse_git_cmd "$cmd")
 while IFS=$'\t' read -r dir verb args; do
   [ -n "$verb" ] || continue
   inv_decision=silent
+  inv_dir=$dir
   if ! gs_detect "$dir"; then
     continue
   fi

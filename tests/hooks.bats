@@ -171,6 +171,21 @@ trace_has() {
   assert_silent
 }
 
+@test "guard: commit --amend -F with a file that keeps HEAD's Change-Id is silent; without it asks" {
+  local repo id
+  repo=$(make_gerrit_repo)
+  commit_file "$repo" f.txt one "feat: one" >/dev/null
+  id=$(git -C "$repo" log -1 --format=%B | sed -n 's/^Change-Id: //p')
+  printf 'feat: one\n\nJustification: over budget on purpose.\n\nChange-Id: %s\n' "$id" > "$repo/keep.txt"
+  printf 'feat: one\n\nno trailer here\n' > "$repo/drop.txt"
+  run_hook "$GUARD" "$(hook_json PreToolUse "$repo" 'git commit --amend -F keep.txt')"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  trace_has $'git-guard\tcommit\tsilent'
+  run_hook "$GUARD" "$(hook_json PreToolUse "$repo" 'git commit --amend --file=drop.txt')"
+  assert_contains "$(ask_reason)" "Change-Id"
+}
+
 @test "guard: commit --amend -F asks" {
   local repo reason
   repo=$(make_gerrit_repo)

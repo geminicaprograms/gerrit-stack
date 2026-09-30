@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # scripts/diff-budget.sh — size of a change against the gerrit-stack budget.
 #
-# Usage: diff-budget.sh [--json] [<rev> | --worktree | --estimate <path>...]
+# Usage: diff-budget.sh [--json] [<rev> | --worktree | --cached | --estimate <path>...]
 #
 #   <rev>            one commit (default HEAD): `git show --numstat <rev>`
 #   --worktree       staged + unstaged changes vs HEAD, plus untracked
+#   --cached         staged changes only (what the next `git commit` will contain)
 #                    (non-ignored) files counted as added lines
 #   --estimate P...  sum of the current sizes (lines) of the given paths;
 #                    a directory counts every file under it; a path that does
@@ -27,7 +28,7 @@ set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib/chain.sh"
 
 usage() {
-  printf 'usage: diff-budget.sh [--json] [<rev> | --worktree | --estimate <path>...]\n'
+  printf 'usage: diff-budget.sh [--json] [<rev> | --worktree | --cached | --estimate <path>...]\n'
 }
 
 json=0 mode=rev target=HEAD
@@ -37,6 +38,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --json) json=1 ;;
     --worktree) mode=worktree; target=worktree ;;
+    --cached|--staged) mode=cached; target=cached ;;
     --estimate)
       mode=estimate; target=estimate
       shift
@@ -117,6 +119,18 @@ case "$mode" in
     read -r lines files <<EOF
 $(git show --numstat --format= "$target" -- 2>/dev/null | sum_numstat)
 EOF
+    ;;
+
+  cached)
+    if git rev-parse -q --verify 'HEAD^{commit}' >/dev/null 2>&1; then
+      read -r lines files <<EOF
+$(git diff --cached --numstat HEAD -- 2>/dev/null | sum_numstat)
+EOF
+    else
+      read -r lines files <<EOF
+$(git diff --cached --numstat -- 2>/dev/null | sum_numstat)
+EOF
+    fi
     ;;
 
   worktree)

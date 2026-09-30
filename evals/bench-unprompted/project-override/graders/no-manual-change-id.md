@@ -2,13 +2,13 @@
 type: regex
 target: trace
 match: not_contains
-pattern: '"command":"(?:[^"\\]|\\.)*Change-Id:'
+pattern: '"command":\s*"(?:[^"\\]|\\.)*?(?:-m\s*\\"(?:(?!\\").)*?Change-Id:|-m\s*''[^'']*Change-Id:|--message=?(?:[^"\\]|\\.)*?Change-Id:|--trailer[= ](?:[^"\\]|\\.)*?Change-Id:|<<-?\s*\\?[''"]?\w+(?:[^"\\]|\\.)*?Change-Id:|(?:echo|printf)\s(?:[^"\\]|\\.)*?Change-Id:)'
 weight: 2
 ---
 
-No Bash command in the trace may hand-write a `Change-Id:` trailer; the
-installed commit-msg hook owns it (`git commit -m 'feat: x' -m 'Change-Id: I…'`,
-heredocs and `git interpret-trailers --trailer Change-Id:…` all count).
+No Bash command composes a commit message containing `Change-Id:` (via `-m`, `--message`,
+`--trailer`, a heredoc, `echo`/`printf`); reading it back (`git log | grep Change-Id`) is fine.
+The installed commit-msg hook owns the trailer.
 
 Pattern note: the trace is stream-json, so a Bash tool call is serialised as
 `{"name":"Bash","input":{"command":"<the command>"}}` on one line. Inside that

@@ -576,3 +576,14 @@ hooks_dir() {
   assert_eq 1 "$status"
   [[ $stderr == *git* ]] || fail "$stderr"
 }
+
+@test "diff-budget --cached counts only staged changes" {
+  local repo
+  repo=$(make_gerrit_repo)
+  printf 'a\nb\nc\n' > "$repo/staged.txt"; printf 'x\n' > "$repo/unstaged.txt"
+  git -C "$repo" add staged.txt
+  cd "$repo"
+  run bash "$REPO_ROOT/scripts/diff-budget.sh" --cached
+  [ "$status" -eq 0 ]
+  [[ "$output" == lines=3\ files=1* ]] || { echo "$output"; false; }
+}

@@ -103,14 +103,23 @@ Re-push with the **same grouping**: `push-chain.sh` reads it from
 
 ## 6. Verify the Change-Id set after any rewrite
 
+The post-rebase hook feedback is the drift signal: after every `rebase`,
+`cherry-pick` or `reset` it compares the chain's Change-Id set with the snapshot
+taken at the last commit and prints `lost:`/`new:` lines when they differ. If it
+printed any, stop and repair (section 8). To confirm, or when the hook output is no
+longer in view:
+
 ```
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh" --snapshot      # before a risky rebase (optional; git-post refreshes it after each commit)
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh" --snapshot      # before a risky rebase (optional; git-post refreshes it after each commit and after a drift-free rewrite)
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh" --verify-ids    # ok  |  lost: I…  new: I…  (exit 1)
 ```
 
 `lost:` means a commit no longer carries an id Gerrit knows; `new:` means a commit
 got a fresh id (the hook stamped it because the old line vanished). Either way stop:
-pushing would open new changes and orphan the old ones. Fix with section 8.
+pushing would open new changes and orphan the old ones. Fix with section 8. On drift
+the hook leaves the snapshot untouched, so `--verify-ids` keeps reporting the same
+`lost:`/`new:` lines until you run `--snapshot` after repairing (or after deciding
+the change is intended).
 
 ## 7. Rebase when the parent merged or the branch moved
 
@@ -119,11 +128,14 @@ Client-side (default; keeps you able to edit locally):
 ```
 git fetch <remote>
 git rebase <base>
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh" --verify-ids
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh" --verify-ids     # confirms the hook's verdict
 ```
 
-then the push question → `push-chain.sh` → verbatim push. Merged commits drop out of
-the chain automatically (`git rebase` skips commits already upstream).
+The post-rebase hook feedback is the drift signal: `lost:`/`new:` → stop and repair
+(section 8); `--verify-ids` confirms and keeps reporting the drift until `--snapshot`
+is run after the repair. Then the push question → `push-chain.sh` → verbatim push.
+Merged commits drop out of the chain automatically (`git rebase` skips commits
+already upstream).
 
 Server-side (`POST /changes/{tip}/rebase:chain`; no MCP tool):
 

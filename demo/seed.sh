@@ -401,8 +401,10 @@ if [ "$clone_ok" -eq 1 ]; then
   fi
 
   git -C "$clone_dir" config gerrit-stack.verify-cmd 'bash tools/quick-check.sh'
+  git -C "$clone_dir" config gerrit-stack.remote origin
+  git -C "$clone_dir" config remote.origin.push HEAD:refs/for/master
   git -C "$clone_dir" config --unset gerrit-stack.grouping 2>/dev/null || true
-  log "git config gerrit-stack.verify-cmd='bash tools/quick-check.sh' (no grouping key)"
+  log "git config gerrit-stack.verify-cmd='bash tools/quick-check.sh', gerrit-stack.remote=origin, remote.origin.push=HEAD:refs/for/master (no grouping key)"
 
   # -------------------------------------------------------------- 6. gerrit tree (in-tree builds)
   tree=${GERRIT_TREE:-$HOME/workspace/open/gerrit-3.14}

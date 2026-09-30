@@ -41,7 +41,7 @@ Run scripts from inside the target repository. The literal `${CLAUDE_PLUGIN_ROOT
 4. **Estimate each step.** `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" --estimate <path>...` prints `lines=<n> files=<m> budget=<L>/<F> hard=<H>` and exits 0 (within), 1 (over soft), 3 (over hard). The number is a proxy: for a small edit in a large file estimate the hunk instead; for a new file estimate its size. Record `est ±lines` per step and say which figures you adjusted.
 5. **Apply split / merge signals** (below) until every step is within budget or its reviewer note justifies the overage. Chain depth ≤ 5; longer → two chains, and the first lands before the second is planned in detail.
 6. **Emit the plan** with `references/plan-template.md`: exact headings, the step table, the `Chain summary:` line, the approval question last.
-7. **Ask and STOP.** Edit, stage or commit nothing until the user answers. Skip the question only when the request itself says to proceed without confirmation (for example "no need to ask"); "implement X" or "commit this" is not approval of a plan the user has not seen.
+7. **Ask and STOP.** Edit, stage or commit nothing until the user answers. If the user's request explicitly pre-approves the plan (e.g. "treat the plan as approved"), record that and continue without the question; otherwise ask and stop. "implement X" or "commit this" is not approval of a plan the user has not seen.
 
 ## Output format
 

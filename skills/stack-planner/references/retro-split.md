@@ -6,19 +6,22 @@ Ground rules: never `--amend -m` (it replaces the message and the hook then mint
 
 ## Step 0: snapshot the original
 
-**Uncommitted worktree** — turn it into one commit first, so both cases share the same recipe. The `wip:` commit is never pushed and disappears in Step 1; its Change-Id and any post-commit budget feedback are expected noise.
+**Uncommitted worktree** — snapshot it with `git stash create`, which writes a commit object holding the worktree state without touching HEAD, the index or the files. No wip commit: `git add -A && git commit -m "wip…"` conflicts with gerrit-stack's rules and gets a real Change-Id plus budget feedback from the post-commit hook.
 
 ```
 git status --porcelain                          # everything listed is part of the split
-git add -A
-git commit -m "wip: <goal> (to be split)"
+git add -A                                      # snapshot only: untracked files must be in the index for stash create to see them (do not use -N: stash create rejects intent-to-add entries)
+git stash create                                # prints <orig>: a snapshot commit whose tree is the full worktree; nothing else changes
+git reset                                       # unstage again; the worktree still holds every change
+git tag retro-split/orig <orig>                 # bookmark; deleted at the end
+git rev-parse HEAD                              # <base>: the split commits go on top of HEAD
 ```
 
-(Alternative without a throwaway commit: `git add -A`, then `git stash create` prints a snapshot sha without touching the worktree; tag that sha instead of HEAD below, then `git reset` to unstage.)
+The snapshot's parent is `HEAD`, so `git diff retro-split/orig..HEAD` in Step 4 and the `git reset --hard retro-split/orig` recovery work unchanged. Skip Step 1: HEAD is already `<base>` and the changes are already unstaged in the worktree.
 
-**Oversized commit** — it is already the snapshot.
+(Fallback only if `git stash create` prints nothing: commit everything as `git commit -m "wip: <goal> (to be split)"` and treat it as an oversized commit below. That commit is never pushed and disappears in Step 1; its Change-Id and any post-commit budget feedback are expected noise.)
 
-Bookmark it and note the base (the parent of the first commit being split, usually `HEAD~1`):
+**Oversized commit** — it is already the snapshot. Bookmark it and note the base (the parent of the first commit being split, usually `HEAD~1`):
 
 ```
 git log -1 --format='%H %s'                     # <orig>
@@ -42,7 +45,7 @@ For each step of the approved plan, from the bottom of the chain up:
 ```
 git add <path>...                               # whole files that belong to this concern
 git diff --cached --stat                        # what the commit will contain
-git commit                                      # message per the gerrit-stack commit conventions; hook adds the Change-Id
+git commit -F <msg-file>                        # message per the gerrit-stack commit conventions (or -m for a one-liner; never a bare `git commit`: the editor would hang the session); hook adds the Change-Id
 git log -1 --format=%B | grep -c '^Change-Id:'  # must print 1
 ```
 

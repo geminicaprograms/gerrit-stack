@@ -1,6 +1,6 @@
 ---
 name: gerrit-review
-description: Read and respond to Gerrit review feedback on a change or relation chain via the official Gerrit MCP. Lists unresolved threads, drafts replies and comments in Conventional Comments format, posts with post_review_comment after the user approves the batch, hands back to the user for any vote or submit. Use when asked to "check review comments", "reply to comments", "address feedback", "resolve threads", or when gerrit-stack reaches its iterate phase. Never votes, never submits.
+description: Read and respond to Gerrit review feedback on a change or relation chain via the official Gerrit MCP. Lists unresolved threads, drafts replies and comments in Conventional Comments format, posts them after the user approves the batch, hands back to the user for any vote or submit. Use when asked to "check review comments", "reply to comments", "address feedback", "resolve threads", or when gerrit-stack reaches its iterate phase. Never votes, never submits.
 ---
 
 # gerrit-review
@@ -128,7 +128,7 @@ makes it a file-level note. Author notes join the same batch preview and wait fo
 
 - [ ] Target resolved via `get_related_changes`; only `NEW` changes in scope; stale patch sets flagged.
 - [ ] Every unresolved thread has one bucket: fix / answer / defer / escalate.
-- [ ] Every **fix** reply waits for `chain-status.sh --verify-ids` = `ok` and a new patch set confirmed via `get_change_details`.
+- [ ] Every **fix** reply waits for a drift-free rewrite (the post-rebase hook feedback is the drift signal: `lost:`/`new:` → stop and repair; `chain-status.sh --verify-ids` confirms, and keeps reporting drift until `--snapshot` is run after the repair) and a new patch set confirmed via `get_change_details`.
 - [ ] Every reply ≤ 3 sentences; `Done.` + why, or `<label> [decorations]: <subject>`.
 - [ ] Every reply carries `in_reply_to` = last comment id of its thread (draft tool or `--in-reply-to`).
 - [ ] `unresolved: false` only on fixed-and-pushed or answered-no-change threads.

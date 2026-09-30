@@ -29,7 +29,7 @@ Violating the letter of these rules is violating their spirit. No exceptions for
 
 | Never | Why | Instead |
 |---|---|---|
-| Type a `Change-Id:` line yourself | The hook owns it; a typed id is unverifiable. Guard denies. | Let the hook add it; check with `chain-status.sh` |
+| Type a `Change-Id:` line yourself | The hook owns it; a typed id is unverifiable. Guard denies. | Let the hook add it; check with `chain-status.sh`. Single exception: re-applying the Change-Id Gerrit already shows for **this** change (recovery, chain-editing §8) is allowed; typing a new or invented one is not |
 | `git commit --no-verify` / `-n` | Skips the hook, so no Change-Id; the push is denied later anyway | Fix the hook: `install-commit-msg-hook.sh` |
 | `git commit --amend -m` | Replaces the whole message, drops the Change-Id, Gerrit opens a **new** change. Guard denies. | `--amend --no-edit`, or `--amend -F <file>` that keeps the line |
 | Push to `refs/heads/*` or a bare branch name | Bypasses review. Guard denies. | `HEAD:refs/for/<branch>` as printed by `push-chain.sh` |
@@ -83,7 +83,7 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
 
 1. `bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh" --preflight`
    Prints remote, host, branch, project, hook status, MCP hint, chain length.
-2. Hook `MISSING` (exit 1): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-commit-msg-hook.sh"`,
+2. Exit 1 with `hook: MISSING`: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-commit-msg-hook.sh"`,
    then re-run step 1. Do not commit until it reports installed.
 3. MCP: if `mcp__gerrit__*` tools are absent or a call fails, use the fallback column
    for the rest of the session and tell the user once (`/gerrit:setup` fixes it).
@@ -91,10 +91,13 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
 
 ## Phase 1 — Plan
 
-1. Invoke `/gerrit-stack:stack-planner` with the request. It returns an ordered plan:
-   `Step N — <type>: <subject> | files | est ±lines | verify cmd | depends on`.
+1. Invoke `/gerrit-stack:stack-planner` with the request. It returns an ordered plan
+   (columns as in stack-planner's `plan-template.md`, incl. reviewer note):
+   `Step N — <type>: <subject> | files | est ±lines | verify cmd | depends on | reviewer note`.
 2. Show the plan and **wait for the user's OK**. No file edits before that. A
-   single-file fix still gets a one-step plan (one line is enough).
+   single-file fix still gets a one-step plan (one line is enough). If the user's
+   request explicitly pre-approves the plan (e.g. "treat the plan as approved"),
+   record that and continue without the question; otherwise ask and stop.
 3. More than 5 steps: split into two chains in the plan; only chain 1 is built now.
 
 ## Phase 2 — Build the chain (repeat per step)
@@ -172,12 +175,14 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
    Change-Id → the `chain-status.sh` row with that Change-Id gives the `sha`.
 3. For every commit that needs a code fix: edit → `git add <paths>` →
    `git commit --fixup=<sha>`. The hook skips `fixup!` commits; no Change-Id there
-   is expected. Never `--fixup=amend:`/`reword:` (they rewrite the message and lose
-   the Change-Id).
+   is expected, and the post-commit hook stays silent for `fixup!` commits — never
+   "repair" a fixup commit. Never `--fixup=amend:`/`reword:` (they rewrite the
+   message and lose the Change-Id).
 4. `git -c sequence.editor=true rebase -i --autosquash <base>`
-5. `bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh" --verify-ids` must print
-   `ok`. `lost:`/`new:` lines → stop, recover per
-   [references/chain-editing.md](references/chain-editing.md); do not push.
+5. The post-rebase hook feedback is the drift signal: if it printed `lost:`/`new:`,
+   stop and repair per [references/chain-editing.md](references/chain-editing.md)
+   (§8); do not push. `bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh" --verify-ids`
+   confirms (it keeps reporting drift until you run `--snapshot` after repairing).
 6. Re-run the verify command on touched commits (Phase 3 step 2) when cheap.
 7. Ask the push question again (grouping comes from config; no second grouping
    question) → Phase 4. Unchanged commits get no new patch set; edited ones and their
@@ -188,7 +193,9 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
 ## Phase 6 — Land
 
 1. Parent merged or branch moved on: `git fetch <remote>` → `git rebase <base>` →
-   `chain-status.sh --verify-ids` → push question → Phase 4. Server-side alternative
+   read the post-rebase hook feedback (`lost:`/`new:` → stop and repair;
+   `chain-status.sh --verify-ids` confirms, and keeps reporting drift until
+   `--snapshot` after the repair) → push question → Phase 4. Server-side alternative
    when no further local edits are planned:
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/gerrit-rest.py" rebase-chain <tip>`
    (there is no MCP tool for it; local commits are stale afterwards, see chain-editing).
@@ -231,14 +238,19 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
 
 ## Red flags — stop and re-read the rules
 
-- You are about to type `Change-Id` anywhere
+- You are about to type `Change-Id` anywhere — the single exception is re-applying
+  the id Gerrit already shows for **this** change (recovery, chain-editing §8);
+  a new or invented id is never allowed
 - `--no-verify`, `-n`, or `-m` next to `--amend` in a command you are composing
-- `refs/heads` in a push, or a push line that `push-chain.sh` did not print
+- `refs/heads` in a push, or a push line that `push-chain.sh` did not print — the
+  one documented exception is chain-editing §9 (landing the bottom of a too-deep
+  chain with `git push <remote> <sha>:refs/for/<branch>`)
 - `%topic=` in a command with `gerrit-stack.grouping` unset or `none`
 - Editing files before the plan was approved
 - `git add .` / `git add -A`
 - A chain table with 6+ rows, or `fixup!` rows before a push
-- `chain-status.sh --verify-ids` printed `lost:` and you are still heading to push
+- The post-rebase hook or `chain-status.sh --verify-ids` printed `lost:`/`new:` and
+  you are still heading to push
 
 References: [push-options](references/push-options.md) ·
 [chain-editing](references/chain-editing.md) ·

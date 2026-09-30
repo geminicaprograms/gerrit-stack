@@ -67,7 +67,7 @@ require those trailers on every commit; without the config, none are required.
 | `Bug: Issue NNN` / `Feature: Issue NNN` | Tracker reference | Before `Release-Notes` |
 | `Release-Notes: <text>` or `Release-Notes: skip` | Projects that build release notes from trailers (Gerrit core does) | `skip` for refactors, tests, docs, build; otherwise one user-facing sentence, not the subject verbatim |
 | `BREAKING CHANGE: <text>` | Conventional style, incompatible change | After the body |
-| `Change-Id` | **Always**, on every commit | **Added by the hook. Never typed, never copied between commits** |
+| `Change-Id` | **Always**, on every commit | **Added by the hook. Never typed, never copied to a different change** (re-using the same change's id when re-creating it is fine — see stack-planner retro-split, Option B) |
 
 Footer order: tracker references → `Release-Notes` → the hook's trailer last.
 

@@ -395,3 +395,15 @@ class JudgeFocusTest(unittest.TestCase):
         self.assertIn("Focus on: commit structure", p)
         self.assertIn("FINAL MESSAGE TEXT", p)
         self.assertIn("Tool calls in order", p)
+
+
+class PushHashtagsTest(unittest.TestCase):
+    def test_hashtags_and_change_number_parse(self):
+        import importlib.util, os, re
+        here = os.path.dirname(os.path.abspath(__file__))
+        spec = importlib.util.spec_from_file_location("run_mod3", os.path.join(here, "..", "evals", "run.py"))
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        self.assertEqual(mod.push_hashtags("maintenance-mode", "with", "20260930-091703"),
+                         ["bench-maintenance-mode-with", "run-20260930-091703"])
+        out = "remote:   http://localhost:8080/c/demo-plugin/+/12 feat: a [NEW]\nremote:   http://localhost:8080/c/demo-plugin/+/13 feat: b [NEW]\n"
+        self.assertEqual(sorted({int(m) for m in re.findall(r"/c/[^/\s]+/\+/(\d+)", out)}), [12, 13])

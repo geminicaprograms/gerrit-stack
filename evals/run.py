@@ -971,6 +971,38 @@ def kill_stub(ws: str) -> None:
         pass
 
 
+
+def push_workspace_for_review(ws: str, url: str, hashtags: list[str], log_path: str) -> list[int]:
+    """Rebase the workspace's commits onto the target project's master and push them to
+    refs/for/master with the given hashtags. Returns the created change numbers ([] if the
+    workspace holds no commits beyond the fixture root or the push failed)."""
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", ws, *args], capture_output=True, text=True)
+    with open(log_path, "a", encoding="utf-8") as lg:
+        git("remote", "remove", "review")
+        git("remote", "add", "review", url)
+        if git("fetch", "-q", "review", "master").returncode != 0:
+            lg.write(f"fetch {url} failed\n"); return []
+        root = git("rev-list", "--max-parents=0", "HEAD").stdout.split()
+        if not root:
+            return []
+        if git("rev-list", "--count", f"{root[-1]}..HEAD").stdout.strip() in ("", "0"):
+            lg.write("nothing to push (no commits beyond the fixture root)\n"); return []
+        r = git("-c", "sequence.editor=true", "rebase", "-q", "--onto", "review/master", root[-1], "HEAD")
+        if r.returncode != 0:
+            git("rebase", "--abort"); lg.write("rebase onto review/master failed:\n" + r.stderr); return []
+        refspec = "HEAD:refs/for/master%" + ",".join("t=" + h for h in hashtags)
+        r = git("push", "review", refspec)
+        lg.write(r.stdout + r.stderr)
+        if r.returncode != 0:
+            return []
+        return sorted({int(m) for m in re.findall(r"/c/[^/\s]+/\+/(\d+)", r.stdout + r.stderr)})
+
+
+def push_hashtags(case_name: str, arm: str, run_id: str) -> list[str]:
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "-", run_id)
+    return [f"bench-{case_name}-{arm}", f"run-{safe}"]
+
 def run_chain_metrics(plugin_root: str, ws: str, hook_trace: str, out_path: str) -> None:
     script = os.path.join(plugin_root, "scripts", "chain-metrics.sh")
     if not os.path.exists(script):
@@ -1058,6 +1090,11 @@ def run_one(case: Case, arm: str, n: int, opts: argparse.Namespace, out_dir: str
         ctx = GradeContext(trace, trace_text, ws, changed, judge)
         results = [grade(g, ctx, arm) for g in case.graders]
         rec["graders"] = results
+        if getattr(opts, "push_to", None):
+            tags = push_hashtags(case.name, arm, os.path.basename(os.path.normpath(out_dir)))
+            rec["pushed"] = push_workspace_for_review(ws, opts.push_to, tags, os.path.join(run_dir, "push.log"))
+            rec["hashtags"] = tags
+            log(f"{case.name}/{arm}/{n}: pushed changes {rec['pushed'] or 'none'} ({', '.join(tags)})")
         rec["judgeCostUsd"] = round(ctx.judge_cost, 6)
         rec["score"] = score_graders(results)
         rec["passed"] = rec["score"] >= opts.threshold and error is None
@@ -1232,6 +1269,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--mcp-plugin-dir", default=None, help="installed gerrit-mcp plugin dir for the with/mcp-only arms (default: newest ~/.claude/plugins/cache/gerrit-mcp/gerrit/*)")
     ap.add_argument("--mcp-plugin", default="gerrit@gerrit-mcp", help="plugin toggled per arm ('' = never touch)")
     ap.add_argument("--keep", action="store_true", help="keep run workspaces under the run dir")
+    ap.add_argument("--push-to", default=None, metavar="GERRIT_PROJECT_URL",
+                    help="after each run, rebase the workspace commits onto <url>/master and push them to refs/for/master with hashtags bench-<case>-<arm> and run-<results-id> (e.g. http://localhost:8080/a/demo-plugin)")
     ap.add_argument("--dry-run", action="store_true", help="print the commands, run nothing")
     ap.add_argument("--json", default=None, metavar="PATH", help="also write aggregate-result.json here")
     ap.add_argument("--out-dir", default=None, help="default evals/results/<timestamp>")

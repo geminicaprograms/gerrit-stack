@@ -26,6 +26,9 @@ make bench                                           # A11 bench cases, --ablati
 
 `run.py --help` lists every option: `--eval-dir`, `--bench`, `--case GLOB` (repeatable),
 `--runs N`, `--arms with,without,mcp-only`, `--ablation`, `--threshold`, `--max-cost-usd`,
+`--push-to <gerrit project url>` (after each run, push the workspace commits to `refs/for/master`
+with hashtags `bench-<case>-<arm>` and `run-<results-id>`, so arms and runs can be compared in the
+Gerrit UI: `hashtag:run-<id>`),
 `--model`, `--judge-model` (default `haiku`), `--judge-votes`, `--plugin-dir`, `--mcp-plugin`,
 `--keep`, `--dry-run`, `--json PATH`, `--out-dir`, `-v`.
 

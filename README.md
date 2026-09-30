@@ -186,7 +186,7 @@ stay 100 % compatible with the official runner:
 
 ```
 make eval         # python3 evals/run.py --runs 2 --threshold 0.8
-make bench         # python3 evals/run.py --bench --ablation --runs 3
+make bench         # python3 evals/run.py --bench --ablation --runs 3 (add --push-to http://localhost:8080/a/demo-plugin to review each arm in the demo Gerrit)
 ```
 
 The benchmark run (arm A vanilla, arm B vanilla + `gerrit@gerrit-mcp`, arm C

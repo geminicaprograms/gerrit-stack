@@ -32,8 +32,8 @@ Outcome metrics come from `scripts/chain-metrics.sh --json` over each run's work
 | human confirmations (ask) | 0 / 0 | 0 / 0 | 0 / 0 | 0 | 0 |
 | hook denials | 0 / 0 | 0 / 0 | 0 / 0 | 0 | 0 |
 | self-corrections after deny | 0 / 0 | 0 / 0 | 0 / 0 | 0 | 0 |
-| cost | $0.679 / $0.679 | $0.347 / $0.195 | $0.336 / $0.198 | +$0.332 | +$0.343 |
-| wall time | 147.0 s / 164.0 s | 380.6 s / 133.3 s | 109.7 s / 60.9 s | -233.6 s | +37.3 s |
+| cost | $0.679 / $0.679 | $0.693 / $0.779 | $0.671 / $0.756 | $-0.015 | +$0.007 |
+| wall time | 147.0 s / 164.0 s | 199.3 s / 192.0 s | 196.3 s / 186.0 s | -52.2 s | -49.3 s |
 | chain length | 2 / 2 | 1 / 0.5 | 1 / 0.5 | +1 | +1 |
 | lines / change (median) | 24 / 22 | 27.5 / 25.5 | 28.5 / 26.5 | -3.5 | -4.5 |
 | lines / change (p75) | 61 / 38 | 61 / 45 | 65 / 47 | 0 | -4 |
@@ -53,7 +53,7 @@ Outcome metrics come from `scripts/chain-metrics.sh --json` over each run's work
 | budget compliance | >= 90 % | 100.0 % | PASS |
 | exactly one Change-Id | >= 100 % | 100.0 % | PASS |
 | rule violations | == 0 | 0 | PASS |
-| cost overhead vs mcp-only | <= 30 % | 95.8 % | FAIL |
+| cost overhead vs mcp-only | <= 30 % | -2.1 % | PASS |
 
 ## Per case
 
@@ -72,8 +72,8 @@ Runs — C with: 1, B mcp-only: 2, A without: 2
 | human confirmations (ask) | 0 / 0 | 0 / 0 | 0 / 0 | 0 | 0 |
 | hook denials | 0 / 0 | 0 / 0 | 0 / 0 | 0 | 0 |
 | self-corrections after deny | 0 / 0 | 0 / 0 | 0 / 0 | 0 | 0 |
-| cost | $0.714 / $0.714 | $0.195 / $0.195 | $0.198 / $0.198 | +$0.518 | +$0.516 |
-| wall time | 103.4 s / 103.4 s | 47.6 s / 47.6 s | 50.2 s / 50.2 s | +55.7 s | +53.2 s |
+| cost | $0.714 / $0.714 | $0.391 / $0.391 | $0.396 / $0.396 | +$0.323 | +$0.318 |
+| wall time | 103.4 s / 103.4 s | 74.6 s / 74.6 s | 84.0 s / 84.0 s | +28.8 s | +19.4 s |
 | chain length | 1 / 1 | 0.5 / 0.5 | 0.5 / 0.5 | +0.5 | +0.5 |
 | lines / change (median) | 6 / 6 | 6 / 6 | 6 / 6 | 0 | 0 |
 | lines / change (p75) | 6 / 6 | 6 / 6 | 6 / 6 | 0 | 0 |
@@ -101,8 +101,8 @@ Runs — C with: 1, B mcp-only: 2, A without: 2
 | human confirmations (ask) | 0 / 0 | 0 / 0 | 0 / 0 | 0 | 0 |
 | hook denials | 0 / 0 | 0 / 0 | 0 / 0 | 0 | 0 |
 | self-corrections after deny | 0 / 0 | 0 / 0 | 0 / 0 | 0 | 0 |
-| cost | $0.679 / $0.679 | $0.455 / $0.455 | $0.431 / $0.431 | +$0.225 | +$0.249 |
-| wall time | 164.0 s / 164.0 s | 178.6 s / 178.6 s | 178.4 s / 178.4 s | -14.6 s | -14.4 s |
+| cost | $0.679 / $0.679 | $0.909 / $0.909 | $0.861 / $0.861 | $-0.230 | $-0.182 |
+| wall time | 164.0 s / 164.0 s | 331.2 s / 331.2 s | 319.0 s / 319.0 s | -167.2 s | -155.0 s |
 | chain length | 3 / 3 | 1.5 / 1.5 | 1.5 / 1.5 | +1.5 | +1.5 |
 | lines / change (median) | 44 / 44 | 51 / 51 | 53 / 53 | -7 | -9 |
 | lines / change (p75) | 139 / 139 | 132 / 132 | 142 / 142 | +7 | -3 |
@@ -130,8 +130,8 @@ Runs — C with: 1, B mcp-only: 2, A without: 2
 | human confirmations (ask) | 0 / 0 | 0 / 0 | 0 / 0 | 0 | 0 |
 | hook denials | 0 / 0 | 0 / 0 | 0 / 0 | 0 | 0 |
 | self-corrections after deny | 0 / 0 | 0 / 0 | 0 / 0 | 0 | 0 |
-| cost | $0.643 / $0.643 | $0.390 / $0.390 | $0.378 / $0.378 | +$0.253 | +$0.264 |
-| wall time | 173.7 s / 173.7 s | 915.6 s / 915.6 s | 100.6 s / 100.6 s | -742.0 s | +73.0 s |
+| cost | $0.643 / $0.643 | $0.779 / $0.779 | $0.756 / $0.756 | $-0.136 | $-0.114 |
+| wall time | 173.7 s / 173.7 s | 192.0 s / 192.0 s | 186.0 s / 186.0 s | -18.3 s | -12.4 s |
 | chain length | 2 / 2 | 1 / 1 | 1 / 1 | +1 | +1 |
 | lines / change (median) | 22 / 22 | 25.5 / 25.5 | 26.5 / 26.5 | -3.5 | -4.5 |
 | lines / change (p75) | 38 / 38 | 45 / 45 | 47 / 47 | -7 | -9 |

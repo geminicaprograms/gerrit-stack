@@ -293,9 +293,16 @@ def _aggregate_runs_index(aggregate):
                 continue
             for i, entry in enumerate(runs):
                 if isinstance(entry, dict):
+                    if entry.get("error") and not INCLUDE_ERRORS:
+                        # a crashed run (claude exited non-zero, timeout) has no chain and $0 cost;
+                        # averaging it in would distort every metric, so it is skipped by default
+                        continue
                     n = entry.get("run") if isinstance(entry.get("run"), int) else i + 1
                     index[(name, arm, n)] = entry
     return index
+
+
+INCLUDE_ERRORS = False
 
 
 def load_results_dir(results_dir):
@@ -610,10 +617,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Render docs/benchmark.md from eval results.")
     parser.add_argument("--results", nargs="+", metavar="DIR", default=None,
                         help="results directories (default: evals/results/*)")
+    parser.add_argument("--include-errors", action="store_true",
+                        help="also aggregate runs whose aggregate entry records an error (skipped by default)")
     parser.add_argument("--out", default=None, metavar="PATH",
                         help="markdown output (default: docs/benchmark.md)")
     parser.add_argument("--json", default=None, metavar="PATH", help="also write the merged JSON report")
     args = parser.parse_args(argv)
+    global INCLUDE_ERRORS
+    INCLUDE_ERRORS = bool(getattr(args, 'include_errors', False))
 
     repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
     results_dirs = args.results if args.results else default_results_dirs(repo_root)

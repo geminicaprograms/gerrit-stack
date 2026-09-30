@@ -765,15 +765,17 @@ def score_graders(results: list[dict]) -> float:
 
 def build_claude_cmd(prompt: str, case: Case, arm: str, plugin_dir: Optional[str], model: Optional[str],
                      max_turns: Optional[int] = None) -> list[str]:
+    # --allowedTools is variadic: it swallows every following bare argument, so it must be
+    # followed by another option (--max-turns is always present) before the prompt goes last.
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose",
-           "--max-turns", str(max_turns or case.max_turns),
-           "--allowedTools", ",".join(case.allowed_tools)]
+           "--allowedTools", ",".join(case.allowed_tools),
+           "--max-turns", str(max_turns or case.max_turns)]
     m = model or case.model
     if m:
         cmd += ["--model", m]
     if arm == "with" and plugin_dir:
         cmd += ["--plugin-dir", plugin_dir]
-    cmd.append(prompt)  # last: --allowedTools is variadic and would swallow it
+    cmd.append(prompt)
     return cmd
 
 

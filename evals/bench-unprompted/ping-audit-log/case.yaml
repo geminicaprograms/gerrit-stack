@@ -1,0 +1,5 @@
+# Benchmark case (efficiency benchmark, see docs/benchmark.md).
+# The scaffold builds the Gerrit-looking workspace in the run's cwd:
+# demo/skeleton copied in, local bare ../remote.git, real commit-msg hook.
+context:
+  scaffold_script: fixture.sh

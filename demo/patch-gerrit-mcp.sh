@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Apply (or check/revert) the local gerrit-mcp patch that keeps an explicit http://
 # host instead of rewriting it to https:// — needed for the plain-HTTP demo Gerrit.
-# Idempotent. Re-run after `claude plugin update gerrit@gerrit-mcp`.
+# Idempotent. Re-run after `claude plugin update gerrit@gerrit-mcp`. Upstream fix:
+# https://gerrit-review.googlesource.com/c/gerrit-mcp-server/+/635805 (drop this once merged).
 # Usage: bash demo/patch-gerrit-mcp.sh [--check] [--revert]
 set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

@@ -1246,6 +1246,9 @@ def run_stage(case: Case, prompt: str, graders: list[Grader], arm: str, ws: str,
         error = f"result subtype {trace.result.get('subtype')}"
     if error and trace.result.get("subtype") == "success":
         error = None  # a non-zero exit with a successful result is still gradable
+    if trace.result.get("is_error"):
+        status = trace.result.get("api_error_status")
+        error = f"api error{f' {status}' if status else ''}: {str(trace.result.get('result') or '')[:120]}"
     rec["turns"] = trace.num_turns
     rec["costUsd"] = trace.cost_usd
     rec["model"] = trace.init.get("model")
@@ -1535,9 +1538,15 @@ def _first_source_file(files: dict) -> Optional[str]:
     return None
 
 
-def production_files(files: dict) -> list[str]:
-    """Paths under src/main/ that are not documentation (src/main/resources/Documentation/), sorted."""
-    return sorted(p for p in files if p.startswith("src/main/") and not p.startswith("src/main/resources/Documentation/"))
+DEFAULT_SPLIT_IGNORE = [r"(^|/)Module\.java$"]  # a DI binding travels with the class it binds
+
+
+def production_files(files: dict, ignore: Optional[list] = None) -> list[str]:
+    """Paths under src/main/ that are not documentation (src/main/resources/Documentation/) and do
+    not match an `ignore` regex (default: the plugin's Guice Module), sorted."""
+    pats = [re.compile(str(x)) for x in (DEFAULT_SPLIT_IGNORE if ignore is None else ignore)]
+    return sorted(p for p in files if p.startswith("src/main/") and not p.startswith("src/main/resources/Documentation/")
+                  and not any(rx.search(p) for rx in pats))
 
 
 def anchor_line(content: str, pattern: Optional[str]) -> int:
@@ -1578,8 +1587,12 @@ def select_target(scenario: str, spec: dict, changes: list[dict], files_of: Call
     if scenario == "split":
         # the change touching the most production files (ties → largest); with no change touching
         # two of them the stack is already split and the reviewer step is skipped
-        prod = {int(c["_number"]): production_files(files(c)) for c in changes}
+        ignore = spec.get("ignore_files")
+        if isinstance(ignore, str):
+            ignore = [ignore]
+        prod = {int(c["_number"]): production_files(files(c), ignore) for c in changes}
         best = max(len(v) for v in prod.values())
+        min_files = int(spec.get("min_files") or 2)
         pool = [c for c in changes if len(prod[int(c["_number"])]) == best]
         target = max(pool, key=_size)
         tfiles = prod[int(target["_number"])]
@@ -1592,7 +1605,7 @@ def select_target(scenario: str, spec: dict, changes: list[dict], files_of: Call
         path = tfiles[0] if tfiles else _first_source_file(files(target))
         out = {"change": target, "path": path, "line": 1, "message": message,
                "reason": f"most production files ({len(tfiles)}), then largest", "production_files": tfiles}
-        if best < 2:
+        if best < min_files:
             out["skipped"] = SPLIT_NOT_APPLICABLE
         return out
     if scenario != "fix":

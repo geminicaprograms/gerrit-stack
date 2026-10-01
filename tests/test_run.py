@@ -1596,3 +1596,19 @@ class PipelineGapsGlueTest(unittest.TestCase):
         self.assertIsNotNone(rec["guardrails"]["stage1"])
         self.assertIn("bad_outcomes", rec["guardrails"]["stage1"])
         self.assertAlmostEqual(rec["pipelineCostUsd"], 0.25, places=6)
+
+
+class Batch2FollowupTest(unittest.TestCase):
+    def test_api_error_result_marks_stage_errored(self):
+        lines = [_msg({"type": "system", "subtype": "init", "session_id": "s", "model": "m"}),
+                 _msg({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 429,
+                       "result": "You've hit your session limit", "num_turns": 1, "total_cost_usd": 0.0})]
+        tr = run.parse_trace_lines(lines)
+        self.assertTrue(tr.result.get("is_error"))
+
+    def test_module_java_not_a_production_file_by_default(self):
+        files = {"src/main/java/x/Module.java": {}, "src/main/java/x/Limiter.java": {}, "src/test/java/x/T.java": {},
+                 "src/main/resources/Documentation/config.md": {}}
+        self.assertEqual(run.production_files(files), ["src/main/java/x/Limiter.java"])
+        self.assertEqual(len(run.production_files(files, [])), 2)
+        self.assertEqual(run.production_files(files, [r"Limiter"]), ["src/main/java/x/Module.java"])

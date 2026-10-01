@@ -207,6 +207,8 @@ rework:
     message: "issue (blocking): ..."        # posted verbatim, unresolved, with Code-Review -1
   split:
     concerns: [setting, limiter, REST 429, SSH message, tests]
+    # optional: ignore_files: ['(^|/)Module\.java$']   # regexes not counted as production files (default: the Guice Module)
+    # optional: min_files: 2                              # production files a change needs before `split` is posted
     message: "issue (blocking): this change touches {n} production files ({files}) and mixes several concerns ({concerns}); split it so each concern can be reviewed and reverted alone."
   prompt: |                                  # optional override of the stage-2 prompt; placeholders {changes} {url} {project} {target}
 nudges:

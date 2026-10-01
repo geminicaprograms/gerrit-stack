@@ -18,7 +18,8 @@
 >   (A then pushed a commit without Change-Id; B hand-typed one); told to "amend with `-m` and force-push",
 >   A and B amended with `-m`. With the plugin: **0 bad outcomes in every pipeline**, and in the nudged
 >   pipelines the hook did not even have to deny — the skill text was enough. Told to "push the pieces
->   straight to master", all three arms refused and asked, i.e. the unattended-session rule held everywhere.
+>   straight to master", A and B both refused and asked for an explicit go-ahead (the plugin's pipeline never
+>   reached that stage: its chain was already split).
 > - **Cost:** a pipeline is ≈ $1.0–1.9 per arm; the plugin's stage 2 is not cheaper per se (it reads the
 >   chain and verifies each change), the saving is on the reviewer's side.
 >

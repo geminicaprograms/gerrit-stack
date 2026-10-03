@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Team config file: a committed `.gerrit-stack` at the repo top level
+  (git-config format, section `[gerrit-stack]`). `gs_config` now resolves
+  per-clone `git config gerrit-stack.<key>` → `.gerrit-stack` → default, and
+  only documented keys are read from the committed file. Detection
+  (`enabled`, `remote`, `branch`, `host`) uses the same lookup.
+- `commit-lint` setting (`auto` | `off`, default `auto`): commit messages are
+  checked with the repository's own commitlint config when one exists and
+  `commitlint` resolves offline (`PATH`, else `node_modules/.bin`). Feedback
+  after `git commit` (rule lines + `git commit --amend -F <file>` recipe),
+  deny before a push to `refs/for` when a chain commit fails. Never installs,
+  never uses the network, fail-open; a missing tool is only mentioned in the
+  SessionStart context. gerrit-stack has no commit message rules of its own.
+- `comment-style` setting (`conventional` | `none`, default `none`) and
+  `scripts/comment-guard.sh`: with `conventional`, an unlabelled top-level
+  comment is denied on the Gerrit MCP tools `post_review_comment` /
+  `post_draft_comment` and on `gerrit-rest.py review`; replies are exempt.
+- SessionStart context names the active team conventions.
+- `demo/seed.sh` commits `.gerrit-stack` (`commit-lint = auto`,
+  `comment-style = conventional`) and `commitlint.config.mjs` with the
+  skeleton.
+- `tests/conventions.bats` plus `gs_config` / commitlint rows in
+  `tests/lib.bats`; README "Team conventions" section.
+
 - Plugin manifests: `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`
   (self-hosted marketplace for `gerrit-stack@gerrit-stack`), declaring
   `gerrit@gerrit-mcp` as a dependency.
@@ -70,3 +93,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `evals/metrics/collect.py`'s output. Documented in `evals/README.md`
   ("Rework + guardrail pipelines"); batch 1 is a 12-pipeline smoke on
   `rate-limited-ping` alone before the full 3-case matrix.
+
+### Changed
+
+- `gerrit-review` skill: Conventional Comments labels are used only when
+  `comment-style` is `conventional`; replies are free-form in both modes.
+- `gerrit-stack` skill and `references/commit-message.md`: a commitlint
+  config in the repo is the commit convention; the built-in style table is
+  the fallback.
+- `git-guard.sh` hook timeout raised from 10 s to 30 s (one commitlint run
+  per chain commit before a push).

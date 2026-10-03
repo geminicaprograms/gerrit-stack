@@ -4,7 +4,8 @@
 # a Gerrit repo:
 #   commit       mark the session, check exactly one Change-Id on HEAD, run
 #                diff-budget.sh HEAD when present (exit 3 → retro-split hint),
-#                check required footers (gerrit-stack.footers), refresh the
+#                check required footers (gerrit-stack.footers), lint the message
+#                with the repo's own commitlint config when active, refresh the
 #                Change-Id snapshot; fixup!/squash! commits: mark + snapshot only
 #   rebase / cherry-pick / reset
 #                compare the chain's Change-Id set with the snapshot (lost:/new:);
@@ -48,7 +49,7 @@ feedback() {
 # ---------------------------------------------------------------- commit
 
 post_commit() {
-  local args="$1" ids n out rc footers f body missing=''
+  local args="$1" ids n out rc footers f body missing='' head_id
 
   [ -n "$session" ] && gs_session_mark "$session"
 
@@ -91,6 +92,14 @@ post_commit() {
     if [ -n "$missing" ]; then
       feedback "required footer(s) missing from the HEAD commit message: $missing (git config gerrit-stack.footers=$footers). Add them as trailers in the last paragraph, e.g. git commit --amend (keep the Change-Id: line)."
     fi
+  fi
+
+  # team commit convention: the repo's own commitlint config, offline, fail-open
+  if gs_commitlint_active && ! gs_commitlint_check HEAD; then
+    head_id=$(printf '%s\n' "$ids" | head -n 1)
+    feedback "the HEAD commit message ($(git -C "$GS_TOPLEVEL" rev-parse --short=7 HEAD 2>/dev/null) $(gs_subject_of HEAD)) fails this repo's commitlint config:
+${_gs_lint_out:-}
+Repair now: write the corrected message to a file whose last paragraph keeps the existing line 'Change-Id: ${head_id:-<current id>}', then run: git commit --amend -F <file> (never 'git commit --amend -m': it drops the Change-Id)."
   fi
 
   gs_snapshot_write

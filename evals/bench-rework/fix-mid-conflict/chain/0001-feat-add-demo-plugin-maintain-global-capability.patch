@@ -1,0 +1,141 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Bench Fixture <bench@example.com>
+Date: Sat, 3 Oct 2026 19:25:53 +0200
+Subject: [PATCH] feat: add demo-plugin-maintain global capability
+
+Admins want to take demo-plugin into maintenance without restarting
+Gerrit. Only a dedicated group may do that, so define a plugin-owned
+global capability first; nothing checks it yet.
+---
+ .../demoplugin/MaintainCapability.java        | 33 +++++++++++++++++++
+ .../java/com/example/demoplugin/Module.java   | 11 +++++--
+ src/main/resources/Documentation/about.md     |  7 ++++
+ .../demoplugin/MaintainCapabilityTest.java    | 31 +++++++++++++++++
+ 4 files changed, 79 insertions(+), 3 deletions(-)
+ create mode 100644 src/main/java/com/example/demoplugin/MaintainCapability.java
+ create mode 100644 src/test/java/com/example/demoplugin/MaintainCapabilityTest.java
+
+diff --git a/src/main/java/com/example/demoplugin/MaintainCapability.java b/src/main/java/com/example/demoplugin/MaintainCapability.java
+new file mode 100644
+index 0000000..1a45046
+--- /dev/null
++++ b/src/main/java/com/example/demoplugin/MaintainCapability.java
+@@ -0,0 +1,33 @@
++// Copyright (C) 2026 gerrit-stack demo
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package com.example.demoplugin;
++
++import com.google.gerrit.extensions.config.CapabilityDefinition;
++
++/**
++ * Global capability {@code demo-plugin-maintain}: its holders may switch maintenance on and off.
++ *
++ * <p>Gerrit prefixes the ID of a plugin-owned capability with the plugin name, so {@link #ID} is
++ * only the part after {@code demo-plugin-}.
++ */
++public class MaintainCapability extends CapabilityDefinition {
++  /** ID without the plugin prefix; use it in {@code @RequiresCapability} and permission checks. */
++  public static final String ID = "maintain";
++
++  @Override
++  public String getDescription() {
++    return "Maintain demo-plugin";
++  }
++}
+diff --git a/src/main/java/com/example/demoplugin/Module.java b/src/main/java/com/example/demoplugin/Module.java
+index 84f7e99..988eaa2 100644
+--- a/src/main/java/com/example/demoplugin/Module.java
++++ b/src/main/java/com/example/demoplugin/Module.java
+@@ -16,20 +16,25 @@ package com.example.demoplugin;
+ 
+ import static com.google.gerrit.server.project.ProjectResource.PROJECT_KIND;
+ 
++import com.google.gerrit.extensions.annotations.Exports;
++import com.google.gerrit.extensions.config.CapabilityDefinition;
+ import com.google.gerrit.extensions.restapi.RestApiModule;
+ import com.google.inject.AbstractModule;
+ 
+ /**
+  * Guice module of the demo plugin ({@code Gerrit-Module}).
+  *
+- * <p>Binds the plugin configuration and the REST endpoints under {@code
+- * /projects/{name}/demo-plugin~<view>}. New REST views are registered in the nested {@link
+- * RestApiModule}.
++ * <p>Binds the plugin configuration, the global capability {@code demo-plugin-maintain} and the
++ * REST endpoints under {@code /projects/{name}/demo-plugin~<view>}. New REST views are registered
++ * in the nested {@link RestApiModule}.
+  */
+ public class Module extends AbstractModule {
+   @Override
+   protected void configure() {
+     bind(DemoPluginConfig.class);
++    bind(CapabilityDefinition.class)
++        .annotatedWith(Exports.named(MaintainCapability.ID))
++        .to(MaintainCapability.class);
+ 
+     install(
+         new RestApiModule() {
+diff --git a/src/main/resources/Documentation/about.md b/src/main/resources/Documentation/about.md
+index 949f5cc..da7cbba 100644
+--- a/src/main/resources/Documentation/about.md
++++ b/src/main/resources/Documentation/about.md
+@@ -1,3 +1,10 @@
+ Minimal Gerrit plugin used by the gerrit-stack demo. It exposes one REST view,
+ `GET /projects/{name}/demo-plugin~ping`, and one SSH command,
+ `demo-plugin ping <project>`, both answering with the configured ping message.
++
++Access
++------
++
++The plugin defines the global capability `demo-plugin-maintain` ("Maintain
++demo-plugin"). Grant it under *All-Projects → Access → Global Capabilities* to
++the groups that may take the plugin into maintenance.
+diff --git a/src/test/java/com/example/demoplugin/MaintainCapabilityTest.java b/src/test/java/com/example/demoplugin/MaintainCapabilityTest.java
+new file mode 100644
+index 0000000..e1e47fc
+--- /dev/null
++++ b/src/test/java/com/example/demoplugin/MaintainCapabilityTest.java
+@@ -0,0 +1,31 @@
++// Copyright (C) 2026 gerrit-stack demo
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package com.example.demoplugin;
++
++import static com.google.common.truth.Truth.assertThat;
++
++import org.junit.Test;
++
++public class MaintainCapabilityTest {
++  @Test
++  public void idCarriesNoPluginPrefix() {
++    assertThat(MaintainCapability.ID).isEqualTo("maintain");
++  }
++
++  @Test
++  public void descriptionIsShownInTheAccessScreen() {
++    assertThat(new MaintainCapability().getDescription()).isEqualTo("Maintain demo-plugin");
++  }
++}

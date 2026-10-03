@@ -1,0 +1,339 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Bench Fixture <bench@example.com>
+Date: Sat, 3 Oct 2026 19:27:56 +0200
+Subject: [PATCH] feat: answer ping with 503 while in maintenance
+
+While a project is in maintenance the ping REST view answers 503 with
+maintenanceMessage and the SSH command fails with the same text instead
+of printing pong. A REST view may not return a 5xx Response, so the
+view throws MaintenanceException and an ExceptionHook maps it to 503.
+
+The answer is per project, so the message may now name it: the getter
+takes the project and expands ${project} in the configured text.
+---
+ .../example/demoplugin/DemoPluginConfig.java  | 11 ++--
+ .../demoplugin/MaintenanceException.java      | 53 +++++++++++++++++++
+ .../java/com/example/demoplugin/Module.java   |  3 ++
+ .../com/example/demoplugin/PingAction.java    | 10 +++-
+ .../com/example/demoplugin/PingCommand.java   | 14 +++--
+ src/main/resources/Documentation/about.md     |  4 ++
+ src/main/resources/Documentation/config.md    |  4 +-
+ .../demoplugin/DemoPluginConfigTest.java      | 16 +++++-
+ .../example/demoplugin/PingActionTest.java    | 37 ++++++++++++-
+ 9 files changed, 140 insertions(+), 12 deletions(-)
+ create mode 100644 src/main/java/com/example/demoplugin/MaintenanceException.java
+
+diff --git a/src/main/java/com/example/demoplugin/DemoPluginConfig.java b/src/main/java/com/example/demoplugin/DemoPluginConfig.java
+index 4270f37..6c8ba8b 100644
+--- a/src/main/java/com/example/demoplugin/DemoPluginConfig.java
++++ b/src/main/java/com/example/demoplugin/DemoPluginConfig.java
+@@ -38,6 +38,7 @@ public class DemoPluginConfig {
+   static final String DEFAULT_PING_MESSAGE = "pong";
+   static final String KEY_MAINTENANCE_MESSAGE = "maintenanceMessage";
+   static final String DEFAULT_MAINTENANCE_MESSAGE = "demo-plugin is under maintenance";
++  static final String PROJECT_PLACEHOLDER = "${project}";
+ 
+   private final PluginConfig cfg;
+ 
+@@ -51,8 +52,12 @@ public class DemoPluginConfig {
+     return cfg.getString(KEY_PING_MESSAGE, DEFAULT_PING_MESSAGE);
+   }
+ 
+-  /** Message returned instead of the ping message while a project is in maintenance. */
+-  public String maintenanceMessage() {
+-    return cfg.getString(KEY_MAINTENANCE_MESSAGE, DEFAULT_MAINTENANCE_MESSAGE);
++  /**
++   * Message returned instead of the ping message while {@code project} is in maintenance; every
++   * {@code ${project}} in the configured text is replaced with the project name.
++   */
++  public String maintenanceMessage(String project) {
++    return cfg.getString(KEY_MAINTENANCE_MESSAGE, DEFAULT_MAINTENANCE_MESSAGE)
++        .replace(PROJECT_PLACEHOLDER, project);
+   }
+ }
+diff --git a/src/main/java/com/example/demoplugin/MaintenanceException.java b/src/main/java/com/example/demoplugin/MaintenanceException.java
+new file mode 100644
+index 0000000..c3bab29
+--- /dev/null
++++ b/src/main/java/com/example/demoplugin/MaintenanceException.java
+@@ -0,0 +1,53 @@
++// Copyright (C) 2026 gerrit-stack demo
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package com.example.demoplugin;
++
++import com.google.common.collect.ImmutableList;
++import com.google.common.collect.ImmutableSet;
++import com.google.gerrit.server.ExceptionHook;
++import java.util.Optional;
++
++/**
++ * Thrown by a REST view of a project that is in maintenance.
++ *
++ * <p>A view cannot return a 5xx status itself ({@code Response.withStatusCode} rejects it), so
++ * {@link Hook} tells Gerrit to answer this exception with 503 and its message.
++ */
++public class MaintenanceException extends RuntimeException {
++  private static final long serialVersionUID = 1L;
++
++  static final int SC_SERVICE_UNAVAILABLE = 503;
++
++  public MaintenanceException(String message) {
++    super(message);
++  }
++
++  /** Maps {@link MaintenanceException} to {@code 503 Service Unavailable}. */
++  public static class Hook implements ExceptionHook {
++    @Override
++    public Optional<Status> getStatus(Throwable throwable) {
++      return throwable instanceof MaintenanceException
++          ? Optional.of(Status.create(SC_SERVICE_UNAVAILABLE, "Service Unavailable"))
++          : Optional.empty();
++    }
++
++    @Override
++    public ImmutableList<String> getUserMessages(Throwable throwable, ImmutableSet<String> ids) {
++      return throwable instanceof MaintenanceException
++          ? ImmutableList.of(throwable.getMessage())
++          : ImmutableList.of();
++    }
++  }
++}
+diff --git a/src/main/java/com/example/demoplugin/Module.java b/src/main/java/com/example/demoplugin/Module.java
+index 52720bf..50d361a 100644
+--- a/src/main/java/com/example/demoplugin/Module.java
++++ b/src/main/java/com/example/demoplugin/Module.java
+@@ -18,7 +18,9 @@ import static com.google.gerrit.server.project.ProjectResource.PROJECT_KIND;
+ 
+ import com.google.gerrit.extensions.annotations.Exports;
+ import com.google.gerrit.extensions.config.CapabilityDefinition;
++import com.google.gerrit.extensions.registration.DynamicSet;
+ import com.google.gerrit.extensions.restapi.RestApiModule;
++import com.google.gerrit.server.ExceptionHook;
+ import com.google.inject.AbstractModule;
+ 
+ /**
+@@ -33,6 +35,7 @@ public class Module extends AbstractModule {
+   protected void configure() {
+     bind(DemoPluginConfig.class);
+     bind(MaintenanceState.class);
++    DynamicSet.bind(binder(), ExceptionHook.class).to(MaintenanceException.Hook.class);
+     bind(CapabilityDefinition.class)
+         .annotatedWith(Exports.named(MaintainCapability.ID))
+         .to(MaintainCapability.class);
+diff --git a/src/main/java/com/example/demoplugin/PingAction.java b/src/main/java/com/example/demoplugin/PingAction.java
+index a0a7c21..8d79cdc 100644
+--- a/src/main/java/com/example/demoplugin/PingAction.java
++++ b/src/main/java/com/example/demoplugin/PingAction.java
+@@ -25,7 +25,8 @@ import com.google.inject.Singleton;
+  * {@code GET /projects/{name}/demo-plugin~ping}.
+  *
+  * <p>Answers {@code {"plugin":"demo-plugin","project":"<name>","message":"pong"}}; the message
+- * comes from {@link DemoPluginConfig#pingMessage()}.
++ * comes from {@link DemoPluginConfig#pingMessage()}. While the project is in maintenance it throws
++ * {@link MaintenanceException} (503) with {@link DemoPluginConfig#maintenanceMessage(String)}.
+  */
+ @Singleton
+ public class PingAction implements RestReadView<ProjectResource> {
+@@ -44,15 +45,20 @@ public class PingAction implements RestReadView<ProjectResource> {
+ 
+   private final String pluginName;
+   private final DemoPluginConfig config;
++  private final MaintenanceState maintenance;
+ 
+   @Inject
+-  PingAction(@PluginName String pluginName, DemoPluginConfig config) {
++  PingAction(@PluginName String pluginName, DemoPluginConfig config, MaintenanceState maintenance) {
+     this.pluginName = pluginName;
+     this.config = config;
++    this.maintenance = maintenance;
+   }
+ 
+   @Override
+   public Response<PingInfo> apply(ProjectResource rsrc) {
++    if (maintenance.isOn(rsrc.getNameKey())) {
++      throw new MaintenanceException(config.maintenanceMessage(rsrc.getName()));
++    }
+     return Response.ok(new PingInfo(pluginName, rsrc.getName(), config.pingMessage()));
+   }
+ }
+diff --git a/src/main/java/com/example/demoplugin/PingCommand.java b/src/main/java/com/example/demoplugin/PingCommand.java
+index b94f94c..284e9bf 100644
+--- a/src/main/java/com/example/demoplugin/PingCommand.java
++++ b/src/main/java/com/example/demoplugin/PingCommand.java
+@@ -20,21 +20,29 @@ import com.google.gerrit.sshd.SshCommand;
+ import com.google.inject.Inject;
+ import org.kohsuke.args4j.Argument;
+ 
+-/** {@code ssh -p 29418 <host> demo-plugin ping <project>} prints {@code pong <project>}. */
++/**
++ * {@code ssh -p 29418 <host> demo-plugin ping <project>} prints {@code pong <project>}; while the
++ * project is in maintenance it fails with the maintenance message instead.
++ */
+ @CommandMetaData(name = "ping", description = "Print the ping message for a project")
+ final class PingCommand extends SshCommand {
+   @Argument(index = 0, required = true, metaVar = "PROJECT", usage = "name of the project")
+   private ProjectState projectState;
+ 
+   private final DemoPluginConfig config;
++  private final MaintenanceState maintenance;
+ 
+   @Inject
+-  PingCommand(DemoPluginConfig config) {
++  PingCommand(DemoPluginConfig config, MaintenanceState maintenance) {
+     this.config = config;
++    this.maintenance = maintenance;
+   }
+ 
+   @Override
+-  protected void run() {
++  protected void run() throws UnloggedFailure {
++    if (maintenance.isOn(projectState.getNameKey())) {
++      throw die(config.maintenanceMessage(projectState.getName()));
++    }
+     stdout.println(config.pingMessage() + " " + projectState.getName());
+   }
+ }
+diff --git a/src/main/resources/Documentation/about.md b/src/main/resources/Documentation/about.md
+index df9d892..3fc29db 100644
+--- a/src/main/resources/Documentation/about.md
++++ b/src/main/resources/Documentation/about.md
+@@ -10,6 +10,10 @@ Maintenance
+ that project and `DELETE` switches it off; both need the capability below.
+ The state is kept in memory and ends with a Gerrit restart.
+ 
++While a project is in maintenance, `ping` answers with the configured
++`maintenanceMessage` instead of the ping message: HTTP 503 on REST, a failed
++command on SSH.
++
+ Access
+ ------
+ 
+diff --git a/src/main/resources/Documentation/config.md b/src/main/resources/Documentation/config.md
+index d63416e..7dd90ca 100644
+--- a/src/main/resources/Documentation/config.md
++++ b/src/main/resources/Documentation/config.md
+@@ -14,4 +14,6 @@ All settings live in the `[plugin "demo-plugin"]` section of `gerrit.config`:
+ 
+ `maintenanceMessage`
+ :	Message returned instead of the ping message while a project is in
+-	maintenance. Default: `demo-plugin is under maintenance`.
++	maintenance: the REST view answers 503 with it, the SSH command fails with
++	it. `${project}` is replaced with the project name. Default:
++	`demo-plugin is under maintenance`.
+diff --git a/src/test/java/com/example/demoplugin/DemoPluginConfigTest.java b/src/test/java/com/example/demoplugin/DemoPluginConfigTest.java
+index 775942e..2d85e1b 100644
+--- a/src/test/java/com/example/demoplugin/DemoPluginConfigTest.java
++++ b/src/test/java/com/example/demoplugin/DemoPluginConfigTest.java
+@@ -52,7 +52,8 @@ public class DemoPluginConfigTest {
+   public void maintenanceMessageHasDefault() {
+     DemoPluginConfig config = configFrom(new Config());
+ 
+-    assertThat(config.maintenanceMessage()).isEqualTo("demo-plugin is under maintenance");
++    assertThat(config.maintenanceMessage("some-project"))
++        .isEqualTo("demo-plugin is under maintenance");
+   }
+ 
+   @Test
+@@ -63,7 +64,18 @@ public class DemoPluginConfigTest {
+ 
+     DemoPluginConfig config = configFrom(gerritConfig);
+ 
+-    assertThat(config.maintenanceMessage()).isEqualTo("back at 14:00 UTC");
++    assertThat(config.maintenanceMessage("some-project")).isEqualTo("back at 14:00 UTC");
++  }
++
++  @Test
++  public void maintenanceMessageNamesTheProject() {
++    Config gerritConfig = new Config();
++    gerritConfig.setString(
++        "plugin", PLUGIN, DemoPluginConfig.KEY_MAINTENANCE_MESSAGE, "${project} is being moved");
++
++    DemoPluginConfig config = configFrom(gerritConfig);
++
++    assertThat(config.maintenanceMessage("some-project")).isEqualTo("some-project is being moved");
+   }
+ 
+   private DemoPluginConfig configFrom(Config gerritConfig) {
+diff --git a/src/test/java/com/example/demoplugin/PingActionTest.java b/src/test/java/com/example/demoplugin/PingActionTest.java
+index fd0a553..dcab00f 100644
+--- a/src/test/java/com/example/demoplugin/PingActionTest.java
++++ b/src/test/java/com/example/demoplugin/PingActionTest.java
+@@ -15,8 +15,11 @@
+ package com.example.demoplugin;
+ 
+ import static com.google.common.truth.Truth.assertThat;
++import static org.junit.Assert.assertThrows;
+ import static org.mockito.Mockito.when;
+ 
++import com.google.common.collect.ImmutableSet;
++import com.google.gerrit.entities.Project;
+ import com.google.gerrit.extensions.restapi.Response;
+ import com.google.gerrit.server.config.PluginConfig;
+ import com.google.gerrit.server.config.PluginConfigFactory;
+@@ -36,6 +39,7 @@ public class PingActionTest {
+   @Mock private PluginConfigFactory cfgFactory;
+   @Mock private ProjectResource project;
+ 
++  private final MaintenanceState maintenance = new MaintenanceState();
+   private Config gerritConfig;
+ 
+   @Before
+@@ -44,6 +48,7 @@ public class PingActionTest {
+     when(cfgFactory.getFromGerritConfig(PLUGIN))
+         .thenReturn(PluginConfig.createFromGerritConfig(PLUGIN, gerritConfig));
+     when(project.getName()).thenReturn(PROJECT);
++    when(project.getNameKey()).thenReturn(Project.nameKey(PROJECT));
+   }
+ 
+   @Test
+@@ -65,7 +70,37 @@ public class PingActionTest {
+     assertThat(response.value().message).isEqualTo("ahoy");
+   }
+ 
++  @Test
++  public void pingFailsWithMaintenanceMessageWhileInMaintenance() {
++    gerritConfig.setString(
++        "plugin", PLUGIN, DemoPluginConfig.KEY_MAINTENANCE_MESSAGE, "${project} is being moved");
++    maintenance.set(Project.nameKey(PROJECT), true);
++
++    MaintenanceException thrown =
++        assertThrows(MaintenanceException.class, () -> newAction().apply(project));
++
++    assertThat(thrown).hasMessageThat().isEqualTo(PROJECT + " is being moved");
++  }
++
++  @Test
++  public void maintenanceExceptionIsAnsweredWith503AndItsMessage() {
++    MaintenanceException.Hook hook = new MaintenanceException.Hook();
++    MaintenanceException thrown = new MaintenanceException("back soon");
++
++    assertThat(hook.getStatus(thrown).get().statusCode()).isEqualTo(503);
++    assertThat(hook.getUserMessages(thrown, ImmutableSet.of())).containsExactly("back soon");
++    assertThat(hook.getStatus(new IllegalStateException())).isEmpty();
++  }
++
++  @Test
++  public void pingAnswersPongAgainAfterMaintenance() {
++    maintenance.set(Project.nameKey(PROJECT), true);
++    maintenance.set(Project.nameKey(PROJECT), false);
++
++    assertThat(newAction().apply(project).statusCode()).isEqualTo(200);
++  }
++
+   private PingAction newAction() {
+-    return new PingAction(PLUGIN, new DemoPluginConfig(cfgFactory, PLUGIN));
++    return new PingAction(PLUGIN, new DemoPluginConfig(cfgFactory, PLUGIN), maintenance);
+   }
+ }

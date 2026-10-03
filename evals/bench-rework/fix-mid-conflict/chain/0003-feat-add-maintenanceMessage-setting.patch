@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Bench Fixture <bench@example.com>
+Date: Sat, 3 Oct 2026 19:25:57 +0200
+Subject: [PATCH] feat: add maintenanceMessage setting
+
+While a project is in maintenance, ping will answer with a message the
+admin can configure. Read it from the plugin section like pingMessage;
+the default is "demo-plugin is under maintenance".
+---
+ .../example/demoplugin/DemoPluginConfig.java   |  8 ++++++++
+ src/main/resources/Documentation/config.md     |  5 +++++
+ .../demoplugin/DemoPluginConfigTest.java       | 18 ++++++++++++++++++
+ 3 files changed, 31 insertions(+)
+
+diff --git a/src/main/java/com/example/demoplugin/DemoPluginConfig.java b/src/main/java/com/example/demoplugin/DemoPluginConfig.java
+index 0397896..4270f37 100644
+--- a/src/main/java/com/example/demoplugin/DemoPluginConfig.java
++++ b/src/main/java/com/example/demoplugin/DemoPluginConfig.java
+@@ -27,6 +27,7 @@ import com.google.inject.Singleton;
+  * <pre>
+  * [plugin "demo-plugin"]
+  *   pingMessage = pong
++ *   maintenanceMessage = demo-plugin is under maintenance
+  * </pre>
+  *
+  * <p>Each setting is one constant plus one getter; add new settings the same way.
+@@ -35,6 +36,8 @@ import com.google.inject.Singleton;
+ public class DemoPluginConfig {
+   static final String KEY_PING_MESSAGE = "pingMessage";
+   static final String DEFAULT_PING_MESSAGE = "pong";
++  static final String KEY_MAINTENANCE_MESSAGE = "maintenanceMessage";
++  static final String DEFAULT_MAINTENANCE_MESSAGE = "demo-plugin is under maintenance";
+ 
+   private final PluginConfig cfg;
+ 
+@@ -47,4 +50,9 @@ public class DemoPluginConfig {
+   public String pingMessage() {
+     return cfg.getString(KEY_PING_MESSAGE, DEFAULT_PING_MESSAGE);
+   }
++
++  /** Message returned instead of the ping message while a project is in maintenance. */
++  public String maintenanceMessage() {
++    return cfg.getString(KEY_MAINTENANCE_MESSAGE, DEFAULT_MAINTENANCE_MESSAGE);
++  }
+ }
+diff --git a/src/main/resources/Documentation/config.md b/src/main/resources/Documentation/config.md
+index 41dd28b..d63416e 100644
+--- a/src/main/resources/Documentation/config.md
++++ b/src/main/resources/Documentation/config.md
+@@ -6,7 +6,12 @@ All settings live in the `[plugin "demo-plugin"]` section of `gerrit.config`:
+ ```
+ [plugin "demo-plugin"]
+   pingMessage = pong
++  maintenanceMessage = demo-plugin is under maintenance
+ ```
+ 
+ `pingMessage`
+ :	Message returned by the `ping` REST view and SSH command. Default: `pong`.
++
++`maintenanceMessage`
++:	Message returned instead of the ping message while a project is in
++	maintenance. Default: `demo-plugin is under maintenance`.
+diff --git a/src/test/java/com/example/demoplugin/DemoPluginConfigTest.java b/src/test/java/com/example/demoplugin/DemoPluginConfigTest.java
+index f1ee0d1..775942e 100644
+--- a/src/test/java/com/example/demoplugin/DemoPluginConfigTest.java
++++ b/src/test/java/com/example/demoplugin/DemoPluginConfigTest.java
+@@ -48,6 +48,24 @@ public class DemoPluginConfigTest {
+     assertThat(config.pingMessage()).isEqualTo("hello there");
+   }
+ 
++  @Test
++  public void maintenanceMessageHasDefault() {
++    DemoPluginConfig config = configFrom(new Config());
++
++    assertThat(config.maintenanceMessage()).isEqualTo("demo-plugin is under maintenance");
++  }
++
++  @Test
++  public void maintenanceMessageReadFromPluginSection() {
++    Config gerritConfig = new Config();
++    gerritConfig.setString(
++        "plugin", PLUGIN, DemoPluginConfig.KEY_MAINTENANCE_MESSAGE, "back at 14:00 UTC");
++
++    DemoPluginConfig config = configFrom(gerritConfig);
++
++    assertThat(config.maintenanceMessage()).isEqualTo("back at 14:00 UTC");
++  }
++
+   private DemoPluginConfig configFrom(Config gerritConfig) {
+     when(cfgFactory.getFromGerritConfig(PLUGIN))
+         .thenReturn(PluginConfig.createFromGerritConfig(PLUGIN, gerritConfig));

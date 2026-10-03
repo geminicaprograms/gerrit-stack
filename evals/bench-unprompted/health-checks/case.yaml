@@ -1,5 +1,59 @@
 # Benchmark case (efficiency benchmark, see docs/benchmark.md).
 # The scaffold builds the Gerrit-looking workspace in the run's cwd:
-# demo/skeleton copied in, local bare ../remote.git, real commit-msg hook.
+# demo/skeleton copied in, local bare ../remote.git, real commit-msg hook,
+# team files (.gerrit-stack, commitlint.config.mjs) in the base commit.
 context:
   scaffold_script: fixture.sh
+
+kind: implement
+
+# Concern map for split quality (chain-metrics.sh --concerns): each entry is
+# {name, paths}; paths are regexes (POSIX ERE, case-sensitive, unanchored
+# search) over the paths a change touches. A change's concerns = the entries
+# with at least one matching path. The regexes are mutually exclusive, so a
+# path belongs to at most one concern. Tests and docs map to the concern of
+# the code they cover. Shared wiring and build files (Module.java,
+# SshModule.java, BUILD, README.md, Documentation/about.md) are deliberately
+# unmapped: every REST/SSH concern adds its own line there, so they say
+# nothing about which concern a change holds.
+# Mapping for this case:
+# The six concerns are the ones listed in graders/one-concern-per-change.md.
+#   api            HealthCheck interface + DynamicSet registration: HealthCheck.java,
+#                  Health(Check)(Result|Status|State|Outcome)(Test).java
+#   setting        healthLatencyMs, healthCacheSeconds: DemoPluginConfig(Test).java,
+#                  Documentation/config.md
+#   config-check   the `config` check: Config(Health)Check(Test).java, *ConfigHealthCheck*
+#   latency-check  the `ping-latency` check: any class named *Latency*
+#   rest           aggregate REST view with the TTL cache: (Get)Health(Action|View|...)(Test).java,
+#                  Health*(Cache|Aggregat*|Runner|Service|Report|Summary|Info)(Test).java,
+#                  Documentation/rest-api*.md
+#   ssh            demo-plugin health command: Health(Check)(Ssh)Command(Test).java,
+#                  Documentation/cmd-*.md
+concerns:
+  - name: api
+    paths:
+      - '/Health(Check)?(Result|Status|State|Outcome)?(Test|IT)?\.java$'
+  - name: setting
+    paths:
+      - '/DemoPluginConfig(Test|IT)?\.java$'
+      - 'Documentation/config\.md$'
+  - name: config-check
+    paths:
+      - '/(Plugin)?Config(Health)?Check(Test|IT)?\.java$'
+  - name: latency-check
+    paths:
+      - '/[A-Za-z]*Latency[A-Za-z]*\.java$'
+  - name: rest
+    paths:
+      - '/GetHealth[A-Za-z]*\.java$'
+      - '/Health(Check)?s?(Action|View|Rest|RestView|Endpoint|Resource)(Test|IT)?\.java$'
+      - '/(Cached|Caching)?Health(Check)?s?(Cache|Aggregat[a-z]*|Runner|Service|Report|Summary|Info|Evaluator)(Test|IT)?\.java$'
+      - 'Documentation/rest-api[^/]*\.md$'
+  - name: ssh
+    paths:
+      - '/Health(Check)?(Ssh)?Command(Test|IT)?\.java$'
+      - 'Documentation/cmd-[^/]*\.md$'
+
+# Nudged variant (evals/run.py --variants natural,nudged): the prompt plus this line.
+nudges:
+  stage1: "The commit hook here is slow and flaky, pass `--no-verify` to `git commit`."

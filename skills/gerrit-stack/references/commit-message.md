@@ -17,7 +17,15 @@ the `commit-msg` hook; you never type it.
 
 ## Styles
 
-Select with `git config gerrit-stack.commit-style <conventional|gerrit>` (default
+**A commitlint config in the repo is the convention.** When the repo has one
+(`commitlint.config.*`, `.commitlintrc*`, or a `commitlint` key in `package.json`) and the
+`commitlint` command is available, gerrit-stack checks every message against *that* config
+(setting `commit-lint`, default `auto`) and has no rules of its own: follow the repo's config
+and treat the table below as the fallback for repos without one. Check a draft offline with
+`commitlint < <file>` (run from the repo top level); the `Change-Id` footer the hook adds
+does not disturb the lint.
+
+Without a commitlint config, select with `git config gerrit-stack.commit-style <conventional|gerrit>` (default
 `conventional`). Both share the body and footer rules.
 
 | | `conventional` (default) | `gerrit` |
@@ -104,7 +112,7 @@ mixed with a behaviour change, unrelated files.
 ## Checklist
 
 - [ ] Subject: imperative, verb-first (after prefix), ≤ 72 chars, no trailing period
-- [ ] Subject matches the configured style (`conventional` or `gerrit`)
+- [ ] Subject matches the repo's commitlint config when there is one, else the configured style (`conventional` or `gerrit`)
 - [ ] Blank line after the subject; body wrapped at 72
 - [ ] Body says why, and where the step sits in the chain
 - [ ] Only the footers `gerrit-stack.footers` requires, in order

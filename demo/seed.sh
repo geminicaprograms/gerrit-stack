@@ -8,7 +8,8 @@
 # Idempotent: every step checks before it changes anything. Creates the admin
 # account (first account = Administrators), reviewer `rena`, project
 # `demo-plugin`, clones it into demo/work/demo-plugin with the commit-msg hook,
-# pushes the skeleton, sets gerrit-stack.verify-cmd, wires the Gerrit source
+# pushes the skeleton plus the team files (.gerrit-stack, commitlint.config.mjs),
+# sets gerrit-stack.verify-cmd, wires the Gerrit source
 # tree for in-tree builds and writes the gerrit-mcp config. Tokens go only into
 # ~/.netrc (admin) and demo/work/.rena-token (rena), both mode 600.
 # Needs: curl, jq, git, python3, rsync.
@@ -378,6 +379,11 @@ if [ "$clone_ok" -eq 1 ]; then
       git -C "$clone_dir" checkout -q -B master origin/master 2>/dev/null
     fi
     rsync -a --delete --exclude .git "$demo_dir/skeleton/" "$clone_dir/"
+    # Team conventions travel with the repository: commit messages are linted by the repo's own commitlint
+    # config, review comments use Conventional Comments. Nothing is installed here; without a `commitlint`
+    # command the plugin only mentions that the config is not being checked.
+    printf '[gerrit-stack]\n\tcommit-lint = auto\n\tcomment-style = conventional\n' > "$clone_dir/.gerrit-stack"
+    printf "export default { extends: ['@commitlint/config-conventional'] };\n" > "$clone_dir/commitlint.config.mjs"
     if [ -n "$(git -C "$clone_dir" status --porcelain)" ]; then
       if git -C "$clone_dir" add -A \
         && git -C "$clone_dir" -c user.name=Admin -c user.email=admin@example.com commit -q -m "$seed_subject"; then

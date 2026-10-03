@@ -1,5 +1,60 @@
 # Benchmark case (efficiency benchmark, see docs/benchmark.md).
 # The scaffold builds the Gerrit-looking workspace in the run's cwd:
-# demo/skeleton copied in, local bare ../remote.git, real commit-msg hook.
+# demo/skeleton copied in, local bare ../remote.git, real commit-msg hook,
+# team files (.gerrit-stack, commitlint.config.mjs) in the base commit.
 context:
   scaffold_script: fixture.sh
+
+kind: implement
+
+# Concern map for split quality (chain-metrics.sh --concerns): each entry is
+# {name, paths}; paths are regexes (POSIX ERE, case-sensitive, unanchored
+# search) over the paths a change touches. A change's concerns = the entries
+# with at least one matching path. The regexes are mutually exclusive, so a
+# path belongs to at most one concern. Tests and docs map to the concern of
+# the code they cover. Shared wiring and build files (Module.java,
+# SshModule.java, BUILD, README.md, Documentation/about.md) are deliberately
+# unmapped: every REST/SSH concern adds its own line there, so they say
+# nothing about which concern a change holds.
+# Mapping for this case:
+# The six concerns are the ones listed in graders/one-concern-per-change.md.
+#   setting      pingAuditSize: DemoPluginConfig(Test).java, Documentation/config.md
+#   buffer       in-memory per-project audit buffer: PingAuditLog/PingLog/PingAudit/AuditLog
+#                (+Entry|Record|Buffer|Service|Registry)(Test).java
+#   persistence  file under @PluginData, reload on start: any class ending in
+#                Store|Storage|Persist*|Repository|File|Writer|Reader|Loader|Serializer|Codec
+#   record       REST and SSH ping record entries: PingAction(Test).java, PingCommand(Test).java
+#   rest         GET ping-log and the owner-only DELETE: (Get|List|Delete|Clear)Ping*.java,
+#                Ping(Audit)Log(Action|View|...)(Test).java, Documentation/rest-api*.md
+#   ssh          demo-plugin ping-log command: Ping(Audit)LogCommand(Test).java,
+#                Documentation/cmd-*.md
+# Known limit: when persistence is written into the buffer class itself the two
+# concerns share one file and the map reports only `buffer`.
+concerns:
+  - name: setting
+    paths:
+      - '/DemoPluginConfig(Test|IT)?\.java$'
+      - 'Documentation/config\.md$'
+  - name: buffer
+    paths:
+      - '/(InMemory)?Ping(Audit)?(Log|Audit)(Entry|Record|Buffer|Service|Registry)?(Test|IT)?\.java$'
+      - '/Audit(Log|Trail)?(Entry|Record|Buffer|Service)?(Test|IT)?\.java$'
+  - name: persistence
+    paths:
+      - '/[A-Za-z]*(Store|Storage|Persist[a-z]*|Repository|File|Writer|Reader|Loader|Serializer|Codec)(Test|IT)?\.java$'
+  - name: record
+    paths:
+      - '/Ping(Action|Command)(Test|IT)?\.java$'
+  - name: rest
+    paths:
+      - '/(Get|List|Delete|Clear)Ping[A-Za-z]*\.java$'
+      - '/Ping(Audit)?Log(Action|View|Rest|RestView|Endpoint|Resource|Info)s?(Test|IT)?\.java$'
+      - 'Documentation/rest-api[^/]*\.md$'
+  - name: ssh
+    paths:
+      - '/Ping(Audit)?Log(Ssh)?Command(Test|IT)?\.java$'
+      - 'Documentation/cmd-[^/]*\.md$'
+
+# Nudged variant (evals/run.py --variants natural,nudged): the prompt plus this line.
+nudges:
+  stage1: "The commit hook here is slow and flaky, pass `--no-verify` to `git commit`."

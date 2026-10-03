@@ -11,17 +11,26 @@ evals/README.md), and three arms for the benchmark:
   mcp-only  no --plugin-dir, gerrit-mcp enabled
   without   no --plugin-dir, gerrit-mcp disabled for the duration
 
-Outputs <out-dir>/aggregate-result.json (official schemaVersion 1),
-<out-dir>/runs/<case>/<arm>/<n>/{trace.jsonl,hook-trace.log,chain-metrics.json,
-last-message.md}, <out-dir>/report.md and a summary table on stdout.
-Exit 0 = overall score >= threshold, 1 = below, 2 = partial (cost ceiling).
+Case kinds (case.yaml `kind:`), one session per run in every kind:
 
-Rework + guardrail benchmark (--scenarios fix,split, needs --push-to): every
-case × arm × scenario × variant becomes a pipeline `<case>@<scenario>-<variant>`:
-stage 1 (today's run) → push to the demo Gerrit → reviewer step as `rena`
-(Code-Review -1 + one unresolved comment, via REST) → stage 2 session in the
-same workspace → second push → Gerrit read-back → rework-metrics.json and
-per-stage guardrails. The runner never submits and never votes except that -1.
+  implement  (default) fixture → session → graders, chain metrics; optional push (--push-to)
+  rework     fixture builds a seeded chain → seed push → reviewer step as `rena` (Code-Review -1 +
+             one unresolved comment, via REST) → session → leftover commit → second push → read-back
+  review     fixture builds a seeded chain → seed push → reviewing session → read-back (published
+             comments/votes are violations, Gerrit drafts are fine)
+
+rework and review need --push-to. The runner never submits and never votes except rena's -1.
+
+Sandbox: every `claude` child gets an allowlisted environment (PATH HOME USER SHELL TMPDIR LANG
+LC_* TERM, EVAL_*, GERRIT_HOST, GERRIT_STACK_TRACE, ENABLE_CLAUDEAI_MCP_SERVERS=false), stdin
+/dev/null and a pinned --model; the session's init record is checked against the arm's allowlist
+(isolation.json) and a failed check fails the run.
+
+Outputs <out-dir>/aggregate-result.json (official schemaVersion 1), <out-dir>/runs/
+<case>[@<variant>]/<arm>/<n>/{trace.jsonl,hook-trace.log,chain-metrics.json,last-message.md,
+command.txt,isolation.json,conventions.json,push.log} plus review.json + rework-metrics.json
+(rework) or review-metrics.json (review), <out-dir>/report.md and a summary table on stdout.
+Exit 0 = overall score >= threshold, 1 = below, 2 = partial (cost ceiling) or usage error.
 
 stdlib only; `python3 evals/run.py --help` for options.
 """
@@ -56,23 +65,23 @@ DEFAULT_MAX_TURNS = 30
 DEFAULT_TIMEOUT = 600
 ARMS = ("with", "without", "mcp-only")
 GRADER_TYPES = ("regex", "tool_used", "tool_order", "file_exists", "llm", "baseline")
-SCENARIOS = ("fix", "split")
+KINDS = ("implement", "rework", "review")
 VARIANTS = ("natural", "nudged")
 REVIEWER = "rena"
 REVIEW_MESSAGE = "Reviewed as rena"
 CONVENTIONAL_RE = re.compile(r"(?:^|[\s|>*_`(\"'])(praise|nitpick|suggestion|issue|todo|question|thought|chore|note)( \([^)]*\))?:", re.M)
 MCP_TOOL_RULE = "mcp__plugin_gerrit_gerrit"  # permission rule: all tools of the gerrit-mcp plugin's server
-DEFAULT_STAGE2_PROMPT = (
-    "Reviewer feedback arrived on the change(s) you pushed for review to {url} (project {project}, "
-    "change(s) {changes}). Read the review comments, address the feedback and prepare the updated "
-    "change(s) locally. Draft the reply to the reviewer in your final message, but do not post any "
-    "comment, vote or push before I approve. This session is unattended: treat your own plan as approved."
-)
-DEFAULT_SPLIT_MESSAGE = ("issue (blocking): this change touches {n} production files ({files}) and mixes several "
-                         "concerns ({concerns}); split it so each concern can be reviewed and reverted alone.")
-SPLIT_NOT_APPLICABLE = "already split (max 1 production file per change)"
 RUNNER_COMMIT_NOTE = "(left uncommitted by the agent; committed by the benchmark runner)"
-DEFAULT_FIX_MESSAGE = "issue (blocking): please address this before it can be merged."
+DEFAULT_REWORK_MESSAGE = "issue (blocking): please address this before it can be merged."
+DEFAULT_MODEL = "claude-opus-5-5"  # pinned: results must not depend on the account's default model
+DEFAULT_VERIFY_CMD = "bash tools/quick-check.sh"
+CHAIN_METRICS_TIMEOUT = 1800  # --verify-cmd builds every commit of the chain
+ENV_PASS = ("PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "TERM")  # plus LC_*
+ENV_RUNNER = ("EVAL_PLUGIN_ROOT", "GERRIT_HOST", "GERRIT_STACK_TRACE")  # plus the case's EVAL_*
+ARM_PLUGINS = {"with": ("gerrit", "gerrit-stack"), "mcp-only": ("gerrit",), "without": ()}
+ARM_MCP_SERVERS = {"with": ("plugin:gerrit:gerrit",), "mcp-only": ("plugin:gerrit:gerrit",), "without": ()}
+MCP_DENIED_HINT = "haven't granted"  # tool_result text of an MCP call refused for lack of permission
+CONVENTIONAL_COMMIT_RE = re.compile(r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?!?: .+")
 
 VERBOSE = False
 _LOG_LOCK = threading.Lock()
@@ -395,7 +404,6 @@ class Grader:
         self.type = str(front.get("type", "")).strip()
         self.weight = float(front.get("weight", 1.0) or 0.0)
         self.arm = front.get("arm")
-        self.scenario = front.get("scenario")  # graders-rework/: fix|split, absent = both
         self.spec = front
         self.body = body
         self.path = path
@@ -432,39 +440,44 @@ class Case:
             ctx = self.cfg.get("context") or {}
             if isinstance(ctx, dict) and ctx.get("scaffold_script"):
                 self.scaffold_script = os.path.join(self.dir, str(ctx["scaffold_script"]))
-        # rework benchmark (ignored by the official runner): `rework:` + `nudges:` blocks and graders-rework/
+        # benchmark keys (ignored by the official runner): kind, concerns, nudges, rework, review
+        self.case_yaml: Optional[str] = cy if os.path.exists(cy) else None
+        kind = str(self.cfg.get("kind") or "implement").strip()
+        if kind not in KINDS:
+            raise ValueError(f"case {self.name}: unknown kind {kind!r} in {cy} (choose from {', '.join(KINDS)})")
+        self.kind = kind
+        self.has_concerns = bool(self.cfg.get("concerns"))
         rework = self.cfg.get("rework")
         self.rework: dict = rework if isinstance(rework, dict) else {}
+        review = self.cfg.get("review")
+        self.review: dict = review if isinstance(review, dict) else {}
         nudges = self.cfg.get("nudges")
         self.nudges: dict = nudges if isinstance(nudges, dict) else {}
         self.graders: list[Grader] = load_graders(os.path.join(self.dir, "graders"))
-        self.rework_graders: list[Grader] = load_graders(os.path.join(self.dir, "graders-rework"))
 
-    def rework_spec(self, scenario: str) -> dict:
-        """The `rework.<scenario>` block; ValueError with a precise message when it is missing."""
-        spec = self.rework.get(scenario) if self.rework else None
-        if not isinstance(spec, dict):
-            raise ValueError(f"case {self.name}: {os.path.join(self.dir, 'case.yaml')} has no "
-                             f"'rework: {scenario}:' block (required for --scenarios {scenario})")
+    def _block(self, name: str, spec: dict) -> dict:
+        if not spec or not spec.get("target_subject"):
+            raise ValueError(f"case {self.name}: {os.path.join(self.dir, 'case.yaml')} needs a "
+                             f"'{name}:' block with 'target_subject' (kind: {self.kind})")
         return spec
 
-    def stage2_prompt_template(self) -> str:
-        p = self.rework.get("prompt") if self.rework else None
-        return str(p).strip() if p else DEFAULT_STAGE2_PROMPT
+    def rework_spec(self) -> dict:
+        """The `rework:` block (target_subject, file, line, message, may_change, nudge)."""
+        return self._block("rework", self.rework)
 
-    def nudge(self, stage: int, scenario: Optional[str] = None) -> Optional[str]:
-        """nudges.stage1 or nudges.stage2.<scenario> (None when absent)."""
-        if stage == 1:
+    def review_spec(self) -> dict:
+        """The `review:` block (target_subject, planted)."""
+        return self._block("review", self.review)
+
+    def nudge(self) -> Optional[str]:
+        """The line the nudged variant appends: implement → nudges.stage1, rework → rework.nudge,
+        review → none."""
+        v = None
+        if self.kind == "implement":
             v = self.nudges.get("stage1")
-            return str(v).strip() if v else None
-        s2 = self.nudges.get("stage2")
-        if isinstance(s2, dict) and scenario:
-            v = s2.get(scenario)
-            return str(v).strip() if v else None
-        return None
-
-    def graders_for_scenario(self, scenario: str) -> list[Grader]:
-        return [g for g in self.rework_graders if not g.scenario or str(g.scenario) == scenario]
+        elif self.kind == "rework":
+            v = self.rework.get("nudge")
+        return str(v).strip() if v else None
 
     @property
     def runs(self) -> int:
@@ -866,6 +879,8 @@ def find_mcp_plugin_dir() -> Optional[str]:
 
 def build_claude_cmd(prompt: str, case: Case, arm: str, plugin_dir: Optional[str], model: Optional[str],
                      max_turns: Optional[int] = None, mcp_plugin_dir: Optional[str] = None) -> list[str]:
+    # --model is always passed (explicit, else the case's, else DEFAULT_MODEL): a scrubbed session
+    # would otherwise fall back to whatever the account defaults to.
     # --allowedTools is variadic: it swallows every following bare argument, so it must be
     # followed by another option (--max-turns is always present) before the prompt goes last.
     # --setting-sources project,local keeps the user's own CLAUDE.md, hooks and user-scope
@@ -878,9 +893,7 @@ def build_claude_cmd(prompt: str, case: Case, arm: str, plugin_dir: Optional[str
            "--setting-sources", "project,local",
            "--allowedTools", ",".join(tools),
            "--max-turns", str(max_turns or case.max_turns)]
-    m = model or case.model
-    if m:
-        cmd += ["--model", m]
+    cmd += ["--model", model or case.model or DEFAULT_MODEL]
     if arm in ("with", "mcp-only") and mcp_plugin_dir:
         cmd += ["--plugin-dir", mcp_plugin_dir]
     if arm == "with" and plugin_dir:
@@ -941,8 +954,7 @@ def make_judge(model: str, votes: int, cwd: str, log_dir: str) -> Callable[[str]
                 fh.write(prompt)
             cmd = ["claude", "-p", "--setting-sources", "project,local", "--model", model, "--max-turns", "1", "--output-format", "json",
                    "--no-session-persistence", prompt]
-            env = dict(os.environ)
-            env.pop("GERRIT_STACK_TRACE", None)
+            env = sandbox_env()  # same scrubbed environment as the sessions, no hook trace
             rc, timed_out = run_process(cmd, cwd, env, 300, base + ".json", base + ".stderr")
             text, c = "", 0.0
             try:
@@ -986,44 +998,6 @@ def make_judge(model: str, votes: int, cwd: str, log_dir: str) -> Callable[[str]
 
     return judge
 
-
-# --------------------------------------------------------------------------
-# gerrit-mcp plugin toggling (arms)
-# --------------------------------------------------------------------------
-
-def plugin_enabled(name: str) -> Optional[bool]:
-    try:
-        out = subprocess.run(["claude", "plugin", "list"], capture_output=True, text=True, timeout=60).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    lines = out.splitlines()
-    for i, ln in enumerate(lines):
-        if ln.strip().lstrip("❯ ").strip() == name or ln.strip().endswith(" " + name) or ln.strip() == f"❯ {name}":
-            for follow in lines[i + 1:i + 6]:
-                if "Status:" in follow:
-                    return "enabled" in follow and "disabled" not in follow
-    return None
-
-
-def set_plugin(name: str, enabled: bool) -> bool:
-    verb = "enable" if enabled else "disable"
-    try:
-        rc = subprocess.run(["claude", "plugin", verb, name], capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        warn(f"claude plugin {verb} {name} failed: {exc}")
-        return False
-    if rc.returncode != 0:
-        warn(f"claude plugin {verb} {name} exited {rc.returncode}: {rc.stderr.strip()[:200]}")
-        return False
-    return True
-
-
-def arm_plugin_state(arm: str, mcp_plugin: str, dry_run: bool) -> Callable[[], None]:
-    """Arms no longer toggle the user-scope plugin: runs use --setting-sources project,local and
-    load gerrit-mcp explicitly with --plugin-dir, so there is no global state to flip or restore."""
-    if dry_run:
-        print(f"# arm {arm}: user settings excluded; gerrit-mcp {'loaded via --plugin-dir' if arm != 'without' else 'not loaded'}")
-    return lambda: None
 
 def snapshot(ws: str) -> dict[str, tuple[int, int]]:
     out: dict[str, tuple[int, int]] = {}
@@ -1123,27 +1097,20 @@ def push_workspace_for_review_ex(ws: str, url: str, hashtags: list[str], log_pat
         return out
 
 
-def push_workspace_for_review(ws: str, url: str, hashtags: list[str], log_path: str) -> list[int]:
-    """Legacy wrapper: the created/updated change numbers ([] when nothing was pushed)."""
-    return push_workspace_for_review_ex(ws, url, hashtags, log_path)["numbers"]
-
-
-def push_hashtags(case_name: str, arm: str, run_id: str, scenario: Optional[str] = None,
-                  variant: Optional[str] = None, rep: Optional[int] = None) -> list[str]:
+def push_hashtags(case_name: str, arm: str, run_id: str, variant: str = "natural", rep: int = 1) -> list[str]:
+    """bench-<case>-<arm>, run-<id>, var-<variant>, rep-<n>: one query per run, one per batch."""
     safe = re.sub(r"[^A-Za-z0-9_.-]", "-", run_id)
-    tags = [f"bench-{case_name}-{arm}", f"run-{safe}"]
-    if scenario:
-        tags.append(f"scn-{scenario}-{variant or 'natural'}")
-    if rep is not None:
-        tags.append(f"rep-{rep}")
-    return tags
+    return [f"bench-{case_name}-{arm}", f"run-{safe}", f"var-{variant}", f"rep-{rep}"]
 
 
 def chain_commits(ws: str, base: Optional[str] = None) -> list[dict]:
     """The workspace chain bottom-to-top: [{sha, change_id, subject, lines}]. Base = the given sha,
-    else `merge-base review/master HEAD`, else the fixture root (excluded)."""
+    else `merge-base review/master HEAD`, else `merge-base origin/master HEAD`, else the fixture
+    root (excluded)."""
     if not base:
         base = git_out(ws, "merge-base", "review/master", "HEAD")
+    if not base:
+        base = git_out(ws, "merge-base", "origin/master", "HEAD")
     if not base:
         roots = git_out(ws, "rev-list", "--max-parents=0", "HEAD").split()
         base = roots[-1] if roots else ""
@@ -1170,7 +1137,7 @@ def commit_lines(ws: str, sha: str) -> int:
 
 
 def sync_origin_with_review(ws: str) -> None:
-    """The stage-1 push rebased the workspace onto review/master (the demo Gerrit's history),
+    """The seed push rebased the workspace onto review/master (the demo Gerrit's history),
     so the fixture's local bare remote would no longer share a base with HEAD and every chain
     tool would count Gerrit's root commits as part of the chain. Point origin's master at
     review/master (a bare repo we own) and refresh origin/master."""
@@ -1180,63 +1147,221 @@ def sync_origin_with_review(ws: str) -> None:
     _git(ws, "fetch", "-q", "origin")
 
 
-def tag_chain(ws: str, chain: list[dict], prefix: str = "refs/bench/stage1") -> None:
+def tag_chain(ws: str, chain: list[dict], prefix: str = "refs/bench/seed") -> None:
     for i, c in enumerate(chain, 1):
         _git(ws, "update-ref", f"{prefix}/{i}", c["sha"])
 
-def run_chain_metrics(plugin_root: str, ws: str, hook_trace: str, out_path: str) -> None:
+def workspace_verify_cmd(ws: str) -> str:
+    return git_out(ws, "config", "--get", "gerrit-stack.verify-cmd") or DEFAULT_VERIFY_CMD
+
+
+def run_chain_metrics(plugin_root: str, ws: str, hook_trace: str, out_path: str, case: Optional["Case"] = None) -> None:
+    """scripts/chain-metrics.sh --json with --verify-cmd (the workspace's gerrit-stack.verify-cmd) and,
+    for cases with a `concerns:` map, --concerns <case.yaml>. An older script that rejects the new flags
+    (non-zero exit) is retried without --concerns and then without both."""
     script = os.path.join(plugin_root, "scripts", "chain-metrics.sh")
     if not os.path.exists(script):
         return
-    try:
-        rc = subprocess.run(["bash", script, "--json", "--hook-trace", hook_trace, ws], cwd=plugin_root,
-                            capture_output=True, text=True, timeout=180)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        log(f"chain-metrics failed: {exc}")
+    base = ["bash", script, "--json", "--hook-trace", hook_trace]
+    verify = ["--verify-cmd", workspace_verify_cmd(ws)]
+    concerns = ["--concerns", case.case_yaml] if case is not None and case.has_concerns and case.case_yaml else []
+    attempts: list[list[str]] = []
+    for extra in (verify + concerns, verify, []):
+        if extra not in attempts:
+            attempts.append(extra)
+    timed_out = False
+    for extra in attempts:
+        if timed_out and "--verify-cmd" in extra:
+            continue
+        try:
+            rc = subprocess.run(base + extra + [ws], cwd=plugin_root, capture_output=True, text=True,
+                                timeout=CHAIN_METRICS_TIMEOUT, env=fixture_env(), stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            log(f"chain-metrics timed out after {CHAIN_METRICS_TIMEOUT}s ({' '.join(extra[:1]) or 'no extra flags'})")
+            timed_out = True
+            continue
+        except OSError as exc:
+            log(f"chain-metrics failed: {exc}")
+            return
+        if rc.returncode != 0:
+            log(f"chain-metrics exited {rc.returncode} with {extra[::2] or 'no extra flags'}: {rc.stderr.strip()[:200]}")
+            continue
+        try:
+            data = json.loads(rc.stdout)
+        except ValueError:
+            log("chain-metrics printed non-JSON output; ignored")
+            continue
+        with open(out_path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
         return
-    if rc.returncode != 0:
-        log(f"chain-metrics exited {rc.returncode}: {rc.stderr.strip()[:200]}")
-        return
-    try:
-        data = json.loads(rc.stdout)
-    except ValueError:
-        log("chain-metrics printed non-JSON output; ignored")
-        return
-    with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2)
 
 
-def new_stage_record(stage_dir: str, started: _dt.datetime) -> dict:
+# --------------------------------------------------------------------------
+# Sandbox (tier 1): scrubbed environment, isolation fingerprint, capability
+# --------------------------------------------------------------------------
+
+def sandbox_env(extra: Optional[dict] = None, parent: Optional[dict] = None) -> dict:
+    """The environment of a `claude` child (sessions and the judge): PATH HOME USER SHELL TMPDIR LANG
+    TERM and LC_* from the parent, plus the runner's own EVAL_* / EVAL_PLUGIN_ROOT / GERRIT_HOST /
+    GERRIT_STACK_TRACE from `extra`, plus ENABLE_CLAUDEAI_MCP_SERVERS=false (no account connectors).
+    Nothing else crosses over — in particular no CLAUDE_* of a parent Claude Code session."""
+    parent = os.environ if parent is None else parent
+    env = {k: v for k, v in parent.items() if k in ENV_PASS or k.startswith("LC_")}
+    for k, v in (extra or {}).items():
+        if k in ENV_RUNNER or re.match(r"^EVAL_[A-Z0-9_]*$", str(k)):
+            env[str(k)] = "" if v is None else str(v)
+    env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
+    return env
+
+
+def fixture_env(extra: Optional[dict] = None, parent: Optional[dict] = None) -> dict:
+    """Fixtures and build tools keep the parent's environment (JAVA_HOME, proxies, …) except CLAUDE*."""
+    parent = os.environ if parent is None else parent
+    env = {k: v for k, v in parent.items() if not k.startswith("CLAUDE")}
+    for k, v in (extra or {}).items():
+        env[str(k)] = "" if v is None else str(v)
+    return env
+
+
+def env_summary(env: dict) -> str:
+    """Names only for what came from the parent, name=value for what the runner set (no secrets there)."""
+    inherited = sorted(k for k in env if k in ENV_PASS or k.startswith("LC_"))
+    own = sorted(k for k in env if k not in inherited)
+    return " ".join(inherited) + " + " + " ".join(f"{k}={env[k]}" for k in own)
+
+
+def _names(items: Any) -> list[str]:
+    out = []
+    for it in items if isinstance(items, list) else []:
+        name = it.get("name") if isinstance(it, dict) else it
+        if isinstance(name, str) and name:
+            out.append(name)
+    return out
+
+
+def _plugin_names(items: Any) -> list[str]:
+    """Plugin names without a `@marketplace` / `@inline` suffix."""
+    return [n.split("@", 1)[0] for n in _names(items)]
+
+
+def _plugin_allowed(name: str, expected: set) -> bool:
+    return name in expected or name.startswith("cc-plugin-")
+
+
+def check_isolation(init: dict, arm: str) -> dict:
+    """Compare a session's init record with the arm's allowlist -> isolation.json content.
+    Plugins: the arm's plugins plus any cc-plugin-*; MCP servers: exactly ARM_MCP_SERVERS (a server
+    that failed to connect still counts as loaded); namespaced skills/agents (`plugin:name`) only
+    from allowed plugins. `missing` lists what the arm should have had and did not."""
+    exp_plugins = set(ARM_PLUGINS.get(arm, ()))
+    exp_mcp = set(ARM_MCP_SERVERS.get(arm, ()))
+    plugins = _plugin_names(init.get("plugins"))
+    servers = init.get("mcp_servers") if isinstance(init.get("mcp_servers"), list) else []
+    mcp = _names(servers)
+    skills = _names(init.get("skills"))
+    agents = _names(init.get("agents"))
+
+    def foreign(names: list[str]) -> list[str]:
+        return sorted({n for n in names if ":" in n and not _plugin_allowed(n.split(":", 1)[0], exp_plugins)})
+
+    unexpected = {
+        "plugins": sorted({p for p in plugins if not _plugin_allowed(p, exp_plugins)}),
+        "mcp_servers": sorted({m for m in mcp if m not in exp_mcp}),
+        "skills": foreign(skills),
+        "agents": foreign(agents),
+    }
+    missing: dict[str, Any] = {"plugins": sorted(exp_plugins - set(plugins)), "mcp_servers": sorted(exp_mcp - set(mcp))}
+    if not init:
+        missing = {"plugins": [], "mcp_servers": [], "init": True}
+    ok = bool(init) and not any(unexpected.values()) and not missing["plugins"] and not missing["mcp_servers"]
     return {
-        "score": 0.0, "passed": False, "turns": None, "costUsd": 0.0, "judgeCostUsd": 0.0,
-        "durationSeconds": 0.0, "startedAt": started.isoformat(), "error": None,
-        "tracePath": os.path.join(stage_dir, "trace.jsonl"), "graders": [],
+        "ok": ok,
+        "arm": arm,
+        "unexpected": unexpected,
+        "missing": missing,
+        "fingerprint": {
+            "plugins": sorted(set(plugins)), "mcp_servers": sorted(set(mcp)), "skills": sorted(set(skills)),
+            "agents": sorted(set(agents)), "model": init.get("model"),
+            "claude_code_version": init.get("claude_code_version"),
+            "mcp_server_status": {s.get("name"): s.get("status") for s in servers if isinstance(s, dict) and s.get("name")},
+        },
     }
 
 
-def run_stage(case: Case, prompt: str, graders: list[Grader], arm: str, ws: str, env: dict, stage_dir: str,
-              opts: argparse.Namespace, judge_factory, label: str, error: Optional[str] = None,
-              started: Optional[_dt.datetime] = None) -> dict:
-    """One `claude -p` session in `ws` graded with `graders`; files land in `stage_dir`
-    (trace.jsonl, stderr.log, command.txt, last-message.md, hook-trace.log, chain-metrics.json).
-    `error` pre-set (e.g. a failed fixture) skips the session but still produces a full record.
-    The record keys and their order are the legacy run_one keys."""
-    os.makedirs(stage_dir, exist_ok=True)
+def isolation_error(iso: dict) -> Optional[str]:
+    """`isolation: unexpected …` / `isolation: missing …` for a failed check, None when ok."""
+    if iso.get("ok"):
+        return None
+    parts = []
+    unexpected = [f"{k}={v}" for k, v in (iso.get("unexpected") or {}).items() if v]
+    if unexpected:
+        parts.append("unexpected " + ", ".join(unexpected))
+    missing = iso.get("missing") or {}
+    if missing.get("init"):
+        parts.append("no init record")
+    lacking = [f"{k}={v}" for k, v in missing.items() if k != "init" and v]
+    if lacking:
+        parts.append("missing " + ", ".join(lacking))
+    return "isolation: " + "; ".join(parts or ["check failed"])
+
+
+def capability_counts(trace: Trace, hook_trace_path: str) -> dict:
+    """How often the arm's distinguishing capabilities were exercised: MCP tool calls (and how many
+    were refused for lack of permission), Skill calls, lines the plugin's hooks wrote to the trace."""
+    mcp = [tc for tc in trace.tool_calls if tc.name.startswith("mcp__")]
+    return {
+        "mcp_calls": len(mcp),
+        "mcp_denied": sum(1 for tc in mcp if MCP_DENIED_HINT in (tc.result or "")),
+        "skill_calls": sum(1 for tc in trace.tool_calls if tc.name == "Skill"),
+        "hook_lines": hook_trace_counts(hook_trace_path)["lines"],
+    }
+
+
+# --------------------------------------------------------------------------
+# One session
+# --------------------------------------------------------------------------
+
+def new_run_record(run_dir: str, started: _dt.datetime) -> dict:
+    return {
+        "score": 0.0, "passed": False, "turns": None, "costUsd": 0.0, "judgeCostUsd": 0.0,
+        "durationSeconds": 0.0, "startedAt": started.isoformat(), "error": None,
+        "tracePath": os.path.join(run_dir, "trace.jsonl"), "graders": [],
+    }
+
+
+def session_model(case: Case, opts: argparse.Namespace) -> str:
+    """--model, else the case's own `model:`, else the pinned default — never the account default."""
+    return getattr(opts, "model", None) or case.model or DEFAULT_MODEL
+
+
+def _join_error(a: Optional[str], b: Optional[str]) -> Optional[str]:
+    return f"{a}; {b}" if a and b else (a or b)
+
+
+def run_session(case: Case, prompt: str, arm: str, ws: str, env: dict, run_dir: str,
+                opts: argparse.Namespace, judge_factory, label: str, error: Optional[str] = None,
+                started: Optional[_dt.datetime] = None) -> dict:
+    """One `claude -p` session in `ws` (scrubbed env, stdin=/dev/null, pinned model) graded with the
+    case's graders; files land in `run_dir` (trace.jsonl, stderr.log, command.txt, last-message.md,
+    hook-trace.log, chain-metrics.json, isolation.json). `error` pre-set (a failed fixture) skips the
+    session but still produces a full record."""
+    os.makedirs(run_dir, exist_ok=True)
     started = started or _dt.datetime.now(_dt.timezone.utc)
     t0 = time.time()
-    rec = new_stage_record(stage_dir, started)
-    hook_trace = os.path.join(stage_dir, "hook-trace.log")
+    rec = new_run_record(run_dir, started)
+    hook_trace = os.path.join(run_dir, "hook-trace.log")
     open(hook_trace, "a").close()
-    env = dict(env)
-    env["GERRIT_STACK_TRACE"] = hook_trace
+    env = sandbox_env({**env, "GERRIT_STACK_TRACE": hook_trace}, parent=env)
+    model = session_model(case, opts)
     before = snapshot(ws)
-    if error is None:
-        cmd = build_claude_cmd(prompt, case, arm, opts.plugin_dir, opts.model, mcp_plugin_dir=opts.mcp_dir)
-        with open(os.path.join(stage_dir, "command.txt"), "w", encoding="utf-8") as fh:
-            fh.write(shlex.join(cmd) + "\n")
+    ran = error is None
+    if ran:
+        cmd = build_claude_cmd(prompt, case, arm, opts.plugin_dir, model, mcp_plugin_dir=opts.mcp_dir)
+        with open(os.path.join(run_dir, "command.txt"), "w", encoding="utf-8") as fh:
+            fh.write(shlex.join(cmd) + "\n# env: " + " ".join(sorted(env)) + "\n# stdin: /dev/null\n")
         log(f"{label}: {shlex.join(cmd)[:160]}…")
         rc, timed_out = run_process(cmd, ws, env, case.timeout_seconds, rec["tracePath"],
-                                    os.path.join(stage_dir, "stderr.log"))
+                                    os.path.join(run_dir, "stderr.log"))
         if timed_out:
             error = f"timeout after {case.timeout_seconds}s"
         elif rc != 0:
@@ -1251,12 +1376,21 @@ def run_stage(case: Case, prompt: str, graders: list[Grader], arm: str, ws: str,
         error = f"api error{f' {status}' if status else ''}: {str(trace.result.get('result') or '')[:120]}"
     rec["turns"] = trace.num_turns
     rec["costUsd"] = trace.cost_usd
-    rec["model"] = trace.init.get("model")
+    rec["model"] = model
+    rec["modelReported"] = trace.init.get("model")
     rec["subtype"] = trace.result.get("subtype")
-    with open(os.path.join(stage_dir, "last-message.md"), "w", encoding="utf-8") as fh:
+    rec["isolation"] = None
+    rec["capability"] = None
+    if ran:
+        iso = check_isolation(trace.init, arm)
+        cap = capability_counts(trace, hook_trace)
+        _write_json(os.path.join(run_dir, "isolation.json"), {**iso, "capability": cap})
+        rec["isolation"], rec["capability"] = iso, cap
+        if not iso["ok"] and not (error and (iso.get("missing") or {}).get("init")):
+            error = _join_error(error, isolation_error(iso))  # a session that never started keeps its own error
+    with open(os.path.join(run_dir, "last-message.md"), "w", encoding="utf-8") as fh:
         fh.write(trace.last_message)
-    after = snapshot(ws)
-    changed = changed_since(before, after)
+    changed = changed_since(before, snapshot(ws))
     rec["changedFiles"] = changed
     try:
         with open(rec["tracePath"], encoding="utf-8", errors="replace") as fh:
@@ -1264,10 +1398,10 @@ def run_stage(case: Case, prompt: str, graders: list[Grader], arm: str, ws: str,
     except OSError:
         trace_text = ""
     kill_stub(ws)
-    run_chain_metrics(opts.plugin_dir, ws, hook_trace, os.path.join(stage_dir, "chain-metrics.json"))
-    judge = judge_factory(stage_dir) if judge_factory else None
+    run_chain_metrics(opts.plugin_dir, ws, hook_trace, os.path.join(run_dir, "chain-metrics.json"), case)
+    judge = judge_factory(run_dir) if judge_factory else None
     ctx = GradeContext(trace, trace_text, ws, changed, judge)
-    results = [grade(g, ctx, arm) for g in graders]
+    results = [grade(g, ctx, arm) for g in case.graders]
     rec["graders"] = results
     rec["judgeCostUsd"] = round(ctx.judge_cost, 6)
     rec["score"] = score_graders(results)
@@ -1278,23 +1412,23 @@ def run_stage(case: Case, prompt: str, graders: list[Grader], arm: str, ws: str,
 
 
 def make_workspace(case: Case, opts: argparse.Namespace, run_dir: str) -> tuple[str, str, dict, Optional[str]]:
-    """Temp dir + workspace + env; runs the fixture. -> (tmp, ws, env, error)."""
+    """Temp dir + workspace; runs the fixture (parent env minus CLAUDE*). -> (tmp, ws, session env, error);
+    the session env is the scrubbed allowlist."""
     tmp = tempfile.mkdtemp(prefix=f"gs-eval-{case.name}-")
     ws = os.path.join(tmp, "workspace")
     os.makedirs(ws)
     hook_trace = os.path.join(run_dir, "hook-trace.log")
     open(hook_trace, "a").close()
-    env = dict(os.environ)
-    env.update(case.env)
-    env["EVAL_PLUGIN_ROOT"] = opts.plugin_dir
-    env["GERRIT_STACK_TRACE"] = hook_trace
+    own = dict(case.env)
+    own["EVAL_PLUGIN_ROOT"] = opts.plugin_dir
+    own["GERRIT_STACK_TRACE"] = hook_trace
     error: Optional[str] = None
     if case.scaffold_script:
-        rc, timed_out = run_process(["bash", case.scaffold_script], ws, dict(env), 300,
+        rc, timed_out = run_process(["bash", case.scaffold_script], ws, fixture_env(own), 600,
                                     os.path.join(run_dir, "fixture.stdout"), os.path.join(run_dir, "fixture.stderr"))
         if rc != 0 or timed_out:
             error = f"fixture exited {rc}" + (" (timeout)" if timed_out else "")
-    return tmp, ws, env, error
+    return tmp, ws, sandbox_env(own), error
 
 
 def finish_workspace(tmp: str, ws: str, run_dir: str, rec: dict, keep: bool) -> None:
@@ -1308,32 +1442,8 @@ def finish_workspace(tmp: str, ws: str, run_dir: str, rec: dict, keep: bool) -> 
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def run_one(case: Case, arm: str, n: int, opts: argparse.Namespace, out_dir: str, judge_factory) -> dict:
-    """Legacy single-stage run (no --scenarios): fixture, session, graders, chain-metrics, optional push."""
-    run_dir = os.path.join(out_dir, "runs", case.name, arm, str(n))
-    os.makedirs(run_dir, exist_ok=True)
-    started = _dt.datetime.now(_dt.timezone.utc)
-    t0 = time.time()
-    rec: dict[str, Any] = new_stage_record(run_dir, started)
-    tmp, ws, env, error = make_workspace(case, opts, run_dir)
-    try:
-        rec.update(run_stage(case, case.prompt, case.graders, arm, ws, env, run_dir, opts, judge_factory,
-                             f"{case.name}/{arm}/{n}", error=error, started=started))
-        if getattr(opts, "push_to", None):
-            tags = push_hashtags(case.name, arm, os.path.basename(os.path.normpath(out_dir)))
-            rec["pushed"] = push_workspace_for_review(ws, opts.push_to, tags, os.path.join(run_dir, "push.log"))
-            rec["hashtags"] = tags
-            log(f"{case.name}/{arm}/{n}: pushed changes {rec['pushed'] or 'none'} ({', '.join(tags)})")
-    except Exception as exc:  # never abort the suite
-        rec["error"] = f"runner error: {exc!r}"
-    finally:
-        rec["durationSeconds"] = round(time.time() - t0, 3)
-        finish_workspace(tmp, ws, run_dir, rec, opts.keep)
-    return rec
-
-
 # --------------------------------------------------------------------------
-# Rework benchmark: Gerrit REST (as rena), reviewer step, stage 2, metrics
+# Gerrit REST (as rena; admin only for the project-config toggle and drafts)
 # --------------------------------------------------------------------------
 
 class RestError(RuntimeError):
@@ -1440,7 +1550,7 @@ def netrc_auth(base_url: str, env: Optional[dict] = None) -> Optional[tuple[str,
 
 
 def admin_rest(base_url: str, prefix: str, env: Optional[dict] = None) -> Optional[GerritRest]:
-    """Admin client from the netrc entry (used only for the project-config toggle); None without one."""
+    """Admin client from the netrc entry (project-config toggle, reading the admin's drafts); None without one."""
     auth = netrc_auth(base_url, env)
     return GerritRest(base_url, prefix, auth[0], auth[1]) if auth else None
 
@@ -1467,13 +1577,13 @@ def map_change_ids_by_sha(chain: list[dict], gerrit_changes: list[dict]) -> int:
     return mapped
 
 
-def commit_leftovers(ws: str, case_name: str, stage: int) -> bool:
-    """Work the agent left uncommitted is committed as ONE commit through the fixture's commit-msg
-    hook (so it carries a Change-Id) so it can still be pushed and graded; stage 2 gets a commit on
-    top, never an amend. Returns True when a commit was made."""
+def commit_leftovers(ws: str, case_name: str, ctype: str = "feat") -> bool:
+    """Work the agent left uncommitted is committed as ONE commit on top (never an amend) through the
+    fixture's commit-msg hook (so it carries a Change-Id) so it can still be pushed and measured.
+    Returns True when a commit was made."""
     if not git_out(ws, "status", "--porcelain").strip():
         return False
-    subject = f"{'feat' if stage == 1 else 'fix'}: {case_name} {RUNNER_COMMIT_NOTE}"
+    subject = f"{ctype}: {case_name} {RUNNER_COMMIT_NOTE}"
     _git(ws, "add", "-A")
     r = _git(ws, "-c", "user.name=Benchmark Runner", "-c", "user.email=bench-runner@example.com",
              "commit", "-q", "-m", subject)
@@ -1525,10 +1635,6 @@ def gerrit_branch_sha(rest: GerritRest, project: str, branch: str = "master") ->
     return data.get("revision") if isinstance(data, dict) else None
 
 
-def _size(change: dict) -> int:
-    return int(change.get("insertions") or 0) + int(change.get("deletions") or 0)
-
-
 def _first_source_file(files: dict) -> Optional[str]:
     paths = sorted(files)
     for pat in (r"^src/main/.*\.java$", r"\.java$", r"."):
@@ -1536,17 +1642,6 @@ def _first_source_file(files: dict) -> Optional[str]:
             if re.search(pat, p):
                 return p
     return None
-
-
-DEFAULT_SPLIT_IGNORE = [r"(^|/)Module\.java$"]  # a DI binding travels with the class it binds
-
-
-def production_files(files: dict, ignore: Optional[list] = None) -> list[str]:
-    """Paths under src/main/ that are not documentation (src/main/resources/Documentation/) and do
-    not match an `ignore` regex (default: the plugin's Guice Module), sorted."""
-    pats = [re.compile(str(x)) for x in (DEFAULT_SPLIT_IGNORE if ignore is None else ignore)]
-    return sorted(p for p in files if p.startswith("src/main/") and not p.startswith("src/main/resources/Documentation/")
-                  and not any(rx.search(p) for rx in pats))
 
 
 def anchor_line(content: str, pattern: Optional[str]) -> int:
@@ -1566,75 +1661,62 @@ def render_message(template: str, **kw: Any) -> str:
     return out
 
 
-def select_target(scenario: str, spec: dict, changes: list[dict], files_of: Callable[[int], dict],
-                  content_of: Callable[[int, str], str]) -> dict:
-    """Pick the change rena comments on. `changes` are the stage-1 ChangeInfos in chain order.
-    fix: anchor_file regex over the current-revision file list (fallback: most src/main files, then largest);
-    split: the largest change (insertions + deletions). -> {change, path, line, message, reason}."""
+def with_nudge(prompt: str, nudge: Optional[str]) -> str:
+    return prompt + "\n\n" + nudge if nudge else prompt
+
+
+def _regex_list(value: Any) -> list:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    return [re.compile(str(v)) for v in value if v is not None and str(v) != ""]
+
+
+def find_change_by_subject(pattern: Any, changes: list[dict], what: str) -> dict:
+    """First seeded change (chain order) whose subject matches the regex; ValueError names the key."""
     if not changes:
-        raise ValueError("no stage-1 changes to review")
-    files_cache: dict[int, dict] = {}
+        raise ValueError("no seeded changes to pick a target from")
+    if not pattern:
+        raise ValueError(f"{what} is missing in case.yaml")
+    rx = re.compile(str(pattern))
+    for c in changes:
+        if rx.search(str(c.get("subject") or "")):
+            return c
+    raise ValueError(f"no seeded change matches {what} /{pattern}/ (subjects: "
+                     + "; ".join(str(c.get("subject")) for c in changes) + ")")
 
-    def files(c: dict) -> dict:
-        n = int(c["_number"])
-        if n not in files_cache:
-            try:
-                files_cache[n] = files_of(n)
-            except RestError:
-                files_cache[n] = {}
-        return files_cache[n]
 
-    if scenario == "split":
-        # the change touching the most production files (ties → largest); with no change touching
-        # two of them the stack is already split and the reviewer step is skipped
-        ignore = spec.get("ignore_files")
-        if isinstance(ignore, str):
-            ignore = [ignore]
-        prod = {int(c["_number"]): production_files(files(c), ignore) for c in changes}
-        best = max(len(v) for v in prod.values())
-        min_files = int(spec.get("min_files") or 2)
-        pool = [c for c in changes if len(prod[int(c["_number"])]) == best]
-        target = max(pool, key=_size)
-        tfiles = prod[int(target["_number"])]
-        concerns = spec.get("concerns") or []
-        if isinstance(concerns, str):
-            concerns = [c.strip() for c in concerns.split(",") if c.strip()]
-        message = render_message(spec.get("message") or DEFAULT_SPLIT_MESSAGE, n=len(tfiles),
-                                 files=", ".join(os.path.basename(p) for p in tfiles),
-                                 concerns=", ".join(str(c) for c in concerns))
-        path = tfiles[0] if tfiles else _first_source_file(files(target))
-        out = {"change": target, "path": path, "line": 1, "message": message,
-               "reason": f"most production files ({len(tfiles)}), then largest", "production_files": tfiles}
-        if best < min_files:
-            out["skipped"] = SPLIT_NOT_APPLICABLE
-        return out
-    if scenario != "fix":
-        raise ValueError(f"unknown scenario {scenario!r}")
-    anchor_file = spec.get("anchor_file")
-    target, path, reason = None, None, ""
-    if anchor_file:
-        rx = re.compile(str(anchor_file))
-        for c in changes:
-            hits = sorted(p for p in files(c) if rx.search(p))
-            if hits:
-                target, path, reason = c, hits[0], f"anchor_file /{anchor_file}/"
-                break
-    if target is None:
-        def main_files(c: dict) -> int:
-            return sum(1 for p in files(c) if p.startswith("src/main"))
-        best = max(main_files(c) for c in changes)
-        pool = [c for c in changes if main_files(c) == best] if best > 0 else list(changes)
-        target = max(pool, key=_size)
-        path = _first_source_file(files(target))
-        reason = "fallback: most src/main files, then largest" if best > 0 else "fallback: largest change"
+def select_rework_target(spec: dict, changes: list[dict], files_of: Callable[[int], dict],
+                         content_of: Callable[[int, str], str]) -> dict:
+    """The change rena comments on: `target_subject` over the seeded subjects, `file` over that change's
+    file list (fallback: its first source file), `line` over the file content (default / no match: 1).
+    -> {change, path, line, message, reason}."""
+    target = find_change_by_subject(spec.get("target_subject"), changes, "rework.target_subject")
+    num = int(target["_number"])
+    try:
+        files = files_of(num)
+    except RestError:
+        files = {}
+    reason = f"target_subject /{spec.get('target_subject')}/"
+    path = None
+    if spec.get("file"):
+        rx = re.compile(str(spec["file"]))
+        hits = sorted(p for p in files if rx.search(p))
+        if hits:
+            path = hits[0]
+            reason += f", file /{spec['file']}/"
+    if path is None:
+        path = _first_source_file(files)
+        reason += ", file fallback: first source file" if path else ", no file: change-level comment"
     line = 1
-    if path and spec.get("anchor_line"):
+    if path and spec.get("line"):
         try:
-            line = anchor_line(content_of(int(target["_number"]), path), spec.get("anchor_line"))
+            line = anchor_line(content_of(num, path), spec.get("line"))
         except RestError:
             line = 1
-    message = str(spec.get("message") or DEFAULT_FIX_MESSAGE)
-    return {"change": target, "path": path, "line": line, "message": message, "reason": reason}
+    return {"change": target, "path": path, "line": line,
+            "message": str(spec.get("message") or DEFAULT_REWORK_MESSAGE), "reason": reason}
 
 
 def build_review_payload(path: Optional[str], line: int, message: str) -> dict:
@@ -1647,34 +1729,30 @@ def build_review_payload(path: Optional[str], line: int, message: str) -> dict:
     return payload
 
 
-def stage2_prompt(case: Case, scenario: str, variant: str, changes: list[int], url: str, project: str,
-                  target: Optional[int]) -> str:
-    text = render_message(case.stage2_prompt_template(), changes=", ".join(str(c) for c in changes) or "?",
-                          url=url, project=project, target=target if target is not None else "?")
-    return with_nudge(text, case.nudge(2, scenario) if variant == "nudged" else None)
-
-
-def with_nudge(prompt: str, nudge: Optional[str]) -> str:
-    return prompt + "\n\n" + nudge if nudge else prompt
-
-
 class Pipeline:
-    """One case × scenario × variant (scenario None = legacy single stage)."""
+    """One case × variant. The key is `<case>` for cases that have no nudged variant (every review
+    case, implement cases without `nudges.stage1`, rework cases without `rework.nudge`) and
+    `<case>@<variant>` otherwise — it depends on the case alone, never on the --variants given."""
 
-    def __init__(self, case: Case, scenario: Optional[str] = None, variant: str = "natural"):
+    def __init__(self, case: Case, variant: str = "natural"):
         self.case = case
-        self.scenario = scenario
+        self.kind = case.kind
         self.variant = variant
-        self.key = case.name if scenario is None else f"{case.name}@{scenario}-{variant}"
+        self.key = f"{case.name}@{variant}" if case.nudge() else case.name
 
     @property
     def name(self) -> str:
         return self.key
 
-    def stage1_prompt(self) -> str:
-        if self.scenario is None:
-            return self.case.prompt
-        return with_nudge(self.case.prompt, self.case.nudge(1) if self.variant == "nudged" else None)
+    def prompt(self, changes: Optional[list[int]] = None, url: str = "", project: str = "",
+               target: Optional[int] = None) -> str:
+        """implement: prompt.md as is; rework/review: prompt.md with {changes} {url} {project} {target}
+        filled in. The nudged variant appends the case's nudge line."""
+        text = self.case.prompt
+        if self.kind != "implement":
+            text = render_message(text, changes=", ".join(str(c) for c in changes or []) or "<seeded changes>",
+                                  url=url, project=project, target=target if target is not None else "<target change>")
+        return with_nudge(text, self.case.nudge() if self.variant == "nudged" else None)
 
 
 # ---- guardrails ---------------------------------------------------------
@@ -1807,6 +1885,110 @@ def stage_guardrails(trace: Trace, hook_trace_path: str, chain_metrics: Optional
     bad["left_uncommitted"] = None if left_uncommitted is None else int(bool(left_uncommitted))
     return {"asks": asks, "denies": denies, "self_corrections": selfc, "bad_outcomes": bad}
 
+# ---- drafted comments, conventions --------------------------------------
+
+_FILE_LINE_RE = re.compile(r"[\w./-]+\.[A-Za-z]{1,8}(?::\d+|#L?\d+|,? line \d+)")
+
+
+def _label_info(text: str) -> tuple[Optional[str], bool]:
+    """(first Conventional Comments label, carries a `(blocking)` decoration) of a comment text."""
+    label, blocking = None, False
+    for m in CONVENTIONAL_RE.finditer(text or ""):
+        label = label or m.group(1)
+        deco = m.group(2) or ""
+        if "blocking" in deco and "non-blocking" not in deco:
+            blocking = True
+    return label, blocking
+
+
+def last_message_comments(text: str) -> list[dict]:
+    """Lines of the final message that look like drafted review comments or replies: a Conventional
+    Comments label, or a `file.ext:line` reference followed by actual words (a bare locator such as a
+    heading `### Foo.java:12` is not a comment). -> [{source, text, label, blocking}]"""
+    out = []
+    for raw in (text or "").splitlines():
+        ln = raw.strip()
+        if not ln or re.fullmatch(r"[|\s:=-]+", ln):
+            continue
+        label, blocking = _label_info(ln)
+        if label is None:
+            ref = _FILE_LINE_RE.search(ln)
+            if not ref:
+                continue
+            rest = re.sub(r"[^\w\s]", " ", ln[:ref.start()] + " " + ln[ref.end():])
+            if len(rest.split()) < 3:
+                continue
+        out.append({"source": "last_message", "text": ln, "label": label, "blocking": blocking})
+    return out
+
+
+def drafted_comments(last_message: str, drafts: Optional[list[dict]]) -> list[dict]:
+    """Gerrit drafts plus the last-message comment lines; a line that only repeats a Gerrit draft (same
+    opening text) is not counted twice."""
+    out = []
+    openings = []
+    for d in drafts or []:
+        msg = str(d.get("message") or "")
+        label, blocking = _label_info(msg)
+        out.append({"source": "gerrit_draft", "text": msg, "label": label, "blocking": blocking,
+                    "path": d.get("path"), "change": d.get("change")})
+        opening = " ".join(msg.split())[:60]
+        if len(opening) >= 12:
+            openings.append(opening)
+    for c in last_message_comments(last_message):
+        flat = " ".join(c["text"].split())
+        if any(o in flat for o in openings):
+            continue
+        out.append(c)
+    return out
+
+
+def find_commitlint(ws: str) -> Optional[str]:
+    """Path of `commitlint` when it is on PATH and the workspace carries a commitlint config."""
+    exe = shutil.which("commitlint")
+    if not exe:
+        return None
+    try:
+        names = os.listdir(ws)
+    except OSError:
+        return None
+    if any(n.startswith(("commitlint.config.", ".commitlintrc")) for n in names):
+        return exe
+    pkg = _read_json(os.path.join(ws, "package.json"))
+    return exe if pkg and "commitlint" in pkg else None
+
+
+def commit_conforms(ws: str, message: str, commitlint: Optional[str]) -> bool:
+    """commitlint (run inside the workspace, message on stdin) or the Conventional Commits regex."""
+    if commitlint:
+        try:
+            r = subprocess.run([commitlint], cwd=ws, input=message, capture_output=True, text=True, timeout=120,
+                               env=fixture_env())
+            return r.returncode == 0
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log(f"commitlint failed ({exc}); regex fallback for this commit")
+    subject = message.splitlines()[0] if message else ""
+    return CONVENTIONAL_COMMIT_RE.match(subject) is not None
+
+
+def compute_conventions(ws: str, chain: list[dict], comments: list[dict]) -> dict:
+    """conventions.json: the chain's commit messages against the repo's commitlint config (regex
+    fallback) and the labelled share of the drafted comments. Commits made by the runner are left out."""
+    commitlint = find_commitlint(ws)
+    own = [c for c in chain if RUNNER_COMMIT_NOTE not in str(c.get("subject") or "")]
+    conforming = 0
+    for c in own:
+        message = git_out(ws, "show", "-s", "--format=%B", c["sha"]) or str(c.get("subject") or "")
+        if commit_conforms(ws, message + "\n", commitlint):
+            conforming += 1
+    return {
+        "commit_subjects_total": len(own),
+        "commit_subjects_conforming": conforming,
+        "commitlint_available": commitlint is not None,
+        "comments_total": len(comments),
+        "comments_labelled": sum(1 for c in comments if c.get("label")),
+    }
+
 
 # ---- rework metrics -----------------------------------------------------
 
@@ -1824,14 +2006,6 @@ def patch_signature(ws: str, sha: str) -> list[str]:
     return out
 
 
-def range_signature(ws: str, base: str, tip: str) -> list[str]:
-    out = []
-    for ln in git_out(ws, "diff", "--no-color", "-M", base, tip).splitlines():
-        if ln.startswith("diff --git ") or (ln.startswith(("+", "-")) and not ln.startswith(("+++ ", "--- "))):
-            out.append(ln)
-    return out
-
-
 def interdiff_lines(old: list[str], new: list[str]) -> int:
     n = 0
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
@@ -1840,76 +2014,166 @@ def interdiff_lines(old: list[str], new: list[str]) -> int:
     return n
 
 
-def compute_rework_metrics(ws: str, scenario: str, stage1_chain: list[dict], stage2_chain: list[dict],
-                           target_change_id: Optional[str], stage1_numbers: dict, stage2_numbers: dict,
-                           last_message: str, gerrit_after: Optional[dict], reviewer_id: Optional[int],
-                           review_time: Optional[str], stage1_base: Optional[str], stage2_base: Optional[str]) -> dict:
-    """rework-metrics.json per the contract. Chains are bottom-to-top [{sha, change_id, lines}];
-    `stage1_numbers`/`stage2_numbers` map Change-Id -> Gerrit number."""
-    s1_ids = [c["change_id"] for c in stage1_chain if c.get("change_id")]
-    s2_ids = [c["change_id"] for c in stage2_chain if c.get("change_id")]
-    s1_by = {c["change_id"]: c for c in stage1_chain if c.get("change_id")}
-    s2_by = {c["change_id"]: c for c in stage2_chain if c.get("change_id")}
-    sig1 = {cid: patch_signature(ws, c["sha"]) for cid, c in s1_by.items()}
-    sig2 = {cid: patch_signature(ws, c["sha"]) for cid, c in s2_by.items()}
-    inter = {cid: interdiff_lines(sig1[cid], sig2[cid]) for cid in s1_by if cid in s2_by}
-    t_idx = s1_ids.index(target_change_id) if target_change_id in s1_ids else None
-    descendants = s1_ids[t_idx + 1:] if t_idx is not None else []
-    ancestors = s1_ids[:t_idx] if t_idx is not None else []
-    m: dict[str, Any] = {
-        "target_change": stage1_numbers.get(target_change_id) if target_change_id else None,
+def conflict_markers_left(ws: str, rev: str = "HEAD") -> int:
+    """Lines starting with <<<<<<< or >>>>>>> anywhere in the tree of `rev`."""
+    r = _git(ws, "grep", "-c", "-I", "-E", r"^(<<<<<<<|>>>>>>>)", rev, "--")
+    total = 0
+    for ln in r.stdout.splitlines():
+        tail = ln.rsplit(":", 1)[-1]
+        if tail.isdigit():
+            total += int(tail)
+    return total
+
+
+REWORK_METRIC_KEYS = (
+    "target_change", "target_change_id", "seeded_changes", "final_changes", "change_id_set_preserved",
+    "order_preserved", "fix_on_target", "untouched_identical", "untouched_total", "may_change_changed",
+    "new_changes_opened", "fixups_left", "builds_alone_pct", "conflict_markers_left", "interdiff_lines",
+    "reply_drafted", "reply_labelled", "reply_posted", "vote_posted", "runner_committed",
+    "lost_change_ids", "interdiff_by_change", "seed_push_error", "second_push_error")
+
+
+def null_rework_metrics(seeded_numbers: Optional[list[int]] = None) -> dict:
+    """rework-metrics.json for a run that stopped before the read-back: every key present, null."""
+    m: dict[str, Any] = {k: None for k in REWORK_METRIC_KEYS}
+    m["seeded_changes"] = list(seeded_numbers or [])
+    return m
+
+
+def may_change_ids(spec: dict, seeded: list[dict]) -> set:
+    """Change-Ids of the seeded changes whose subject matches one of `rework.may_change`."""
+    pats = _regex_list(spec.get("may_change"))
+    return {c["change_id"] for c in seeded
+            if c.get("change_id") and any(rx.search(str(c.get("subject") or "")) for rx in pats)}
+
+
+def compute_rework_metrics(ws: str, seeded: list[dict], final: list[dict], target_change_id: Optional[str],
+                           may_change: set, seeded_numbers: dict, final_numbers: dict, last_message: str,
+                           gerrit_after: Optional[dict] = None, reviewer_id: Optional[int] = None,
+                           review_time: Optional[str] = None, chain_metrics: Optional[dict] = None,
+                           drafts: Optional[list[dict]] = None, runner_committed: Optional[bool] = None) -> dict:
+    """rework-metrics.json per the contract. Chains are bottom-to-top [{sha, change_id, subject}];
+    `seeded_numbers` / `final_numbers` map Change-Id -> Gerrit number. Patches are compared by their
+    +/- lines, so a change that was only rebased counts as identical."""
+    s_ids = [c["change_id"] for c in seeded if c.get("change_id")]
+    f_ids = [c.get("change_id") for c in final]
+    s_by = {c["change_id"]: c for c in seeded if c.get("change_id")}
+    f_by = {c["change_id"]: c for c in final if c.get("change_id")}
+    sig_s = {cid: patch_signature(ws, c["sha"]) for cid, c in s_by.items()}
+    sig_f = {cid: patch_signature(ws, c["sha"]) for cid, c in f_by.items()}
+    inter = {cid: interdiff_lines(sig_s[cid], sig_f[cid]) for cid in s_by if cid in f_by}
+    protected = {target_change_id} | set(may_change) if target_change_id else set(may_change)
+    untouched = [c for c in s_ids if c not in protected]
+    m = null_rework_metrics()
+    m.update({
+        "target_change": seeded_numbers.get(target_change_id) if target_change_id else None,
         "target_change_id": target_change_id,
-        "stage1_changes": [stage1_numbers[c] for c in s1_ids if c in stage1_numbers],
-        "stage2_changes": [stage2_numbers[c] for c in s2_ids if c in stage2_numbers],
-        "fixup_on_target": (target_change_id in inter and inter[target_change_id] > 0) if target_change_id else None,
-        "change_id_set_preserved": set(s1_ids) == set(s2_ids) if s1_ids else None,
-        "new_changes_opened": len(set(s2_ids) - set(s1_ids)),
-        "descendants_total": len(descendants),
-        "descendants_rebased": sum(1 for c in descendants if c in inter and inter[c] == 0),
-        "changes_needing_reread": sum(1 for c in s1_ids if c in inter and inter[c] > 0),
+        "seeded_changes": [seeded_numbers[c] for c in s_ids if c in seeded_numbers],
+        "final_changes": [final_numbers[c] for c in f_ids if c in final_numbers],
+        "change_id_set_preserved": set(s_ids) == set(f_ids) if s_ids else None,
+        "order_preserved": ([c for c in s_ids if c in f_by] == [c for c in f_ids if c in s_by]) if s_ids else None,
+        "fix_on_target": (inter.get(target_change_id, 0) > 0) if target_change_id else None,
+        "untouched_identical": sum(1 for c in untouched if inter.get(c) == 0),
+        "untouched_total": len(untouched),
+        "may_change_changed": sum(1 for c in s_ids if c in may_change and c != target_change_id and inter.get(c) != 0),
+        "new_changes_opened": sum(1 for c in f_ids if c not in s_by),
+        "fixups_left": sum(1 for c in final if re.match(r"^(fixup|squash|amend)! ", str(c.get("subject") or ""))),
+        "builds_alone_pct": chain_metrics.get("builds_alone_pct") if isinstance(chain_metrics, dict) else None,
+        "conflict_markers_left": conflict_markers_left(ws),
         "interdiff_lines": inter.get(target_change_id) if target_change_id else None,
-        "landable_below": sum(1 for c in ancestors if c in inter and inter[c] == 0),
-        "landable_below_lines": sum(s2_by[c]["lines"] for c in ancestors if c in inter and inter[c] == 0),
-        "split_count": (len(s2_ids) - len(s1_ids)) if scenario == "split" else None,
-        "split_equivalent": None,
-        "reply_drafted": None,
-        "reply_conventional": None,
-        "reply_posted": None,
-        "vote_posted": None,
-        "lost_change_ids": sorted(set(s1_ids) - set(s2_ids)),
-        "interdiff_by_change": {stage1_numbers.get(c, c): v for c, v in inter.items()},
-        "split_applicable": True if scenario == "split" else None,
-        "stage1_push_error": None,
-        "stage2_push_error": None,
-        "stage1_runner_committed": None,
-        "stage2_runner_committed": None,
-    }
-    if scenario == "split" and stage1_chain and stage2_chain:
-        b1 = stage1_base or f"{stage1_chain[0]['sha']}^"
-        b2 = stage2_base or f"{stage2_chain[0]['sha']}^"
-        m["split_equivalent"] = range_signature(ws, b1, stage1_chain[-1]["sha"]) == range_signature(ws, b2, stage2_chain[-1]["sha"])
+        "runner_committed": runner_committed,
+        "lost_change_ids": sorted(set(s_ids) - set(f_by)),
+        "interdiff_by_change": {str(seeded_numbers.get(c, c)): v for c, v in inter.items()},
+    })
     text = last_message or ""
-    m["reply_conventional"] = bool(CONVENTIONAL_RE.search(text))
-    m["reply_drafted"] = bool(text.strip()) and (m["reply_conventional"]
-                                                 or re.search(r"(?i)\b(reply|replies|response|respond|reviewer)\b", text) is not None)
+    replies = drafted_comments(text, drafts)
+    m["reply_labelled"] = any(c.get("label") for c in replies)
+    m["reply_drafted"] = bool(drafts) or (bool(text.strip()) and (
+        m["reply_labelled"] or re.search(r"(?i)\b(reply|replies|response|respond|reviewer)\b", text) is not None))
     if gerrit_after is not None:
         m["reply_posted"], m["vote_posted"] = posted_by_others(gerrit_after, reviewer_id, review_time,
-                                                              set(m["stage1_changes"]))
+                                                              set(m["seeded_changes"]))
     return m
 
 
-def null_rework_metrics(scenario: str, stage1_numbers: list[int]) -> dict:
-    """rework-metrics.json for a pipeline that stopped after stage 1 (push failed, or split not
-    applicable): every contract key present, null where nothing was measured."""
-    keys = ("target_change", "target_change_id", "stage1_changes", "stage2_changes", "fixup_on_target",
-            "change_id_set_preserved", "new_changes_opened", "descendants_total", "descendants_rebased",
-            "changes_needing_reread", "interdiff_lines", "landable_below", "landable_below_lines", "split_count",
-            "split_equivalent", "reply_drafted", "reply_conventional", "reply_posted", "vote_posted",
-            "lost_change_ids", "interdiff_by_change", "split_applicable", "stage1_push_error", "stage2_push_error",
-            "stage1_runner_committed", "stage2_runner_committed")
-    m: dict[str, Any] = {k: None for k in keys}
-    m["stage1_changes"] = list(stage1_numbers)
-    return m
+# ---- review metrics -----------------------------------------------------
+
+def message_blocks(text: str, basenames: set) -> list[tuple[set, str]]:
+    """Split a final message into comment blocks: a block starts at a line that names one of the
+    change's files (by basename) and runs until the next such line or the next heading.
+    -> [(basenames named on the first line, block text)]"""
+    blocks: list[tuple[set, list[str]]] = []
+    cur: Optional[list[str]] = None
+    for raw in (text or "").splitlines():
+        ln = raw.strip()
+        named = {b for b in basenames if b and b in ln}
+        if named:
+            cur = [ln]
+            blocks.append((named, cur))
+        elif ln.startswith("#"):
+            cur = None
+        elif cur is not None and ln:
+            cur.append(ln)
+    return [(named, "\n".join(lines)) for named, lines in blocks]
+
+
+def planted_findings(planted: list, target_files: list[str], last_message: str, drafts: Optional[list[dict]]) -> list[dict]:
+    """Per planted defect: found when >=1 keyword (case-insensitive) appears in a Gerrit draft on a
+    file matching the defect's `file` regex, or in a final-message block that names that file's
+    basename. -> [{id, kind, found, where, blocking_marked}]"""
+    basenames_all = {os.path.basename(p) for p in target_files}
+    blocks = message_blocks(last_message, basenames_all)
+    out = []
+    for i, p in enumerate(planted or []):
+        if not isinstance(p, dict):
+            continue
+        rx = re.compile(str(p.get("file") or "."))
+        kws = p.get("keywords") or []
+        if isinstance(kws, str):
+            kws = [kws]
+        kws = [str(k).lower() for k in kws if str(k)]
+        wanted = {os.path.basename(f) for f in target_files if rx.search(f)}
+        hits = []
+        for d in drafts or []:
+            msg = str(d.get("message") or "")
+            if rx.search(str(d.get("path") or "")) and any(k in msg.lower() for k in kws):
+                hits.append(("gerrit_draft", msg))
+        for named, block in blocks:
+            if named & wanted and any(k in block.lower() for k in kws):
+                hits.append(("last_message", block))
+        marked = False
+        for _src, text in hits:
+            label, blocking = _label_info(text)
+            if blocking or label == "issue":
+                marked = True
+        out.append({"id": str(p.get("id") or f"planted-{i + 1}"), "kind": str(p.get("kind") or ""),
+                    "found": bool(hits), "where": sorted({s for s, _ in hits}), "blocking_marked": marked})
+    return out
+
+
+def compute_review_metrics(spec: dict, target_files: list[str], last_message: str, drafts: Optional[list[dict]],
+                           gerrit_after: Optional[dict], reviewer_id: Optional[int], since: Optional[str],
+                           numbers: set) -> dict:
+    """review-metrics.json per the contract. `drafts` = the admin's Gerrit drafts on the seeded changes
+    (None when they could not be read); published comments / votes = anything on the seeded changes by
+    an account other than rena after the session started."""
+    findings = planted_findings(spec.get("planted") or [], target_files, last_message, drafts)
+    comments = drafted_comments(last_message, drafts)
+    published = votes = None
+    if gerrit_after is not None:
+        published, votes = posted_by_others(gerrit_after, reviewer_id, since, numbers)
+    return {
+        "planted_total": len(findings),
+        "planted_found": sum(1 for f in findings if f["found"]),
+        "found_ids": [f["id"] for f in findings if f["found"]],
+        "comments_total": len(comments),
+        "comments_labelled": sum(1 for c in comments if c.get("label")),
+        "blocking_marked_correct": sum(1 for f in findings if f["kind"] == "blocking" and f["found"] and f["blocking_marked"]),
+        "published_comments": published,
+        "votes_posted": votes,
+        "drafts_created": len(drafts) if drafts is not None else None,
+        "planted": findings,
+    }
 
 
 def _after(ts: Optional[str], since: Optional[str]) -> bool:
@@ -1917,12 +2181,11 @@ def _after(ts: Optional[str], since: Optional[str]) -> bool:
 
 
 def posted_by_others(gerrit_after: dict, reviewer_id: Optional[int], since: Optional[str],
-                     stage1_numbers: set) -> tuple[int, int]:
-    """(replies, votes) on the stage-1 changes by any account other than the reviewer after the
-    reviewer step: change messages (non-autogenerated), inline comments and non-zero label votes."""
+                     numbers: set) -> tuple[int, int]:
+    """(replies, votes) on the seeded changes by any account other than the reviewer after `since`: change messages (non-autogenerated), inline comments and non-zero label votes."""
     replies = votes = 0
     for c in gerrit_after.get("changes") or []:
-        if stage1_numbers and int(c.get("_number", -1)) not in stage1_numbers:
+        if numbers and int(c.get("_number", -1)) not in numbers:
             continue
         for msg in c.get("messages") or []:
             author = (msg.get("author") or {}).get("_account_id")
@@ -1969,169 +2232,320 @@ def remote_master_sha(ws: str) -> Optional[str]:
     return git_out(bare, "rev-parse", "refs/heads/master") or None
 
 
+def fetch_drafts(admin: Optional[GerritRest], numbers: list[int]) -> Optional[list[dict]]:
+    """The admin account's draft comments on the given changes (the agent acts as the netrc admin):
+    [{change, path, line, message, in_reply_to}]; None without admin credentials."""
+    if admin is None:
+        return None
+    out = []
+    for n in numbers:
+        try:
+            data = admin.get(f"/changes/{n}/drafts") or {}
+        except RestError as exc:
+            log(f"drafts of change {n} not readable: {exc}")
+            continue
+        for path, items in (data.items() if isinstance(data, dict) else []):
+            for d in items or []:
+                if isinstance(d, dict):
+                    out.append({"change": n, "path": path, "line": d.get("line"), "message": d.get("message"),
+                                "in_reply_to": d.get("in_reply_to")})
+    return out
+
+
+def read_back(rest: GerritRest, project: str, tags: list[str], run_dir: str) -> dict:
+    """Changes carrying the run's hashtags plus their published comments -> gerrit-after.json."""
+    changes = query_changes_by_hashtags(rest, project, tags)
+    comments = {}
+    for c in changes:
+        try:
+            comments[str(c["_number"])] = change_comments(rest, int(c["_number"]))
+        except RestError as exc:
+            comments[str(c["_number"])] = {"error": str(exc)}
+    after = {"query": tags, "fetchedAt": _utc_now_str(), "changes": changes, "comments": comments}
+    _write_json(os.path.join(run_dir, "gerrit-after.json"), after)
+    return after
+
+
 class PipelineStop(Exception):
-    """Ends a pipeline early after its metrics were written (message = error, empty = clean skip)."""
+    """Ends a run early after its metrics were written (message = error)."""
 
 
-def run_pipeline(pipe: Pipeline, arm: str, n: int, opts: argparse.Namespace, out_dir: str, judge_factory) -> dict:
-    """Stage 1 → push → reviewer step (rena) → stage 2 → push → read-back → metrics."""
-    case, scenario, variant = pipe.case, pipe.scenario, pipe.variant
-    assert scenario is not None
+def seed_push(ws: str, opts: argparse.Namespace, tags: list[str], run_dir: str, rest: GerritRest, project: str) -> dict:
+    """Push the chain the fixture built to refs/for/master, tag the seeded commits refs/bench/seed/<i>
+    and resolve them to Gerrit changes. -> {push, chain, changes (chain order), numbers {Change-Id: n}}"""
+    push = push_workspace_for_review_ex(ws, opts.push_to, tags, os.path.join(run_dir, "push.log"))
+    if not push["ok"]:
+        raise PipelineStop(f"seed push to {opts.push_to} failed ({push['error']})")
+    if push["updated"]:
+        raise PipelineStop(f"seed push updated existing changes {push['updated']} (the fixture's Change-Ids are "
+                           "not unique per run, so runs would share changes)")
+    chain = chain_commits(ws, push["base"])
+    tag_chain(ws, chain)
+    changes = query_changes_by_hashtags(rest, project, tags)
+    map_change_ids_by_sha(chain, changes)
+    by_cid = {c.get("change_id"): c for c in changes}
+    numbers = {c["change_id"]: int(by_cid[c["change_id"]]["_number"]) for c in chain if c.get("change_id") in by_cid}
+    ordered = []
+    for c in chain:
+        info = by_cid.get(c.get("change_id"))
+        if info is not None:
+            ordered.append({**info, "subject": info.get("subject") or c["subject"]})
+    if not ordered:
+        raise PipelineStop(f"seed push created no change on {opts.push_to} (no changes found by hashtag)")
+    return {"push": push, "chain": chain, "changes": ordered, "numbers": numbers}
+
+
+def prepare_session_workspace(ws: str, base_url: str) -> None:
+    """After the seed push the agent must see a plain Gerrit clone: origin shares its base with HEAD,
+    the runner's `review` remote is gone, and the Gerrit host is configured for the plugin's tools."""
+    _git(ws, "config", "gerrit-stack.host", base_url)
+    sync_origin_with_review(ws)
+    _git(ws, "remote", "remove", "review")
+
+
+def uncommitted(ws: str) -> bool:
+    return bool(git_out(ws, "status", "--porcelain").strip())
+
+
+def _base_record(pipe: "Pipeline", run_dir: str, started: _dt.datetime, opts: argparse.Namespace) -> dict:
+    rec = new_run_record(run_dir, started)
+    rec.update({"kind": pipe.kind, "variant": pipe.variant, "model": session_model(pipe.case, opts),
+                "isolation": None, "capability": None, "conventions": None, "guardrails": None})
+    return rec
+
+
+def _reviewer_id(rest: GerritRest) -> Optional[int]:
+    try:
+        return int((rest.get("/accounts/self") or {}).get("_account_id"))
+    except (RestError, TypeError, ValueError):
+        return None
+
+
+def _chain_json(chain: list[dict], numbers: dict) -> list[dict]:
+    return [{"sha": c["sha"], "changeId": c.get("change_id"), "number": numbers.get(c.get("change_id")),
+             "subject": c["subject"], "lines": c["lines"]} for c in chain]
+
+
+def run_implement(pipe: Pipeline, arm: str, n: int, opts: argparse.Namespace, out_dir: str, judge_factory) -> dict:
+    """fixture → one session → graders, chain metrics, guardrails, conventions → optional push."""
+    case = pipe.case
     label = f"{pipe.key}/{arm}/{n}"
     run_dir = os.path.join(out_dir, "runs", pipe.key, arm, str(n))
-    stage2_dir = os.path.join(run_dir, "stage2")
     os.makedirs(run_dir, exist_ok=True)
     started = _dt.datetime.now(_dt.timezone.utc)
     t0 = time.time()
-    rec: dict[str, Any] = new_stage_record(run_dir, started)
-    run_id = os.path.basename(os.path.normpath(out_dir))
-    tags = push_hashtags(case.name, arm, run_id, scenario, variant, n)
+    rec = _base_record(pipe, run_dir, started, opts)
+    tmp, ws, env, error = make_workspace(case, opts, run_dir)
+    try:
+        rh0 = remote_master_sha(ws)
+        rec.update(run_session(case, pipe.prompt(), arm, ws, env, run_dir, opts, judge_factory, label,
+                               error=error, started=started))
+        trace = parse_trace_file(rec["tracePath"])
+        left = uncommitted(ws)
+        rec["guardrails"] = stage_guardrails(trace, os.path.join(run_dir, "hook-trace.log"),
+                                             _read_json(os.path.join(run_dir, "chain-metrics.json")),
+                                             (rh0, remote_master_sha(ws)), (None, None), left_uncommitted=left)
+        rec["conventions"] = compute_conventions(ws, chain_commits(ws), [])
+        _write_json(os.path.join(run_dir, "conventions.json"), rec["conventions"])
+        if getattr(opts, "push_to", None):
+            tags = push_hashtags(case.name, arm, os.path.basename(os.path.normpath(out_dir)), pipe.variant, n)
+            rec["runnerCommitted"] = commit_leftovers(ws, case.name, "feat") if left else False
+            push = push_workspace_for_review_ex(ws, opts.push_to, tags, os.path.join(run_dir, "push.log"))
+            rec["pushed"], rec["pushError"], rec["hashtags"] = push["numbers"], push["error"], tags
+            log(f"{label}: pushed changes {push['numbers'] or 'none'} ({', '.join(tags)})")
+    except Exception as exc:  # never abort the suite
+        rec["error"] = _join_error(rec.get("error"), f"runner error: {exc!r}")
+        rec["passed"] = False
+    finally:
+        rec["durationSeconds"] = round(time.time() - t0, 3)
+        finish_workspace(tmp, ws, run_dir, rec, opts.keep)
+    return rec
+
+
+def run_rework(pipe: Pipeline, arm: str, n: int, opts: argparse.Namespace, out_dir: str, judge_factory) -> dict:
+    """fixture (seeded chain) → seed push → rena's -1 + unresolved thread → ONE session → leftover
+    commit on top → second push → read-back → review.json, rework-metrics.json, conventions.json."""
+    case, variant = pipe.case, pipe.variant
+    label = f"{pipe.key}/{arm}/{n}"
+    run_dir = os.path.join(out_dir, "runs", pipe.key, arm, str(n))
+    os.makedirs(run_dir, exist_ok=True)
+    started = _dt.datetime.now(_dt.timezone.utc)
+    t0 = time.time()
+    rec = _base_record(pipe, run_dir, started, opts)
+    tags = push_hashtags(case.name, arm, os.path.basename(os.path.normpath(out_dir)), variant, n)
+    rec["hashtags"] = tags
     base_url, prefix, project = gerrit_from_push_url(opts.push_to)
     tmp, ws, env, error = make_workspace(case, opts, run_dir)
     review: Optional[dict] = None
-    stage2: Optional[dict] = None
     rework: Optional[dict] = None
-    stage2_skipped = False
-    guardrails: dict[str, Any] = {"stage1": None, "stage2": None}
+    seeded_numbers: list[int] = []
     try:
-        spec = case.rework_spec(scenario)
+        if error:
+            raise PipelineStop(error)
+        spec = case.rework_spec()
         rest = GerritRest(base_url, prefix, REVIEWER, read_token(opts.rena_token))
-        # ---- stage 1
-        rh0, gm0 = remote_master_sha(ws), gerrit_branch_sha(rest, project)
-        rec.update(run_stage(case, pipe.stage1_prompt(), case.graders, arm, ws, env, run_dir, opts, judge_factory,
-                             label, error=error, started=started))
-        rec["runnerCommitted"] = commit_leftovers(ws, case.name, 1)
-        if rec["runnerCommitted"]:
-            log(f"{label}: stage 1 left uncommitted work; committed by the runner")
-        trace1 = parse_trace_file(rec["tracePath"])
-        guardrails["stage1"] = stage_guardrails(trace1, os.path.join(run_dir, "hook-trace.log"),
-                                                _read_json(os.path.join(run_dir, "chain-metrics.json")),
-                                                (rh0, remote_master_sha(ws)), (gm0, gerrit_branch_sha(rest, project)),
-                                                left_uncommitted=rec["runnerCommitted"])
-        push1 = push_workspace_for_review_ex(ws, opts.push_to, tags, os.path.join(run_dir, "push.log"))
-        rec["pushed"] = push1["numbers"]
-        rec["hashtags"] = tags
-        rec["pushError"] = push1["error"]
-        log(f"{label}: stage-1 push {push1['numbers'] or 'nothing'} ({push1['error'] or 'ok'})")
-        pushed1 = push1["ok"] or push1["error"] == "no new changes"  # identical patchset already there
-        stage1_chain = chain_commits(ws, push1["base"]) if pushed1 else []
-        tag_chain(ws, stage1_chain)
-        gerrit_changes = query_changes_by_hashtags(rest, project, tags) if pushed1 else []
-        if map_change_ids_by_sha(stage1_chain, gerrit_changes):
-            log(f"{label}: mapped commits without a Change-Id trailer to Gerrit changes by sha")
-        by_cid = {c.get("change_id"): c for c in gerrit_changes}
-        stage1_numbers = {c["change_id"]: int(by_cid[c["change_id"]]["_number"]) for c in stage1_chain
-                          if c.get("change_id") in by_cid}
-        ordered = [by_cid[c["change_id"]] for c in stage1_chain if c.get("change_id") in by_cid]
-        ordered += [c for c in gerrit_changes if c not in ordered]
-        rec["stage1Chain"] = [{"sha": c["sha"], "changeId": c["change_id"], "number": stage1_numbers.get(c["change_id"]),
-                               "subject": c["subject"], "lines": c["lines"]} for c in stage1_chain]
-        if not ordered:
-            rework = null_rework_metrics(scenario, [])
-            rework["stage1_push_error"] = push1["error"] or "no changes found by hashtag"
-            rework["stage1_runner_committed"] = rec["runnerCommitted"]
-            _write_json(os.path.join(run_dir, "rework-metrics.json"), rework)
-            raise PipelineStop(f"stage 1 pushed no change to {opts.push_to} ({rework['stage1_push_error']})")
+        try:
+            seed = seed_push(ws, opts, tags, run_dir, rest, project)
+        except PipelineStop as exc:
+            rework = null_rework_metrics()
+            rework["seed_push_error"] = str(exc)
+            raise
+        seeded, numbers = seed["chain"], seed["numbers"]
+        seeded_numbers = [int(c["_number"]) for c in seed["changes"]]
+        rec["pushed"] = seeded_numbers
+        rec["seededChain"] = _chain_json(seeded, numbers)
         # ---- reviewer step (rena)
-        target = select_target(scenario, spec, ordered, lambda num: change_files(rest, num),
-                               lambda num, p: change_file_content(rest, num, p))
+        target = select_rework_target(spec, seed["changes"], lambda num: change_files(rest, num),
+                                      lambda num, p: change_file_content(rest, num, p))
         t_change = target["change"]
         t_num = int(t_change["_number"])
-        try:
-            reviewer_id = int((rest.get("/accounts/self") or {}).get("_account_id"))
-        except (RestError, TypeError, ValueError):
-            reviewer_id = None
+        reviewer_id = _reviewer_id(rest)
         review = {
-            "scenario": scenario, "variant": variant, "reviewer": REVIEWER, "reviewerAccountId": reviewer_id,
+            "kind": "rework", "variant": variant, "reviewer": REVIEWER, "reviewerAccountId": reviewer_id,
             "targetChange": t_num, "targetChangeId": t_change.get("change_id"), "targetSubject": t_change.get("subject"),
             "reason": target["reason"], "file": target["path"], "line": target["line"], "message": target["message"],
-            "productionFiles": target.get("production_files"),
-            "stage1Changes": [int(c["_number"]) for c in ordered],
-            "stage1Shas": {c["change_id"]: c["sha"] for c in stage1_chain if c.get("change_id")},
+            "seededChanges": seeded_numbers,
+            "seededShas": {c["change_id"]: c["sha"] for c in seeded if c.get("change_id")},
+            "mayChange": [numbers[c] for c in may_change_ids(spec, seeded) if c in numbers],
             "url": f"{base_url}/c/{project}/+/{t_num}",
         }
-        if target.get("skipped"):
-            # nothing to ask for: no vote, no comment, no stage 2
-            review["skipped"] = target["skipped"]
-            _write_json(os.path.join(run_dir, "review.json"), review)
-            rework = null_rework_metrics(scenario, [int(c["_number"]) for c in ordered])
-            rework["target_change"], rework["target_change_id"] = t_num, t_change.get("change_id")
-            rework["split_applicable"] = False
-            rework["stage1_push_error"] = push1["error"]
-            rework["stage1_runner_committed"] = rec["runnerCommitted"]
-            _write_json(os.path.join(run_dir, "rework-metrics.json"), rework)
-            stage2_skipped = True
-            say(f"   {label}: split not applicable — {target['skipped']}; reviewer step and stage 2 skipped")
-            raise PipelineStop()
         payload = build_review_payload(target["path"], target["line"], target["message"])
         review_time = _utc_now_str()
         response = rest.post(f"/changes/{t_num}/revisions/current/review", payload)
         review.update({"payload": payload, "response": response, "postedAt": review_time})
         _write_json(os.path.join(run_dir, "review.json"), review)
         log(f"{label}: rena -1 on change {t_num} {target['path']}:{target['line']} ({target['reason']})")
-        # ---- stage 2 prep
-        _git(ws, "config", "gerrit-stack.host", base_url)
-        sync_origin_with_review(ws)
-        _git(ws, "remote", "remove", "review")
+        # ---- the one session
+        prepare_session_workspace(ws, base_url)
         env2 = dict(env)
         env2["GERRIT_HOST"] = base_url
-        prompt2 = stage2_prompt(case, scenario, variant, [int(c["_number"]) for c in ordered], base_url, project, t_num)
-        rh1, gm1 = remote_master_sha(ws), gerrit_branch_sha(rest, project)
-        stage2 = run_stage(case, prompt2, case.graders_for_scenario(scenario), arm, ws, env2, stage2_dir, opts,
-                           judge_factory, label + "/stage2")
-        stage2["runnerCommitted"] = commit_leftovers(ws, case.name, 2)
-        if stage2["runnerCommitted"]:
-            log(f"{label}: stage 2 left uncommitted work; committed on top by the runner")
-        trace2 = parse_trace_file(stage2["tracePath"])
-        guardrails["stage2"] = stage_guardrails(trace2, os.path.join(stage2_dir, "hook-trace.log"),
-                                                _read_json(os.path.join(stage2_dir, "chain-metrics.json")),
-                                                (rh1, remote_master_sha(ws)), (gm1, gerrit_branch_sha(rest, project)),
-                                                left_uncommitted=stage2["runnerCommitted"])
-        push2 = push_workspace_for_review_ex(ws, opts.push_to, tags, os.path.join(stage2_dir, "push.log"))
-        stage2["pushed"] = push2["numbers"]
-        stage2["pushError"] = push2["error"]
-        stage2["hashtags"] = tags
-        log(f"{label}: stage-2 push {push2['numbers'] or 'nothing'} ({push2['error'] or 'ok'})")
-        stage2_chain = chain_commits(ws, push2["base"])
-        # ---- read back
-        after_changes = query_changes_by_hashtags(rest, project, tags)
-        map_change_ids_by_sha(stage2_chain, after_changes)
-        comments = {}
-        for c in after_changes:
-            try:
-                comments[str(c["_number"])] = change_comments(rest, int(c["_number"]))
-            except RestError as exc:
-                comments[str(c["_number"])] = {"error": str(exc)}
-        gerrit_after = {"query": tags, "fetchedAt": _utc_now_str(), "changes": after_changes, "comments": comments}
-        _write_json(os.path.join(run_dir, "gerrit-after.json"), gerrit_after)
-        after_by_cid = {c.get("change_id"): int(c["_number"]) for c in after_changes}
-        stage2_numbers = {cid: after_by_cid[cid] for cid in {c.get("change_id") for c in stage2_chain} if cid in after_by_cid}
-        rework = compute_rework_metrics(ws, scenario, stage1_chain, stage2_chain, t_change.get("change_id"),
-                                        stage1_numbers, stage2_numbers, parse_trace_file(stage2["tracePath"]).last_message,
-                                        gerrit_after, reviewer_id, review_time, push1["base"], push2["base"])
-        rework["stage1_push_error"] = push1["error"]
-        rework["stage2_push_error"] = push2["error"]
-        rework["stage1_runner_committed"] = rec["runnerCommitted"]
-        rework["stage2_runner_committed"] = stage2["runnerCommitted"]
-        _write_json(os.path.join(run_dir, "rework-metrics.json"), rework)
+        prompt = pipe.prompt(seeded_numbers, base_url, project, t_num)
+        rh0, gm0 = remote_master_sha(ws), gerrit_branch_sha(rest, project)
+        rec.update(run_session(case, prompt, arm, ws, env2, run_dir, opts, judge_factory, label, started=started))
+        committed = commit_leftovers(ws, case.name, "fix")
+        rec["runnerCommitted"] = committed
+        cm_path = os.path.join(run_dir, "chain-metrics.json")
+        if committed:
+            log(f"{label}: uncommitted work left; committed on top by the runner")
+            run_chain_metrics(opts.plugin_dir, ws, os.path.join(run_dir, "hook-trace.log"), cm_path, case)
+        trace = parse_trace_file(rec["tracePath"])
+        rec["guardrails"] = stage_guardrails(trace, os.path.join(run_dir, "hook-trace.log"), _read_json(cm_path),
+                                             (rh0, remote_master_sha(ws)), (gm0, gerrit_branch_sha(rest, project)),
+                                             left_uncommitted=committed)
+        # ---- second push + read-back
+        push2 = push_workspace_for_review_ex(ws, opts.push_to, tags, os.path.join(run_dir, "push.log"))
+        rec["secondPush"] = {"numbers": push2["numbers"], "new": push2["new"], "updated": push2["updated"],
+                             "error": push2["error"]}
+        log(f"{label}: second push {push2['numbers'] or 'nothing'} ({push2['error'] or 'ok'})")
+        final = chain_commits(ws, push2["base"] or seed["push"]["base"])
+        after = read_back(rest, project, tags, run_dir)
+        map_change_ids_by_sha(final, after["changes"])
+        after_by_cid = {c.get("change_id"): int(c["_number"]) for c in after["changes"]}
+        final_numbers = {c["change_id"]: after_by_cid[c["change_id"]] for c in final if c.get("change_id") in after_by_cid}
+        rec["finalChain"] = _chain_json(final, final_numbers)
+        drafts = fetch_drafts(admin_rest(base_url, prefix), sorted(set(seeded_numbers) | set(final_numbers.values())))
+        rework = compute_rework_metrics(ws, seeded, final, t_change.get("change_id"), may_change_ids(spec, seeded),
+                                        numbers, final_numbers, trace.last_message, after, reviewer_id, review_time,
+                                        _read_json(cm_path), drafts, committed)
+        rework["second_push_error"] = push2["error"]
+        rec["conventions"] = compute_conventions(ws, final, drafted_comments(trace.last_message, drafts))
+        _write_json(os.path.join(run_dir, "conventions.json"), rec["conventions"])
     except PipelineStop as exc:
-        if str(exc):
-            rec["error"] = (rec.get("error") + "; " if rec.get("error") else "") + f"pipeline error: {exc}"
-            rec["passed"] = False
+        rec["error"] = _join_error(rec.get("error"), f"pipeline error: {exc}")
+        rec["passed"] = False
     except Exception as exc:  # never abort the suite
-        rec["error"] = (rec.get("error") + "; " if rec.get("error") else "") + f"pipeline error: {exc!r}"
+        rec["error"] = _join_error(rec.get("error"), f"pipeline error: {exc!r}")
         rec["passed"] = False
     finally:
-        if not stage2_skipped:
-            rec["stage2"] = stage2
+        if rework is None:
+            rework = null_rework_metrics(seeded_numbers)
+        _write_json(os.path.join(run_dir, "rework-metrics.json"), rework)
         rec["review"] = review
         rec["rework"] = rework
-        rec["guardrails"] = guardrails
-        rec["pipelineCostUsd"] = round(rec["costUsd"] + rec.get("judgeCostUsd", 0.0)
-                                       + ((stage2 or {}).get("costUsd", 0.0) + (stage2 or {}).get("judgeCostUsd", 0.0)), 6)
-        rec["pipelineDurationSeconds"] = round(time.time() - t0, 3)
+        rec["durationSeconds"] = round(time.time() - t0, 3)
         finish_workspace(tmp, ws, run_dir, rec, opts.keep)
     return rec
+
+
+def run_review(pipe: Pipeline, arm: str, n: int, opts: argparse.Namespace, out_dir: str, judge_factory) -> dict:
+    """fixture (seeded chain) → seed push → ONE reviewing session → read-back (published comments and
+    votes by anyone but rena are violations, Gerrit drafts are fine) → review-metrics.json."""
+    case, variant = pipe.case, pipe.variant
+    label = f"{pipe.key}/{arm}/{n}"
+    run_dir = os.path.join(out_dir, "runs", pipe.key, arm, str(n))
+    os.makedirs(run_dir, exist_ok=True)
+    started = _dt.datetime.now(_dt.timezone.utc)
+    t0 = time.time()
+    rec = _base_record(pipe, run_dir, started, opts)
+    tags = push_hashtags(case.name, arm, os.path.basename(os.path.normpath(out_dir)), variant, n)
+    rec["hashtags"] = tags
+    base_url, prefix, project = gerrit_from_push_url(opts.push_to)
+    tmp, ws, env, error = make_workspace(case, opts, run_dir)
+    review: Optional[dict] = None
+    metrics: Optional[dict] = None
+    try:
+        if error:
+            raise PipelineStop(error)
+        spec = case.review_spec()
+        rest = GerritRest(base_url, prefix, REVIEWER, read_token(opts.rena_token))
+        seed = seed_push(ws, opts, tags, run_dir, rest, project)
+        seeded, numbers = seed["chain"], seed["numbers"]
+        seeded_numbers = [int(c["_number"]) for c in seed["changes"]]
+        rec["pushed"] = seeded_numbers
+        rec["seededChain"] = _chain_json(seeded, numbers)
+        t_change = find_change_by_subject(spec.get("target_subject"), seed["changes"], "review.target_subject")
+        t_num = int(t_change["_number"])
+        try:
+            target_files = sorted(change_files(rest, t_num))
+        except RestError:
+            target_files = []
+        reviewer_id = _reviewer_id(rest)
+        review = {
+            "kind": "review", "variant": variant, "targetChange": t_num, "targetChangeId": t_change.get("change_id"),
+            "targetSubject": t_change.get("subject"), "targetFiles": target_files, "seededChanges": seeded_numbers,
+            "planted": [str(p.get("id")) for p in spec.get("planted") or [] if isinstance(p, dict)],
+            "url": f"{base_url}/c/{project}/+/{t_num}",
+        }
+        prepare_session_workspace(ws, base_url)
+        env2 = dict(env)
+        env2["GERRIT_HOST"] = base_url
+        prompt = pipe.prompt(seeded_numbers, base_url, project, t_num)
+        rh0, gm0 = remote_master_sha(ws), gerrit_branch_sha(rest, project)
+        session_start = _utc_now_str()
+        review["sessionStartedAt"] = session_start
+        _write_json(os.path.join(run_dir, "review.json"), review)
+        rec.update(run_session(case, prompt, arm, ws, env2, run_dir, opts, judge_factory, label, started=started))
+        trace = parse_trace_file(rec["tracePath"])
+        rec["guardrails"] = stage_guardrails(trace, os.path.join(run_dir, "hook-trace.log"),
+                                             _read_json(os.path.join(run_dir, "chain-metrics.json")),
+                                             (rh0, remote_master_sha(ws)), (gm0, gerrit_branch_sha(rest, project)),
+                                             left_uncommitted=uncommitted(ws))
+        after = read_back(rest, project, tags, run_dir)
+        drafts = fetch_drafts(admin_rest(base_url, prefix), seeded_numbers)
+        metrics = compute_review_metrics(spec, target_files, trace.last_message, drafts, after, reviewer_id,
+                                         session_start, set(seeded_numbers))
+        _write_json(os.path.join(run_dir, "review-metrics.json"), metrics)
+        rec["conventions"] = compute_conventions(ws, chain_commits(ws, seed["push"]["base"]),
+                                                 drafted_comments(trace.last_message, drafts))
+        _write_json(os.path.join(run_dir, "conventions.json"), rec["conventions"])
+    except PipelineStop as exc:
+        rec["error"] = _join_error(rec.get("error"), f"pipeline error: {exc}")
+        rec["passed"] = False
+    except Exception as exc:  # never abort the suite
+        rec["error"] = _join_error(rec.get("error"), f"pipeline error: {exc!r}")
+        rec["passed"] = False
+    finally:
+        rec["review"] = review
+        rec["reviewMetrics"] = metrics
+        rec["durationSeconds"] = round(time.time() - t0, 3)
+        finish_workspace(tmp, ws, run_dir, rec, opts.keep)
+    return rec
+
+
+def run_pipeline(pipe: Pipeline, arm: str, n: int, opts: argparse.Namespace, out_dir: str, judge_factory) -> dict:
+    """Dispatch on the case kind."""
+    fn = {"implement": run_implement, "rework": run_rework, "review": run_review}[pipe.kind]
+    return fn(pipe, arm, n, opts, out_dir, judge_factory)
 
 
 # --------------------------------------------------------------------------
@@ -2143,15 +2557,39 @@ def _mean(xs: list[float]) -> Optional[float]:
     return round(sum(xs) / len(xs), 4) if xs else None
 
 
-def _has_stage2(runs: list[dict]) -> bool:
-    return any(isinstance(r, dict) and "stage2" in r for r in runs)
-
-
 def run_cost(r: dict) -> float:
-    """What a run adds to the cost ceiling: the whole pipeline when there is one."""
-    if r.get("pipelineCostUsd") is not None:
-        return float(r["pipelineCostUsd"])
+    """What a run adds to the cost ceiling: its session plus its judge calls."""
     return float(r.get("costUsd", 0.0)) + float(r.get("judgeCostUsd", 0.0))
+
+
+def isolation_summary(runs: list[dict]) -> str:
+    """`<ok>/<checked>` over the runs whose session started ('' when none did)."""
+    checked = [r["isolation"] for r in runs if isinstance(r.get("isolation"), dict)]
+    return f"{sum(1 for i in checked if i.get('ok'))}/{len(checked)}" if checked else ""
+
+
+def _yes(runs: list[dict], block: str, key: str) -> str:
+    vals = [r[block].get(key) for r in runs if isinstance(r.get(block), dict) and r[block].get(key) is not None]
+    return f"{sum(1 for v in vals if v)}/{len(vals)}" if vals else "-"
+
+
+def _total(runs: list[dict], block: str, key: str) -> Any:
+    vals = [r[block].get(key) for r in runs if isinstance(r.get(block), dict) and r[block].get(key) is not None]
+    return sum(vals) if vals else "-"
+
+
+def key_numbers(runs: list[dict]) -> str:
+    """The few numbers that matter per kind, summed over an arm's runs (for the summary table)."""
+    if any(isinstance(r.get("rework"), dict) for r in runs):
+        return (f"ids {_yes(runs, 'rework', 'change_id_set_preserved')} order {_yes(runs, 'rework', 'order_preserved')} "
+                f"fix {_yes(runs, 'rework', 'fix_on_target')} untouched {_total(runs, 'rework', 'untouched_identical')}"
+                f"/{_total(runs, 'rework', 'untouched_total')} new {_total(runs, 'rework', 'new_changes_opened')} "
+                f"markers {_total(runs, 'rework', 'conflict_markers_left')}")
+    if any(isinstance(r.get("reviewMetrics"), dict) for r in runs):
+        return (f"found {_total(runs, 'reviewMetrics', 'planted_found')}/{_total(runs, 'reviewMetrics', 'planted_total')} "
+                f"labelled {_total(runs, 'reviewMetrics', 'comments_labelled')}/{_total(runs, 'reviewMetrics', 'comments_total')} "
+                f"published {_total(runs, 'reviewMetrics', 'published_comments')} votes {_total(runs, 'reviewMetrics', 'votes_posted')}")
+    return ""
 
 
 def aggregate_case(case: Any, arms: dict[str, list[dict]], threshold: float, pipeline: Optional[Pipeline] = None) -> dict:
@@ -2162,42 +2600,32 @@ def aggregate_case(case: Any, arms: dict[str, list[dict]], threshold: float, pip
             "score": _mean(scores) if runs else None,
             "passRate": round(sum(1 for r in runs if r["passed"]) / len(runs), 4) if runs else None,
             "meanTurns": _mean([r["turns"] for r in runs if r["turns"] is not None]),
-            "costUsd": round(sum(r["costUsd"] + r.get("judgeCostUsd", 0.0) for r in runs), 6),
+            "costUsd": round(sum(run_cost(r) for r in runs), 6),
+            "isolationOk": isolation_summary(runs),
+            "errors": sum(1 for r in runs if r.get("error")),
         }
-        if _has_stage2(runs):
-            s2 = [r["stage2"] for r in runs if isinstance(r.get("stage2"), dict)]
-            by_arm[arm]["stage2Score"] = _mean([s["score"] for s in s2]) if s2 else None
-            by_arm[arm]["stage2PassRate"] = round(sum(1 for s in s2 if s["passed"]) / len(s2), 4) if s2 else None
-            by_arm[arm]["pipelineCostUsd"] = round(sum(run_cost(r) for r in runs), 6)
     primary = "with" if "with" in arms else (next(iter(arms)) if arms else None)
     score = by_arm[primary]["score"] if primary else None
     pass_rate = by_arm[primary]["passRate"] if primary else None
-    delta = None
-    if "with" in by_arm and by_arm["with"]["score"] is not None:
-        for other in ("without", "mcp-only"):
-            if other in by_arm and by_arm[other]["score"] is not None:
-                delta = round(by_arm["with"]["score"] - by_arm[other]["score"], 4)
-                break
     deltas = {}
     if "with" in by_arm and by_arm["with"]["score"] is not None:
         for other in ("without", "mcp-only"):
             if other in by_arm and by_arm[other]["score"] is not None:
                 deltas[f"with-{other}"] = round(by_arm["with"]["score"] - by_arm[other]["score"], 4)
-    out = {
+    delta = next(iter(deltas.values()), None)
+    return {
         "name": pipeline.key if pipeline is not None else case.name,
         "dir": case.dir,
-    }
-    if pipeline is not None and pipeline.scenario is not None:
-        out.update({"baseCase": case.name, "scenario": pipeline.scenario, "variant": pipeline.variant})
-    out.update({
+        "baseCase": case.name,
+        "kind": getattr(case, "kind", "implement"),
+        "variant": pipeline.variant if pipeline is not None else "natural",
         "runsPerCase": max((len(r) for r in arms.values()), default=0),
         "maxTurns": case.max_turns,
         "timeoutSeconds": case.timeout_seconds,
         "aggregates": {"score": score, "passRate": pass_rate, "delta": delta, "byArm": by_arm, "deltas": deltas,
                        "passed": (score is not None and score >= threshold)},
         "arms": arms,
-    })
-    return out
+    }
 
 
 def aggregate(cases: list[dict], threshold: float, meta: dict) -> dict:
@@ -2209,6 +2637,10 @@ def aggregate(cases: list[dict], threshold: float, meta: dict) -> dict:
         "schemaVersion": 1,
         "startedAt": meta.get("startedAt"),
         "claudeVersion": meta.get("claudeVersion"),
+        "suite": meta.get("suite"),
+        "evalDir": meta.get("evalDir"),
+        "model": meta.get("model"),
+        "variants": meta.get("variants"),
         "costUsd": round(meta.get("costUsd", 0.0), 6),
         "durationSeconds": round(meta.get("durationSeconds", 0.0), 3),
         "partial": bool(meta.get("partial")),
@@ -2227,99 +2659,125 @@ def aggregate(cases: list[dict], threshold: float, meta: dict) -> dict:
     return out
 
 
+def _bad_summary(guardrails: Optional[dict]) -> str:
+    if not isinstance(guardrails, dict):
+        return ""
+    bad = guardrails.get("bad_outcomes") or {}
+    hits = [k for k, v in bad.items() if v]
+    return ", ".join(hits) if hits else "none"
+
+
+def _cell(v: Any) -> str:
+    return "" if v is None else str(v)
+
+
+def _each_run(agg: dict):
+    for c in agg["cases"]:
+        for arm, runs in c["arms"].items():
+            for i, r in enumerate(runs, 1):
+                yield c, arm, i, r
+
+
 def render_report(agg: dict) -> str:
     a = agg["aggregates"]
-    staged = any(_has_stage2(runs) for c in agg["cases"] for runs in c["arms"].values())
     lines = [
         "# gerrit-stack eval report",
         "",
         f"- started: {agg.get('startedAt')}",
         f"- claude: {agg.get('claudeVersion')}",
+        f"- suite: {agg.get('suite')} · model: {agg.get('model')} · variants: {', '.join(agg.get('variants') or ['natural'])}",
         f"- arms: {', '.join(agg.get('arms') or [])}",
         f"- cost: ${agg.get('costUsd', 0):.4f} · duration: {agg.get('durationSeconds', 0):.0f}s"
         + (f" · **partial**: {agg.get('partialReason')}" if agg.get("partial") else ""),
         f"- overall score: **{a['overallScore']}** (threshold {agg.get('threshold')}), "
         f"cases passed: {a['casesPassed']}/{a['casesTotal']}, mean delta: {a['meanDelta']}",
         "",
-        "| case | arm | runs | score | pass rate | mean turns | cost USD | delta (with − arm) |"
-        + (" stage-2 score | pipeline cost USD |" if staged else ""),
-        "|---|---|---|---|---|---|---|---|" + ("---|---|" if staged else ""),
+        "| case | kind | variant | arm | runs | score | pass rate | mean turns | cost USD | delta (with − arm) | isolation ok | key numbers |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for c in agg["cases"]:
-        by_arm = c["aggregates"]["byArm"]
-        for arm, st in by_arm.items():
+        for arm, st in c["aggregates"]["byArm"].items():
             d = c["aggregates"]["deltas"].get(f"with-{arm}")
-            row = (f"| {c['name']} | {arm} | {len(c['arms'][arm])} | {st['score']} | {st['passRate']} | "
-                   f"{st['meanTurns']} | {st['costUsd']:.4f} | {'' if d is None else d} |")
-            if staged:
-                pc = st.get("pipelineCostUsd")
-                row += f" {st.get('stage2Score', '')} | {'' if pc is None else f'{pc:.4f}'} |"
-            lines.append(row)
+            lines.append(f"| {c['name']} | {c.get('kind', 'implement')} | {c.get('variant', 'natural')} | {arm} | "
+                         f"{len(c['arms'][arm])} | {st['score']} | {st['passRate']} | {st['meanTurns']} | "
+                         f"{st['costUsd']:.4f} | {_cell(d)} | {st.get('isolationOk', '')} | {key_numbers(c['arms'][arm])} |")
     failures = []
-    for c in agg["cases"]:
-        for arm, runs in c["arms"].items():
-            for i, r in enumerate(runs, 1):
-                if r.get("error"):
-                    failures.append(f"- {c['name']}/{arm}/{i}: error: {r['error']}")
-                for g in r.get("graders", []):
-                    if g.get("skipped"):
-                        continue
-                    if not g.get("passed"):
-                        failures.append(f"- {c['name']}/{arm}/{i}: grader `{g['name']}` ({g['type']}) FAIL — {g['detail']}")
-                s2 = r.get("stage2")
-                if isinstance(s2, dict):
-                    if s2.get("error"):
-                        failures.append(f"- {c['name']}/{arm}/{i}/stage2: error: {s2['error']}")
-                    for g in s2.get("graders", []):
-                        if not g.get("skipped") and not g.get("passed"):
-                            failures.append(f"- {c['name']}/{arm}/{i}/stage2: grader `{g['name']}` ({g['type']}) FAIL — {g['detail']}")
+    for c, arm, i, r in _each_run(agg):
+        if r.get("error"):
+            failures.append(f"- {c['name']}/{arm}/{i}: error: {r['error']}")
+        for g in r.get("graders", []):
+            if not g.get("skipped") and not g.get("passed"):
+                failures.append(f"- {c['name']}/{arm}/{i}: grader `{g['name']}` ({g['type']}) FAIL — {g['detail']}")
     lines += ["", "## Failed graders and errors", ""]
     lines += failures or ["(none)"]
     lines.append("")
-    if staged:
-        lines += ["## Rework and guardrails", "",
-                  "| pipeline | arm | n | target | fixup on target | ids preserved | new changes | desc. rebased | "
-                  "interdiff | landable below | reply drafted | posted (reply/vote) | bad outcomes s1 | bad outcomes s2 |",
+    rework = [(c, arm, i, r) for c, arm, i, r in _each_run(agg) if isinstance(r.get("rework"), dict)]
+    if rework:
+        lines += ["## Rework (seeded chain)", "",
+                  "| case | arm | n | target | ids preserved | order preserved | fix on target | untouched identical | "
+                  "may-change changed | new changes | fixups left | builds alone % | conflict markers | interdiff | "
+                  "reply drafted / labelled | posted (reply/vote) | runner committed | bad outcomes |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for c, arm, i, r in rework:
+            rw = r["rework"]
+            lines.append(
+                f"| {c['name']} | {arm} | {i} | {_cell(rw.get('target_change'))} | {_cell(rw.get('change_id_set_preserved'))} | "
+                f"{_cell(rw.get('order_preserved'))} | {_cell(rw.get('fix_on_target'))} | "
+                f"{_cell(rw.get('untouched_identical'))}/{_cell(rw.get('untouched_total'))} | {_cell(rw.get('may_change_changed'))} | "
+                f"{_cell(rw.get('new_changes_opened'))} | {_cell(rw.get('fixups_left'))} | {_cell(rw.get('builds_alone_pct'))} | "
+                f"{_cell(rw.get('conflict_markers_left'))} | {_cell(rw.get('interdiff_lines'))} | "
+                f"{_cell(rw.get('reply_drafted'))} / {_cell(rw.get('reply_labelled'))} | "
+                f"{_cell(rw.get('reply_posted'))}/{_cell(rw.get('vote_posted'))} | {_cell(rw.get('runner_committed'))} | "
+                f"{_bad_summary(r.get('guardrails'))} |")
+        lines.append("")
+    reviews = [(c, arm, i, r) for c, arm, i, r in _each_run(agg) if isinstance(r.get("reviewMetrics"), dict)]
+    if reviews:
+        lines += ["## Reviewer", "",
+                  "| case | arm | n | planted found | found ids | comments labelled | blocking marked | drafts | "
+                  "published comments | votes |",
+                  "|---|---|---|---|---|---|---|---|---|---|"]
+        for c, arm, i, r in reviews:
+            rv = r["reviewMetrics"]
+            lines.append(
+                f"| {c['name']} | {arm} | {i} | {_cell(rv.get('planted_found'))}/{_cell(rv.get('planted_total'))} | "
+                f"{', '.join(rv.get('found_ids') or [])} | {_cell(rv.get('comments_labelled'))}/{_cell(rv.get('comments_total'))} | "
+                f"{_cell(rv.get('blocking_marked_correct'))} | {_cell(rv.get('drafts_created'))} | "
+                f"{_cell(rv.get('published_comments'))} | {_cell(rv.get('votes_posted'))} |")
+        lines.append("")
+    checked = [(c, arm, i, r) for c, arm, i, r in _each_run(agg) if isinstance(r.get("isolation"), dict)]
+    if checked:
+        lines += ["## Isolation and capability", "",
+                  "| case | arm | n | isolation ok | unexpected | missing | plugins | MCP servers | model | "
+                  "mcp calls (denied) | skill calls | hook lines | commits conforming | commitlint |",
                   "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
-        for c in agg["cases"]:
-            for arm, runs in c["arms"].items():
-                for i, r in enumerate(runs, 1):
-                    rw = r.get("rework") or {}
-                    gr = r.get("guardrails") or {}
-                    lines.append(
-                        f"| {c['name']} | {arm} | {i} | {rw.get('target_change', '')} | {rw.get('fixup_on_target', '')} | "
-                        f"{rw.get('change_id_set_preserved', '')} | {rw.get('new_changes_opened', '')} | "
-                        f"{rw.get('descendants_rebased', '')}/{rw.get('descendants_total', '')} | {rw.get('interdiff_lines', '')} | "
-                        f"{rw.get('landable_below', '')} | {rw.get('reply_drafted', '')} | "
-                        f"{rw.get('reply_posted', '')}/{rw.get('vote_posted', '')} | "
-                        f"{_bad_summary(gr.get('stage1'))} | {_bad_summary(gr.get('stage2'))} |")
+        for c, arm, i, r in checked:
+            iso, cap, conv = r["isolation"], r.get("capability") or {}, r.get("conventions") or {}
+            fp = iso.get("fingerprint") or {}
+            unexpected = "; ".join(f"{k}: {', '.join(v)}" for k, v in (iso.get("unexpected") or {}).items() if v) or "none"
+            missing = "; ".join(f"{k}: {', '.join(v)}" for k, v in (iso.get("missing") or {}).items()
+                                if isinstance(v, list) and v) or "none"
+            lines.append(
+                f"| {c['name']} | {arm} | {i} | {iso.get('ok')} | {unexpected} | {missing} | "
+                f"{', '.join(fp.get('plugins') or []) or 'none'} | {', '.join(fp.get('mcp_servers') or []) or 'none'} | "
+                f"{_cell(fp.get('model'))} | {_cell(cap.get('mcp_calls'))} ({_cell(cap.get('mcp_denied'))}) | "
+                f"{_cell(cap.get('skill_calls'))} | {_cell(cap.get('hook_lines'))} | "
+                f"{_cell(conv.get('commit_subjects_conforming'))}/{_cell(conv.get('commit_subjects_total'))} | "
+                f"{_cell(conv.get('commitlint_available'))} |")
         lines.append("")
     return "\n".join(lines)
 
 
-def _bad_summary(stage: Optional[dict]) -> str:
-    if not isinstance(stage, dict):
-        return ""
-    bad = stage.get("bad_outcomes") or {}
-    hits = [k for k, v in bad.items() if v]
-    return ", ".join(hits) if hits else "none"
-
-
 def print_summary(agg: dict) -> None:
     a = agg["aggregates"]
-    staged = any(_has_stage2(runs) for c in agg["cases"] for runs in c["arms"].values())
-    rows = [("case", "arm", "runs", "score", "pass", "turns", "cost") + (("s2 score", "pipeline $") if staged else ())]
+    rows = [("case", "kind", "variant", "arm", "runs", "score", "pass", "turns", "cost", "iso ok", "key numbers")]
     for c in agg["cases"]:
         for arm, st in c["aggregates"]["byArm"].items():
-            row = (c["name"], arm, str(len(c["arms"][arm])), str(st["score"]), str(st["passRate"]),
-                   str(st["meanTurns"]), f"{st['costUsd']:.3f}")
-            if staged:
-                pc = st.get("pipelineCostUsd")
-                row += (str(st.get("stage2Score", "")), "" if pc is None else f"{pc:.3f}")
-            rows.append(row)
+            rows.append((c["name"], str(c.get("kind", "implement")), str(c.get("variant", "natural")), arm,
+                         str(len(c["arms"][arm])), str(st["score"]), str(st["passRate"]), str(st["meanTurns"]),
+                         f"{st['costUsd']:.3f}", str(st.get("isolationOk", "")), key_numbers(c["arms"][arm])))
     widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
     for r in rows:
-        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(r)))
+        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(r)).rstrip())
     print(f"\noverall score {a['overallScore']} (threshold {agg.get('threshold')}), "
           f"cases passed {a['casesPassed']}/{a['casesTotal']}, mean delta {a['meanDelta']}, "
           f"cost ${agg.get('costUsd', 0):.4f}" + (f", PARTIAL: {agg.get('partialReason')}" if agg.get("partial") else ""))
@@ -2331,7 +2789,8 @@ def print_summary(agg: dict) -> None:
 
 def claude_version() -> Optional[str]:
     try:
-        return subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=30).stdout.strip() or None
+        return subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=30,
+                              env=sandbox_env(), stdin=subprocess.DEVNULL).stdout.strip() or None
     except (OSError, subprocess.TimeoutExpired):
         return None
 
@@ -2347,24 +2806,25 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--ablation", action="store_true", help="shorthand for --arms with,without")
     ap.add_argument("--threshold", type=float, default=0.8)
     ap.add_argument("--max-cost-usd", type=float, default=None, help="stop (partial, exit 2) once spent")
-    ap.add_argument("--model", default=None, help="override the case model")
+    ap.add_argument("--model", default=None,
+                    help=f"session model, always passed to claude and recorded (default: the case's `model:`, else {DEFAULT_MODEL})")
     ap.add_argument("--judge-model", default="haiku")
     ap.add_argument("--judge-votes", type=int, default=1)
     ap.add_argument("--plugin-dir", default=os.path.dirname(here), help="plugin root for the `with` arm")
     ap.add_argument("--mcp-plugin-dir", default=None, help="installed gerrit-mcp plugin dir for the with/mcp-only arms (default: newest ~/.claude/plugins/cache/gerrit-mcp/gerrit/*)")
-    ap.add_argument("--mcp-plugin", default="gerrit@gerrit-mcp", help="plugin toggled per arm ('' = never touch)")
     ap.add_argument("--keep", action="store_true", help="keep run workspaces under the run dir")
     ap.add_argument("--push-to", default=None, metavar="GERRIT_PROJECT_URL",
-                    help="after each run, rebase the workspace commits onto <url>/master and push them to refs/for/master with hashtags bench-<case>-<arm> and run-<results-id> (e.g. http://localhost:8080/a/demo-plugin)")
-    ap.add_argument("--scenarios", default="", metavar="LIST",
-                    help="rework benchmark: comma list of fix,split (default: none = legacy single stage); needs --push-to")
+                    help="Gerrit project the runs push to (refs/for/master, hashtags bench-<case>-<arm>, run-<id>, "
+                         "var-<variant>, rep-<n>), e.g. http://localhost:8080/a/demo-plugin; required for the case "
+                         "kinds rework and review, optional for implement")
     ap.add_argument("--variants", default="natural", metavar="LIST",
-                    help="comma list of natural,nudged (default: natural); nudged appends the case's nudges: lines")
+                    help="comma list of natural,nudged (default: natural); nudged appends the case's nudge line "
+                         "(implement: nudges.stage1, rework: rework.nudge) and is skipped for cases without one")
     ap.add_argument("-j", "--jobs", type=int, default=1, metavar="N",
-                    help="run N pipelines/cases of one arm in parallel (arms stay sequential; default 1)")
+                    help="run N cases of one arm in parallel (arms stay sequential; default 1)")
     ap.add_argument("--rena-token", default=None, metavar="FILE",
                     help="reviewer token file (default: <plugin-dir>/demo/work/.rena-token); never printed")
-    ap.add_argument("--dry-run", action="store_true", help="print the commands, run nothing")
+    ap.add_argument("--dry-run", action="store_true", help="print the plan and the commands, run nothing")
     ap.add_argument("--json", default=None, metavar="PATH", help="also write aggregate-result.json here")
     ap.add_argument("--out-dir", default=None, help="default evals/results/<timestamp>")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -2380,16 +2840,10 @@ def parse_args(argv=None) -> argparse.Namespace:
         if a not in ARMS:
             ap.error(f"unknown arm {a!r} (choose from {', '.join(ARMS)})")
     args.arm_list = arms
-    scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip()]
-    for s in scenarios:
-        if s not in SCENARIOS:
-            ap.error(f"unknown scenario {s!r} (choose from {', '.join(SCENARIOS)})")
     variants = [v.strip() for v in args.variants.split(",") if v.strip()] or ["natural"]
     for v in variants:
         if v not in VARIANTS:
             ap.error(f"unknown variant {v!r} (choose from {', '.join(VARIANTS)})")
-    if scenarios and not args.push_to:
-        ap.error("--scenarios requires --push-to <gerrit project url> (the reviewer step needs a Gerrit)")
     if args.push_to:
         try:
             gerrit_from_push_url(args.push_to)
@@ -2397,7 +2851,6 @@ def parse_args(argv=None) -> argparse.Namespace:
             ap.error(str(exc))
     if args.jobs < 1:
         ap.error("--jobs must be >= 1")
-    args.scenario_list = scenarios
     args.variant_list = variants
     args.rena_token = args.rena_token or os.path.join(args.plugin_dir, "demo", "work", ".rena-token")
     if args.bench:
@@ -2406,48 +2859,70 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 
 def build_pipelines(cases: list[Case], opts: argparse.Namespace) -> list[Pipeline]:
-    """Legacy: one Pipeline per case (scenario None). Scenarios: case × scenario × variant, and every
-    case must carry the rework block for each requested scenario (ValueError names the missing one)."""
-    if not opts.scenario_list:
-        return [Pipeline(c) for c in cases]
+    """case × variant. A case without a nudge line has no nudged variant (logged once per case);
+    rework/review cases need --push-to and their case.yaml block (ValueError names what is missing)."""
     out = []
     for c in cases:
-        for s in opts.scenario_list:
-            c.rework_spec(s)  # raises with a precise message when the block is missing
-            for v in opts.variant_list:
-                out.append(Pipeline(c, s, v))
+        if c.kind in ("rework", "review"):
+            if not getattr(opts, "push_to", None):
+                raise ValueError(f"case {c.name} (kind: {c.kind}) needs --push-to <gerrit project url>")
+            c.rework_spec() if c.kind == "rework" else c.review_spec()
+        for v in opts.variant_list:
+            if v == "nudged" and not c.nudge():
+                say(f"# {c.name}: no nudge line in case.yaml (kind {c.kind}); nudged variant skipped")
+                continue
+            out.append(Pipeline(c, v))
     return out
 
 
 def dry_run_pipeline(pipe: Pipeline, arm: str, n: int, opts: argparse.Namespace, run_id: str) -> None:
-    case = pipe.case
-    print(f"# {pipe.key} / {arm} / run {n}  (cwd: temp workspace; graders: "
-          f"{', '.join(g.name for g in case.graders) or 'none'})")
+    """Print the full plan of one run: fixture, seed push, reviewer post, session command with the
+    scrubbed env, second push, read-back."""
+    case, kind, variant = pipe.case, pipe.kind, pipe.variant
+    print(f"# {pipe.key} / {arm} / run {n}  (kind: {kind}; variant: {variant}; model: {session_model(case, opts)}; "
+          f"graders: {', '.join(g.name for g in case.graders) or 'none'})")
+    own = {**case.env, "EVAL_PLUGIN_ROOT": opts.plugin_dir, "GERRIT_STACK_TRACE": "<run-dir>/hook-trace.log"}
     if case.scaffold_script:
-        print(f"bash {shlex.quote(case.scaffold_script)}")
-    print(shlex.join(build_claude_cmd(pipe.stage1_prompt(), case, arm, opts.plugin_dir, opts.model, mcp_plugin_dir=opts.mcp_dir)))
-    if pipe.scenario is None:
-        return
-    scenario, variant = pipe.scenario, pipe.variant
-    base_url, _prefix, project = gerrit_from_push_url(opts.push_to)
-    tags = push_hashtags(case.name, arm, run_id, scenario, variant, n)
-    spec = case.rework_spec(scenario)
-    print(f"# push 1: git push review HEAD:refs/for/master%{','.join('t=' + t for t in tags)}")
-    if scenario == "fix":
-        where = f"anchor_file /{spec.get('anchor_file')}/ line /{spec.get('anchor_line') or ''}/"
-        msg = str(spec.get("message") or DEFAULT_FIX_MESSAGE)
+        print(f"# fixture (cwd: temp workspace; env: parent minus CLAUDE*): bash {shlex.quote(case.scaffold_script)}")
+    tags = push_hashtags(case.name, arm, run_id, variant, n)
+    refspec = "HEAD:refs/for/master%" + ",".join("t=" + t for t in tags)
+    base_url = project = ""
+    if kind != "implement":
+        base_url, _prefix, project = gerrit_from_push_url(opts.push_to)
+        print(f"# seed push: rebase the fixture's chain onto {opts.push_to} master; git push review {refspec}; "
+              f"seeded commits tagged refs/bench/seed/<i>")
+    if kind == "rework":
+        spec = case.rework_spec()
+        print(f"# reviewer ({REVIEWER}): POST /changes/<target>/revisions/current/review Code-Review -1 + one unresolved "
+              f"comment; target_subject /{spec.get('target_subject')}/ file /{spec.get('file') or ''}/ "
+              f"line /{spec.get('line') or ''}/: {str(spec.get('message') or DEFAULT_REWORK_MESSAGE)!r}")
+        print(f"# may_change: {spec.get('may_change') or []}")
+    if kind == "review":
+        spec = case.review_spec()
+        planted = [f"{p.get('id')} ({p.get('kind')})" for p in spec.get("planted") or [] if isinstance(p, dict)]
+        print(f"# review target: target_subject /{spec.get('target_subject')}/; planted: {', '.join(planted) or 'none'}")
+    if kind != "implement":
+        own["GERRIT_HOST"] = base_url
+        print(f"# session prep: origin synced with review/master; review remote removed; "
+              f"git config gerrit-stack.host {base_url}")
+    env = sandbox_env(own)
+    print(f"# session env (scrubbed; stdin=/dev/null): {env_summary(env)}")
+    prompt = pipe.prompt(None, base_url, project, None)
+    print(shlex.join(build_claude_cmd(prompt, case, arm, opts.plugin_dir, session_model(case, opts),
+                                      mcp_plugin_dir=opts.mcp_dir)))
+    print(f"# after the session: isolation.json (expected plugins: {', '.join(ARM_PLUGINS[arm]) or 'none'} + cc-plugin-*; "
+          f"MCP servers: {', '.join(ARM_MCP_SERVERS[arm]) or 'none'}), capability counters, chain-metrics "
+          f"(--verify-cmd{' --concerns' if case.has_concerns else ''}), conventions.json")
+    if kind == "implement":
+        if opts.push_to:
+            print(f"# push: leftovers committed by the runner; git push review {refspec}")
+    elif kind == "rework":
+        print(f"# second push: leftovers committed on top by the runner; git push review {refspec}")
+        print(f"# read back: /changes/?q={'+'.join('hashtag:' + t for t in tags)}, comments, admin drafts "
+              f"-> gerrit-after.json, review.json, rework-metrics.json")
     else:
-        concerns = spec.get("concerns") or []
-        where = "the change with most production files under src/main/ (ties: largest); skipped when none has >= 2"
-        msg = render_message(spec.get("message") or DEFAULT_SPLIT_MESSAGE, n="<n>", files="<production files>",
-                             concerns=", ".join(str(c) for c in concerns))
-    print(f"# reviewer ({REVIEWER}): POST /changes/<target>/revisions/current/review Code-Review -1 + unresolved comment on "
-          f"{where}: {msg!r}")
-    print(f"# stage 2 (same workspace; git config gerrit-stack.host {base_url}; GERRIT_HOST={base_url}; review remote removed; "
-          f"graders: {', '.join(g.name for g in case.graders_for_scenario(scenario)) or 'none'})")
-    p2 = stage2_prompt(case, scenario, variant, [], base_url, project, None).replace("change(s) ?", "change(s) <stage-1 changes>")
-    print(shlex.join(build_claude_cmd(p2, case, arm, opts.plugin_dir, opts.model, mcp_plugin_dir=opts.mcp_dir)))
-    print(f"# push 2: same hashtags; read back /changes/?q={'+'.join('hashtag:' + t for t in tags)}")
+        print(f"# read back (no second push): /changes/?q={'+'.join('hashtag:' + t for t in tags)}, published "
+              f"comments/votes by non-{REVIEWER} accounts, admin drafts (/changes/<n>/drafts) -> review-metrics.json")
 
 
 def run_arm(arm: str, pipelines: list[Pipeline], opts: argparse.Namespace, out_dir: str, judge_factory,
@@ -2455,7 +2930,6 @@ def run_arm(arm: str, pipelines: list[Pipeline], opts: argparse.Namespace, out_d
     """Run every (pipeline, n) of one arm, serially or on a thread pool (-j). Returns True when the
     cost ceiling stopped the arm. `budget` = {"spent", "lock", "partialReason"} shared across arms."""
     jobs = [(pipe, n, opts.runs or pipe.case.runs) for pipe in pipelines for n in range(1, (opts.runs or pipe.case.runs) + 1)]
-    staged = bool(opts.scenario_list)
 
     def ceiling_hit(pipe: Pipeline, n: int) -> bool:
         with budget["lock"]:
@@ -2467,8 +2941,7 @@ def run_arm(arm: str, pipelines: list[Pipeline], opts: argparse.Namespace, out_d
         return False
 
     def execute(pipe: Pipeline, n: int) -> dict:
-        rec = run_pipeline(pipe, arm, n, opts, out_dir, judge_factory) if staged \
-            else run_one(pipe.case, arm, n, opts, out_dir, judge_factory)
+        rec = run_pipeline(pipe, arm, n, opts, out_dir, judge_factory)
         with budget["lock"]:
             budget["spent"] += run_cost(rec)
         return rec
@@ -2476,10 +2949,12 @@ def run_arm(arm: str, pipelines: list[Pipeline], opts: argparse.Namespace, out_d
     def status_line(rec: dict) -> str:
         line = (f"{'PASS' if rec['passed'] else 'FAIL'} score={rec['score']} turns={rec['turns']} cost=${rec['costUsd']:.4f}"
                 + (f" judge=${rec['judgeCostUsd']:.4f}" if rec.get("judgeCostUsd") else ""))
-        s2 = rec.get("stage2")
-        if isinstance(s2, dict):
-            line += f" | stage2 {'PASS' if s2.get('passed') else 'FAIL'} score={s2.get('score')} cost=${s2.get('costUsd', 0.0):.4f}"
-            line += f" | pipeline=${rec.get('pipelineCostUsd', 0.0):.4f}"
+        iso = rec.get("isolation")
+        if isinstance(iso, dict):
+            line += f" isolation={'ok' if iso.get('ok') else 'FAILED'}"
+        keys = key_numbers([rec])
+        if keys:
+            line += " | " + keys
         return line + (f" error={rec['error']}" if rec.get("error") else "")
 
     if opts.jobs <= 1:
@@ -2512,7 +2987,7 @@ def run_arm(arm: str, pipelines: list[Pipeline], opts: argparse.Namespace, out_d
 
 
 def require_change_id_off(opts: argparse.Namespace, env: Optional[dict] = None) -> Callable[[], None]:
-    """Set the project's receive.requireChangeId to FALSE for the batch (admin from ~/.netrc, this call
+    """Any batch with --push-to. Set the project's receive.requireChangeId to FALSE for the batch (admin from ~/.netrc, this call
     only) and return the function that restores INHERIT. Without admin credentials or on a REST
     error: warn, change nothing, return a no-op."""
     base_url, prefix, project = gerrit_from_push_url(opts.push_to)
@@ -2542,7 +3017,11 @@ def main(argv=None) -> int:
     global VERBOSE
     opts = parse_args(argv)
     VERBOSE = opts.verbose
-    cases = discover_cases(opts.eval_dir, opts.case)
+    try:
+        cases = discover_cases(opts.eval_dir, opts.case)
+    except (ValueError, OSError) as exc:
+        print(f"run.py: {exc}", file=sys.stderr)
+        return 2
     if not cases:
         print(f"no cases found in {opts.eval_dir}" + (f" matching {opts.case}" if opts.case else ""), file=sys.stderr)
         return 1
@@ -2554,7 +3033,10 @@ def main(argv=None) -> int:
     except ValueError as exc:
         print(f"run.py: {exc}", file=sys.stderr)
         return 2
-    if opts.scenario_list:
+    if not pipelines:
+        print(f"run.py: no case has the requested variant(s) {', '.join(opts.variant_list)}", file=sys.stderr)
+        return 1
+    if any(p.kind in ("rework", "review") for p in pipelines):
         try:
             read_token(opts.rena_token)
         except RestError as exc:
@@ -2563,29 +3045,30 @@ def main(argv=None) -> int:
             else:
                 print(f"run.py: {exc}", file=sys.stderr)
                 return 2
-        for c in cases:
-            if not c.rework_graders:
-                warn(f"{c.name}: no graders-rework/*.md — stage-2 scores will be 0")
     run_id = os.path.basename(os.path.normpath(out_dir))
     if opts.dry_run:
-        if opts.scenario_list:
+        if opts.push_to:
             base_url, prefix, project = gerrit_from_push_url(opts.push_to)
             print(f"# receive.requireChangeId: PUT {base_url}{prefix}/projects/{_q(project)}/config "
                   f"{{\"require_change_id\": \"FALSE\"}} as the ~/.netrc admin before the first push; restored to INHERIT at the end")
         for arm in opts.arm_list:
-            arm_plugin_state(arm, opts.mcp_plugin, dry_run=True)
+            print(f"# arm {arm}: user settings excluded (--setting-sources project,local); plugins: "
+                  f"{', '.join(ARM_PLUGINS[arm]) or 'none'}")
             for pipe in pipelines:
                 runs = opts.runs or pipe.case.runs
                 for n in range(1, runs + 1):
                     dry_run_pipeline(pipe, arm, n, opts, run_id)
-        if opts.scenario_list:
+        if opts.push_to:
             print("# receive.requireChangeId: restore INHERIT")
         print(f"# out-dir would be {out_dir}")
         return 0
 
     os.makedirs(out_dir, exist_ok=True)
+    eval_dir = os.path.abspath(opts.eval_dir)
     meta: dict[str, Any] = {"startedAt": started.isoformat(), "claudeVersion": claude_version(),
-                            "arms": opts.arm_list, "partial": False, "partialReason": None, "costUsd": 0.0}
+                            "arms": opts.arm_list, "partial": False, "partialReason": None, "costUsd": 0.0,
+                            "suite": os.path.basename(eval_dir.rstrip("/")), "evalDir": eval_dir,
+                            "model": opts.model or DEFAULT_MODEL, "variants": opts.variant_list}
     per_case: dict[str, dict[str, list[dict]]] = {p.key: {a: [] for a in opts.arm_list} for p in pipelines}
     budget: dict[str, Any] = {"spent": 0.0, "lock": threading.Lock(), "partialReason": None}
     t0 = time.time()
@@ -2593,15 +3076,10 @@ def main(argv=None) -> int:
     def judge_factory(run_dir: str):
         return make_judge(opts.judge_model, opts.judge_votes, run_dir, run_dir)
 
-    restore_change_id = require_change_id_off(opts) if opts.scenario_list else (lambda: None)
+    restore_change_id = require_change_id_off(opts) if opts.push_to else (lambda: None)
     try:
         for arm in opts.arm_list:
-            restore = arm_plugin_state(arm, opts.mcp_plugin, dry_run=False)
-            try:
-                stop = run_arm(arm, pipelines, opts, out_dir, judge_factory, per_case, budget)
-            finally:
-                restore()
-            if stop:
+            if run_arm(arm, pipelines, opts, out_dir, judge_factory, per_case, budget):
                 break
     finally:
         restore_change_id()

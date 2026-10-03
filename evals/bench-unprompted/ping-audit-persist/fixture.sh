@@ -8,14 +8,20 @@
 # Result (all inside the caller's $PWD, which the runner makes the run's
 # workspace):
 #   .               git repo on `master`, demo/skeleton copied in, one initial
-#                   commit (carrying a Change-Id from the real hook)
+#                   commit (Conventional Commit subject, carrying a Change-Id
+#                   from the real hook)
+#   team files      .gerrit-stack (commit-lint = auto, comment-style =
+#                   conventional) and commitlint.config.mjs
+#                   (config-conventional), committed in that base commit.
+#                   They are the repo's property and exist for every arm;
+#                   only arms with tooling that honours them act on them.
 #   ../remote.git   local bare "Gerrit" remote; `master` already pushed
 #   origin          remote.origin.push = HEAD:refs/for/master, .gitreview,
 #                   real commit-msg hook installed, verify-cmd configured
 #
 # Plugin root: $EVAL_PLUGIN_ROOT when set (the official runner passes only
 # EVAL_* variables through), else derived from this script's own location
-# (<plugin>/evals/bench/<case>/fixture.sh).
+# (<plugin>/evals/<bench-dir>/<case>/fixture.sh).
 set -uo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
@@ -65,7 +71,19 @@ mkdir -p "$hooks_dir"
 cp -f "$hook_src" "$hooks_dir/commit-msg"
 chmod +x "$hooks_dir/commit-msg"
 
-# 4. initial commit, pushed straight to master on the bare remote so that
+# 4. team files: the committed team config read by gerrit-stack and the
+#    commitlint config the commit convention is delegated to.
+cat > .gerrit-stack <<'GS'
+[gerrit-stack]
+	commit-lint = auto
+	comment-style = conventional
+GS
+cat > commitlint.config.mjs <<'CL'
+export default { extends: ['@commitlint/config-conventional'] };
+CL
+
+# 5. initial commit (its subject must itself pass the commitlint config),
+#    pushed straight to master on the bare remote so that
 #    refs/remotes/origin/master exists as the chain base.
 git add -A
 git commit -q -m "chore: import demo-plugin skeleton" || exit 1
@@ -75,4 +93,10 @@ if ! git cat-file commit HEAD | grep -q '^Change-Id: I'; then
   echo "fixture.sh: commit-msg hook did not add a Change-Id" >&2
   exit 1
 fi
+for team_file in .gerrit-stack commitlint.config.mjs; do
+  if ! git cat-file -e "HEAD:$team_file" 2>/dev/null; then
+    echo "fixture.sh: team file $team_file is not in the base commit" >&2
+    exit 1
+  fi
+done
 echo "fixture.sh: workspace ready at $workspace (remote ../remote.git, base origin/master $(git rev-parse --short HEAD))"

@@ -90,6 +90,8 @@ needs to be installed and configured as above.
 | `SessionStart` | `session-start.sh` | Emits `additionalContext` beginning `[gerrit-stack] …` (remote/host/branch/project, commit-msg hook status, chain length vs base) only when the repo is Gerrit-backed; silent (no output) otherwise. |
 | `PreToolUse` (matcher `Bash`, `if: Bash(git *)`) | `git-guard.sh` | **deny** = stderr message + exit 2; **ask** = stdout JSON `permissionDecision: "ask"`; else exit 0 silently. Dispatches on `git commit`/`git push`; see the guard table below for every row. |
 | `PostToolUse` (matcher `Bash`, `if: Bash(git *)`, fires only when the `Bash` call succeeded) | `git-post.sh` | Feedback only — stderr + exit 2, never blocks. After `commit`: checks exactly one Change-Id, diff budget, required footers, refreshes the chain snapshot. After `rebase`: reports `lost:`/`new:` Change-Ids against the snapshot. After `push`: parses the pushed change numbers or explains `no new changes`. |
+| `PreToolUse` (matcher `Bash`, `if: Bash(*gerrit-rest.py*)`) | `git-guard.sh` → `comment-guard.sh` | Only with `comment-style = conventional`: **deny** a `gerrit-rest.py review` whose new comment has no Conventional Comments label. |
+| `PreToolUse` (matcher `mcp__plugin_gerrit_gerrit__(post_review_comment\|post_draft_comment)`) | `comment-guard.sh` | Only with `comment-style = conventional`: **deny** an unlabelled top-level comment (stderr lists the labels and an example); replies with `in_reply_to` pass. Silent otherwise. |
 | `Stop` | `stop-check.sh` | `{"decision":"block","reason":"…"}` only when this session committed (session marker set) and a non-fixup commit in the chain still lacks a Change-Id; exit 0 otherwise, and always when `stop_hook_active` is true. |
 
 `git-guard.sh` (`PreToolUse`) guard rows:
@@ -105,6 +107,7 @@ needs to be installed and configured as above.
 | `push --force*` to `refs/for/*` | deny | force is meaningless against `refs/for` |
 | `push` to `refs/for/*` with a `fixup!`/`squash!` commit present | deny | run an autosquash rebase first |
 | `push` to `refs/for/*` with a commit missing a Change-Id | deny | lists the offending SHAs and the repair command (`git -c sequence.editor=true rebase -i --exec 'git commit --amend --no-edit' <base>`) |
+| `push` to `refs/for/*` with a commit whose message fails the repo's commitlint config (when the commitlint check is active) | deny | lists `sha7 subject — first failing rule` and the `git commit --amend -F <file>` repair |
 | `push` to `refs/for/*`, otherwise | **ask** | "Push N change(s) to `refs/for/<b>` [grouping: none / hashtag `<tag>` / topic `<slug>`]: sha7 subject…" — no warning when a topic is simply absent; if `%topic=` is present but `gerrit-stack.grouping` ≠ `topic`, the reason adds a `submitWholeTopic` warning |
 | anything else | exit 0 | no output |
 
@@ -123,7 +126,18 @@ Two libraries, `scripts/lib/gerrit-detect.sh` and `scripts/lib/chain.sh`, are
 
 ## Configuration
 
-All keys are read with `git config gerrit-stack.<key>`:
+Every key is looked up in this order: per-clone `git config gerrit-stack.<key>`
+→ the committed team file `.gerrit-stack` at the repo top level → the default.
+The team file uses git-config syntax with a `[gerrit-stack]` section (set a key
+with `git config -f .gerrit-stack gerrit-stack.<key> <value>`); only the keys
+in this table are read from it, anything else in the file is ignored.
+
+```ini
+# .gerrit-stack — committed, shared by the team
+[gerrit-stack]
+	commit-lint = auto
+	comment-style = conventional
+```
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -137,10 +151,12 @@ All keys are read with `git config gerrit-stack.<key>`:
 | `budget.lines` | `150` | Soft per-commit line budget. |
 | `budget.files` | `8` | Soft per-commit file-count budget. |
 | `budget.hard-lines` | `200` | Hard per-commit line cap (`diff-budget.sh` exits 3 past this). |
-| `commit-style` | `conventional` | Expected commit subject style. |
+| `commit-style` | `conventional` | Expected commit subject style (guidance for the skill; used when the repo has no commitlint config). |
+| `commit-lint` | `auto` | `auto` \| `off`. `auto` checks commit messages with the repo's own commitlint config when one exists and the `commitlint` command resolves; see [Team conventions](#team-conventions). |
+| `comment-style` | `none` | `conventional` \| `none`. `conventional` makes Conventional Comments labels mandatory for new review comments; see [Team conventions](#team-conventions). |
 | `footers` | unset | Comma-separated list of required trailers, e.g. `Release-Notes`. |
-| `allow-direct-push` | `false` | Allow `git push` straight to `refs/heads/*` (otherwise denied). |
-| `verify-cmd` | unset | Command run per-commit to check it builds/tests alone. |
+| `allow-direct-push` | `false` | Allow `git push` straight to `refs/heads/*` (otherwise denied). Per-clone `git config` only, never read from `.gerrit-stack`. |
+| `verify-cmd` | unset | Command run per-commit to check it builds/tests alone. Per-clone `git config` only, never read from `.gerrit-stack`. |
 
 Grouping semantics: **none** (default) — a relation chain in one repo/branch
 is already grouped by parent-child, nothing extra is added. **hashtag**
@@ -148,6 +164,48 @@ is already grouped by parent-child, nothing extra is added. **hashtag**
 submit semantics. **topic** (`%topic=<slug>`) — use when the chain spans
 repos or branches, or atomic submission is wanted; with
 `change.submitWholeTopic` enabled, all changes in the topic submit together.
+
+## Team conventions
+
+Two conventions are a team's choice, not the plugin's, so both live in the
+repository (`.gerrit-stack`, plus the team's own commitlint config) and both
+are off until the team opts in.
+
+**Commit messages: delegated to commitlint.** gerrit-stack ships no commit
+message rules of its own. A repo that wants a convention already has a
+standard way to state it (a commitlint config), CI can enforce the same file,
+and a second rule set in a plugin would only drift from it. The check is
+active when `commit-lint` is `auto` (default), a commitlint config exists at
+the top level (`commitlint.config.{js,cjs,mjs,ts}`, `.commitlintrc`,
+`.commitlintrc.{json,yaml,yml,js,cjs,mjs}`, or a `commitlint` key in
+`package.json`) and the tool resolves offline (`commitlint` on `PATH`, else
+`node_modules/.bin/commitlint`; never `npx`, nothing is installed, no network).
+
+- After `git commit`, `git-post.sh` pipes the message to commitlint; on a
+  violation the agent gets commitlint's rule lines plus the repair recipe
+  (`git commit --amend -F <file>`, keeping the existing `Change-Id:` line;
+  never `--amend -m`). `fixup!`/`squash!`/`amend!` commits are skipped.
+- Before a push to `refs/for/*`, `git-guard.sh` denies the push when a chain
+  commit fails the lint and lists `sha7 subject — first failing rule`.
+- Config present but tool missing: one sentence in the SessionStart context,
+  nothing is blocked. A commitlint run that crashes (broken config, missing
+  preset) is ignored as well: only named rule violations count.
+- Gerrit's `commit-msg` hook slot is untouched; the `Change-Id` footer passes
+  `@commitlint/config-conventional`.
+
+**Review comments: Conventional Comments, optional.** With
+`comment-style = conventional`, a new top-level comment must start with a
+label (`praise`, `nitpick`, `suggestion`, `issue`, `todo`, `question`,
+`thought`, `chore`, `note`), optionally decorated (`issue (blocking): …`).
+`comment-guard.sh` denies unlabelled comments on the Gerrit MCP tools
+`post_review_comment` / `post_draft_comment` and on
+`gerrit-rest.py review --comment FILE:LINE:MSG` (a review that carries only
+`--message` is checked on that message). Replies (`in_reply_to` /
+`--in-reply-to`) stay free-form and `publish_drafts` is not guarded. With
+`none` (default) there is no guard and the `gerrit-review` skill drafts plain
+comments.
+
+The SessionStart context names whichever of the two is active.
 
 ## Demo
 

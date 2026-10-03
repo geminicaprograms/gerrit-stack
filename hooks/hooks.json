@@ -1,11 +1,13 @@
 {
-  "description": "gerrit-stack: Gerrit-aware guards for git commit/push, chain verification, session context, stop check",
+  "description": "gerrit-stack: Gerrit-aware guards for git commit/push, team conventions (commitlint, Conventional Comments), chain verification, session context, stop check",
   "hooks": {
     "SessionStart": [
       { "hooks": [ { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh\"", "timeout": 10 } ] }
     ],
     "PreToolUse": [
-      { "matcher": "Bash", "hooks": [ { "type": "command", "if": "Bash(git *)", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/git-guard.sh\"", "timeout": 10 } ] }
+      { "matcher": "Bash", "hooks": [ { "type": "command", "if": "Bash(git *)", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/git-guard.sh\"", "timeout": 30 } ] },
+      { "matcher": "Bash", "hooks": [ { "type": "command", "if": "Bash(*gerrit-rest.py*)", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/git-guard.sh\"", "timeout": 30 } ] },
+      { "matcher": "mcp__plugin_gerrit_gerrit__(post_review_comment|post_draft_comment)", "hooks": [ { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/comment-guard.sh\"", "timeout": 10 } ] }
     ],
     "PostToolUse": [
       { "matcher": "Bash", "hooks": [ { "type": "command", "if": "Bash(git *)", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/git-post.sh\"", "timeout": 10 } ] }

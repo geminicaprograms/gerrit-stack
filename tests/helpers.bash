@@ -151,3 +151,77 @@ run_hook() {
   local script="$1" json="$2"
   run --separate-stderr bash "$script" <<< "$json"
 }
+
+# ---------------------------------------------------------------- team conventions
+
+# team_config <repo> <key> <value> — set a key in the committed team file
+# <repo>/.gerrit-stack (git-config format; `budget.lines` → [gerrit-stack "budget"]).
+team_config() {
+  git config -f "$1/.gerrit-stack" "gerrit-stack.$2" "$3"
+}
+
+# add_commitlint_config <repo> — the config-conventional one-liner the demo uses.
+add_commitlint_config() {
+  printf "export default { extends: ['@commitlint/config-conventional'] };\n" \
+    > "$1/commitlint.config.mjs"
+}
+
+# stub_commitlint — puts a fake `commitlint` first on PATH (no node needed):
+# reads the message on stdin, accepts Conventional Commits subjects, otherwise
+# prints commitlint-shaped rule lines and exits 1. Prints the stub's bin dir.
+stub_commitlint() {
+  local bin="$BATS_TEST_TMPDIR/stub-bin"
+  mkdir -p "$bin"
+  cat > "$bin/commitlint" <<'STUB'
+#!/usr/bin/env bash
+IFS= read -r subject
+if printf '%s\n' "$subject" | grep -Eq '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?!?: .+'; then
+  exit 0
+fi
+printf '⧗   input: %s\n' "$subject"
+printf '✖   subject may not be empty [subject-empty]\n'
+printf '✖   type may not be empty [type-empty]\n\n'
+printf '✖   found 2 problems, 0 warnings\n'
+exit 1
+STUB
+  chmod +x "$bin/commitlint"
+  PATH="$bin:$PATH"
+  export PATH
+  printf '%s\n' "$bin"
+}
+
+# path_without <tool> — prints a PATH on which <tool> does not resolve: every
+# PATH dir that holds it is replaced by a shadow dir of symlinks to its other
+# entries, so git, jq and friends keep working.
+path_without() {
+  local tool="$1" out='' d shadow n=0 old_ifs=$IFS
+  IFS=:
+  for d in $PATH; do
+    IFS=$old_ifs
+    [ -n "$d" ] || continue
+    if [ -e "$d/$tool" ]; then
+      n=$((n+1))
+      shadow="$BATS_TEST_TMPDIR/shadow-$n"
+      mkdir -p "$shadow"
+      ln -s "$d"/* "$shadow/" 2>/dev/null || true
+      rm -f "$shadow/$tool"
+      d=$shadow
+    fi
+    out="${out:+$out:}$d"
+    IFS=:
+  done
+  IFS=$old_ifs
+  printf '%s\n' "$out"
+}
+
+# mcp_hook_json <cwd> <tool-short-name> <message> [in_reply_to]
+# Prints the PreToolUse stdin JSON for a Gerrit MCP comment tool call.
+mcp_hook_json() {
+  jq -cn --arg cwd "$1" --arg tool "mcp__plugin_gerrit_gerrit__$2" --arg msg "$3" \
+    --arg reply "${4:-}" '
+    { hook_event_name: "PreToolUse", session_id: "test-session", cwd: $cwd,
+      tool_name: $tool,
+      tool_input: ({ change_id: "42", file_path: "src/Main.java", line_number: 7,
+                     message: $msg, unresolved: true }
+                   + (if $reply == "" then {} else { in_reply_to: $reply } end)) }'
+}

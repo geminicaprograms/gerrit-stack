@@ -5,6 +5,9 @@
 #   deny  → message on stderr + exit 2
 #   ask   → stdout JSON permissionDecision "ask" + exit 0
 #   else  → exit 0 silent
+# Team conventions (see README "Team conventions"): a push to refs/for is denied
+# when a chain commit fails the repo's own commitlint config, and Bash calls of
+# `gerrit-rest.py review` are handed to comment-guard.sh.
 # The strictest decision across invocations wins (deny > ask > silent).
 # Fail-open: no jq, no cwd, non-Gerrit repo, unexpected error → exit 0 silent.
 set -uo pipefail
@@ -175,7 +178,7 @@ grouping_of() {
 # guard_refs_for <remote> <branch> <src> <opts>
 guard_refs_for() {
   local remote="$1" branch="$2" src="$3" opts="$4"
-  local base tip sha ids n fixups='' missing='' dups='' list='' subject grp cfg_grouping
+  local base tip sha ids n fixups='' missing='' dups='' list='' subject grp cfg_grouping unlinted=''
 
   if [ "$push_force" = 1 ]; then
     deny "force-pushing to refs/for/$branch is meaningless: Gerrit creates patchsets from the Change-Id, never rewrites refs/for. Push without --force / -f / --force-with-lease / '+'."
@@ -216,6 +219,18 @@ guard_refs_for() {
     deny "commit(s) carry more than one Change-Id trailer (Gerrit rejects them):$dups Edit each message so exactly one Change-Id: line remains: git -c sequence.editor=true rebase -i $base"
   fi
   [ "$inv_decision" = deny ] && return 0
+
+  # team commit convention: the repo's own commitlint config, offline, fail-open
+  if gs_commitlint_active; then
+    for sha in $chain; do
+      if gs_commitlint_check "$sha"; then continue; fi
+      unlinted="$unlinted ${sha:0:7} $(gs_subject_of "$sha") — $(printf '%s\n' "${_gs_lint_out:-}" | head -n 1);"
+    done
+    if [ -n "$unlinted" ]; then
+      deny "commit message(s) in the chain to refs/for/$branch fail this repo's commitlint config:$unlinted Reword each one and keep its existing Change-Id: line: git log -1 --format=%B > <file>, fix the subject in <file>, git commit --amend -F <file> (never '--amend -m'). For a commit below HEAD stop a rebase at it first (gerrit-stack skill, references/chain-editing.md, 'Reword a middle commit'). Check a message offline: git log -1 --format=%B <sha> | commitlint"
+      return 0
+    fi
+  fi
 
   grouping_of "$opts"
   case "$grp_kind" in
@@ -299,8 +314,18 @@ guard_push() {
 
 # ---------------------------------------------------------------- dispatch
 
+# review comments posted through the REST fallback: comment-guard.sh decides
+case "$cmd" in
+  *gerrit-rest.py*review*)
+    cg_rc=0
+    cg_msg=$(printf '%s' "$input" | bash "$(dirname "${BASH_SOURCE[0]}")/comment-guard.sh" 2>&1 >/dev/null) || cg_rc=$?
+    if [ "$cg_rc" -eq 2 ] && [ -n "$cg_msg" ]; then
+      decision=deny
+      deny_msg="${deny_msg}${cg_msg}"$'\n'
+    fi ;;
+esac
+
 lines=$(gs_parse_git_cmd "$cmd")
-[ -n "$lines" ] || exit 0
 
 while IFS=$'\t' read -r dir verb args; do
   [ -n "$verb" ] || continue

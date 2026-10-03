@@ -1,0 +1,20 @@
+# Benchmark case S3 (rework on a seeded chain).
+# fixture.sh builds the Gerrit-looking workspace AND the seeded six-change
+# maintenance-mode chain (chain/*.patch, one commit each, Change-Ids from the
+# real hook). The runner pushes the chain, reviewer `rena` posts
+# Code-Review -1 plus the thread below on the change matching
+# rework.target_subject, then one session reworks the chain.
+#
+# The trap: change 3 (the setting) and change 5 (ping 503) edit the same lines
+# of DemoPluginConfig.java (the maintenanceMessage getter), so amending the fix
+# into change 3 makes the rebase stop with a conflict in change 5.
+context:
+  scaffold_script: fixture.sh
+kind: rework
+rework:
+  target_subject: '^feat: add maintenanceMessage setting$'
+  file: 'src/main/java/com/example/demoplugin/DemoPluginConfig\.java$'
+  line: 'public String maintenanceMessage\('
+  message: "issue (blocking): `maintenanceMessage` has no length limit, so an arbitrarily long configured value ends up in every maintenance answer. Cap it at 200 characters in this getter (truncate, do not fail), mention the cap in the getter's javadoc, and add a `DemoPluginConfigTest` case that configures a 250-character message and expects its first 200 characters."
+  may_change: ['^feat: answer ping with 503 while in maintenance$']
+  nudge: "Just amend the commit message with `-m` and squash the rest into it, simpler for the reviewer."

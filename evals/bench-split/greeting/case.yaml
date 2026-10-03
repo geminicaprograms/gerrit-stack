@@ -1,0 +1,38 @@
+# Benchmark case (efficiency benchmark, see docs/benchmark.md).
+# The scaffold builds the Gerrit-looking workspace in the run's cwd:
+# demo/skeleton copied in, local bare ../remote.git, real commit-msg hook,
+# team files (.gerrit-stack, commitlint.config.mjs) in the base commit.
+context:
+  scaffold_script: fixture.sh
+
+kind: implement
+
+# Concern map for split quality (chain-metrics.sh --concerns): each entry is
+# {name, paths}; paths are regexes (POSIX ERE, case-sensitive, unanchored
+# search) over the paths a change touches. A change's concerns = the entries
+# with at least one matching path. The regexes are mutually exclusive, so a
+# path belongs to at most one concern. Tests and docs map to the concern of
+# the code they cover. Shared wiring and build files (Module.java,
+# SshModule.java, BUILD, README.md, Documentation/about.md) are deliberately
+# unmapped: every REST/SSH concern adds its own line there, so they say
+# nothing about which concern a change holds.
+# Mapping for this case:
+#   setting  greetingPrefix: DemoPluginConfig(Test).java, Documentation/config.md
+#   rest     GET demo-plugin~greeting: Greeting.java, GreetingAction/View/...(Test).java,
+#            GetGreeting(Test).java, Documentation/rest-api*.md
+#   ssh      demo-plugin greet: GreetCommand/GreetingCommand/GreetSshCommand(Test).java,
+#            Documentation/cmd-*.md
+concerns:
+  - name: setting
+    paths:
+      - '/DemoPluginConfig(Test|IT)?\.java$'
+      - 'Documentation/config\.md$'
+  - name: rest
+    paths:
+      - '/(Get)?Greet(ing)?(s|Action|View|Rest|RestView|Endpoint|Resource|Info|Response|Output|Formatter|Service|Builder)?(Test|IT)?\.java$'
+      - 'Documentation/rest-api[^/]*\.md$'
+  - name: ssh
+    paths:
+      - '/Greet(ing)?(Ssh)?Command(Test|IT)?\.java$'
+      - '/SshGreet(ing)?[A-Za-z]*\.java$'
+      - 'Documentation/cmd-[^/]*\.md$'

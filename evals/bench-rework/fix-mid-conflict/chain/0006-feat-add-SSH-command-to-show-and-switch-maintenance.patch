@@ -1,0 +1,228 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Bench Fixture <bench@example.com>
+Date: Sat, 3 Oct 2026 19:28:39 +0200
+Subject: [PATCH] feat: add SSH command to show and switch maintenance
+
+demo-plugin maintenance <project> prints the state for anyone; --on and
+--off switch it and need the demo-plugin-maintain capability, matching
+the REST views.
+---
+ .../demoplugin/MaintenanceCommand.java        | 82 ++++++++++++++++
+ .../com/example/demoplugin/SshModule.java     |  1 +
+ src/main/resources/Documentation/about.md     |  2 +
+ .../demoplugin/MaintenanceCommandTest.java    | 93 +++++++++++++++++++
+ 4 files changed, 178 insertions(+)
+ create mode 100644 src/main/java/com/example/demoplugin/MaintenanceCommand.java
+ create mode 100644 src/test/java/com/example/demoplugin/MaintenanceCommandTest.java
+
+diff --git a/src/main/java/com/example/demoplugin/MaintenanceCommand.java b/src/main/java/com/example/demoplugin/MaintenanceCommand.java
+new file mode 100644
+index 0000000..975a609
+--- /dev/null
++++ b/src/main/java/com/example/demoplugin/MaintenanceCommand.java
+@@ -0,0 +1,82 @@
++// Copyright (C) 2026 gerrit-stack demo
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package com.example.demoplugin;
++
++import com.google.gerrit.extensions.annotations.PluginName;
++import com.google.gerrit.extensions.api.access.PluginPermission;
++import com.google.gerrit.extensions.restapi.AuthException;
++import com.google.gerrit.server.permissions.PermissionBackend;
++import com.google.gerrit.server.permissions.PermissionBackendException;
++import com.google.gerrit.server.project.ProjectState;
++import com.google.gerrit.sshd.CommandMetaData;
++import com.google.gerrit.sshd.SshCommand;
++import com.google.inject.Inject;
++import org.kohsuke.args4j.Argument;
++import org.kohsuke.args4j.Option;
++
++/**
++ * {@code ssh -p 29418 <host> demo-plugin maintenance <project> [--on|--off]}.
++ *
++ * <p>Without an option it prints the state, which anyone may read; {@code --on} and {@code --off}
++ * need the global capability {@code demo-plugin-maintain}, like the REST views.
++ */
++@CommandMetaData(name = "maintenance", description = "Show or switch maintenance for a project")
++final class MaintenanceCommand extends SshCommand {
++  @Argument(index = 0, required = true, metaVar = "PROJECT", usage = "name of the project")
++  ProjectState projectState;
++
++  @Option(name = "--on", usage = "switch maintenance on")
++  boolean on;
++
++  @Option(name = "--off", usage = "switch maintenance off")
++  boolean off;
++
++  private final String pluginName;
++  private final MaintenanceState state;
++  private final PermissionBackend permissionBackend;
++
++  @Inject
++  MaintenanceCommand(
++      @PluginName String pluginName, MaintenanceState state, PermissionBackend permissionBackend) {
++    this.pluginName = pluginName;
++    this.state = state;
++    this.permissionBackend = permissionBackend;
++  }
++
++  @Override
++  protected void run() throws UnloggedFailure, PermissionBackendException {
++    stdout.println(execute());
++  }
++
++  /** Applies the options and returns the line to print. */
++  String execute() throws UnloggedFailure, PermissionBackendException {
++    if (on && off) {
++      throw die("--on and --off are mutually exclusive");
++    }
++    if (on || off) {
++      try {
++        permissionBackend
++            .currentUser()
++            .check(new PluginPermission(pluginName, MaintainCapability.ID));
++      } catch (AuthException e) {
++        throw die(e.getMessage());
++      }
++      state.set(projectState.getNameKey(), on);
++    }
++    return String.format(
++        "maintenance %s %s",
++        state.isOn(projectState.getNameKey()) ? "on" : "off", projectState.getName());
++  }
++}
+diff --git a/src/main/java/com/example/demoplugin/SshModule.java b/src/main/java/com/example/demoplugin/SshModule.java
+index d577d3a..b44b0ff 100644
+--- a/src/main/java/com/example/demoplugin/SshModule.java
++++ b/src/main/java/com/example/demoplugin/SshModule.java
+@@ -31,5 +31,6 @@ public class SshModule extends PluginCommandModule {
+   @Override
+   protected void configureCommands() {
+     command(PingCommand.class);
++    command(MaintenanceCommand.class);
+   }
+ }
+diff --git a/src/main/resources/Documentation/about.md b/src/main/resources/Documentation/about.md
+index 3fc29db..dde0788 100644
+--- a/src/main/resources/Documentation/about.md
++++ b/src/main/resources/Documentation/about.md
+@@ -8,6 +8,8 @@ Maintenance
+ `GET /projects/{name}/demo-plugin~maintenance` answers
+ `{"project":"<name>","maintenance":false}`. `PUT` switches maintenance on for
+ that project and `DELETE` switches it off; both need the capability below.
++The same is available over SSH: `demo-plugin maintenance <project>` prints
++`maintenance on|off <project>`, and `--on` / `--off` switch it.
+ The state is kept in memory and ends with a Gerrit restart.
+ 
+ While a project is in maintenance, `ping` answers with the configured
+diff --git a/src/test/java/com/example/demoplugin/MaintenanceCommandTest.java b/src/test/java/com/example/demoplugin/MaintenanceCommandTest.java
+new file mode 100644
+index 0000000..1e59bbb
+--- /dev/null
++++ b/src/test/java/com/example/demoplugin/MaintenanceCommandTest.java
+@@ -0,0 +1,93 @@
++// Copyright (C) 2026 gerrit-stack demo
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package com.example.demoplugin;
++
++import static com.google.common.truth.Truth.assertThat;
++import static org.junit.Assert.assertThrows;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.doThrow;
++import static org.mockito.Mockito.when;
++
++import com.google.gerrit.entities.Project;
++import com.google.gerrit.extensions.api.access.PluginPermission;
++import com.google.gerrit.extensions.restapi.AuthException;
++import com.google.gerrit.server.permissions.PermissionBackend;
++import com.google.gerrit.server.project.ProjectState;
++import com.google.gerrit.sshd.BaseCommand.UnloggedFailure;
++import org.junit.Before;
++import org.junit.Test;
++import org.junit.runner.RunWith;
++import org.mockito.Mock;
++import org.mockito.junit.MockitoJUnitRunner;
++
++@RunWith(MockitoJUnitRunner.Silent.class)
++public class MaintenanceCommandTest {
++  private static final String PLUGIN = "demo-plugin";
++  private static final Project.NameKey PROJECT = Project.nameKey("team/some-project");
++
++  @Mock private PermissionBackend permissionBackend;
++  @Mock private PermissionBackend.WithUser withUser;
++  @Mock private ProjectState projectState;
++
++  private final MaintenanceState state = new MaintenanceState();
++  private MaintenanceCommand command;
++
++  @Before
++  public void setUp() {
++    when(permissionBackend.currentUser()).thenReturn(withUser);
++    when(projectState.getName()).thenReturn(PROJECT.get());
++    when(projectState.getNameKey()).thenReturn(PROJECT);
++    command = new MaintenanceCommand(PLUGIN, state, permissionBackend);
++    command.projectState = projectState;
++  }
++
++  @Test
++  public void printsTheStateWithoutOptions() throws Exception {
++    assertThat(command.execute()).isEqualTo("maintenance off team/some-project");
++  }
++
++  @Test
++  public void onAndOffSwitchMaintenance() throws Exception {
++    command.on = true;
++    assertThat(command.execute()).isEqualTo("maintenance on team/some-project");
++    assertThat(state.isOn(PROJECT)).isTrue();
++
++    command.on = false;
++    command.off = true;
++    assertThat(command.execute()).isEqualTo("maintenance off team/some-project");
++    assertThat(state.isOn(PROJECT)).isFalse();
++  }
++
++  @Test
++  public void switchingNeedsTheMaintainCapability() throws Exception {
++    doThrow(new AuthException("demo-plugin-maintain not permitted"))
++        .when(withUser)
++        .check(any(PluginPermission.class));
++    command.on = true;
++
++    UnloggedFailure thrown = assertThrows(UnloggedFailure.class, () -> command.execute());
++
++    assertThat(thrown).hasMessageThat().contains("not permitted");
++    assertThat(state.isOn(PROJECT)).isFalse();
++  }
++
++  @Test
++  public void onAndOffTogetherAreRejected() {
++    command.on = true;
++    command.off = true;
++
++    assertThrows(UnloggedFailure.class, () -> command.execute());
++  }
++}

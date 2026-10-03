@@ -1,6 +1,6 @@
 ---
 name: gerrit-review
-description: Read and respond to Gerrit review feedback on a change or relation chain via the official Gerrit MCP. Lists unresolved threads, drafts replies and comments in Conventional Comments format, posts them after the user approves the batch, hands back to the user for any vote or submit. Use when asked to "check review comments", "reply to comments", "address feedback", "resolve threads", or when gerrit-stack reaches its iterate phase. Never votes, never submits.
+description: Read and respond to Gerrit review feedback on a change or relation chain via the official Gerrit MCP. Lists unresolved threads, drafts replies and comments (Conventional Comments labels when the team chose them), posts them after the user approves the batch, hands back to the user for any vote or submit. Use when asked to "check review comments", "reply to comments", "address feedback", "resolve threads", or when gerrit-stack reaches its iterate phase. Never votes, never submits.
 ---
 
 # gerrit-review
@@ -12,6 +12,23 @@ abandon and revert belong to the human; this skill never touches them.
 **REQUIRED BACKGROUND:** the `gerrit-stack` skill (Phase 5, Iterate) owns every code change
 that a review asks for; the `gerrit-workflow` skill (from `gerrit@gerrit-mcp`) owns
 Change-Id and patch-set semantics. Do not restate either here — hand off.
+
+## Comment style is a team choice
+
+Read the setting before drafting anything; per-clone config wins over the committed team file:
+
+```
+git config --get gerrit-stack.comment-style || git config -f "$(git rev-parse --show-toplevel)/.gerrit-stack" --get gerrit-stack.comment-style
+```
+
+| Value | New comments and author notes (top-level) | Replies in a thread |
+|---|---|---|
+| `conventional` | `<label> [(decorations)]: <subject>` with a label from `references/conventional-comments.md`; say `(blocking)` or `(non-blocking)` whenever it is not obvious from the label. A PreToolUse guard denies an unlabelled `post_review_comment` / `post_draft_comment` / `gerrit-rest.py review --comment`. | free-form: `Done.` + what changed, or a short answer |
+| `none`, or nothing printed (default) | plain, concise sentences; no labels, no decorations | free-form, same as above |
+
+The SessionStart context names the choice when it is `conventional`. Reviewers' labels are still
+read the same way in both modes (the table in `references/conventional-comments.md` maps them to
+the expected author action); the setting only governs what **you** write.
 
 ## Tool map
 
@@ -70,9 +87,10 @@ Classify every unresolved thread into exactly one bucket; write the bucket next 
 | **defer** | valid but out of scope for this chain | draft a reply naming the follow-up Change-Id or ticket; keep `unresolved: true` unless the reviewer marked it `(non-blocking)` |
 | **escalate** | you already disagreed once in this thread, or the reviewer asks for a decision that is not yours | draft nothing; list the thread for the human with both positions |
 
-Reply rules (checked in pre-flight): grammar from `references/conventional-comments.md`; `Done.` + one
-line saying what changed when fixed; otherwise `<label> [decorations]: <subject>` with `note`,
-`question`, `thought` or `suggestion`; **≤ 3 sentences**; when disagreeing, cite a principle, ADR,
+Reply rules (checked in pre-flight): replies are free-form in both comment styles — `Done.` + one
+line saying what changed when fixed; otherwise a direct answer (with `comment-style=conventional`
+a leading `note:` / `question:` / `thought:` is welcome but never required in a reply);
+**≤ 3 sentences**; when disagreeing, cite a principle, ADR,
 or doc link; `in_reply_to` = id of the thread's last comment; `unresolved: false` only when the fix is
 in the pushed patch set or the thread asked for no change and your reply answers it.
 
@@ -94,9 +112,10 @@ The user votes and submits themselves — tell them the chain is ready for their
 
 ## Process C — Author notes
 
-Before or right after a push, pre-empt questions on your own change with `note (non-blocking): …`
-on the exact line, e.g. `note (non-blocking): reviewer note: this change only moves code; behaviour
-is unchanged.` Post with `post_review_comment(..., unresolved=False, labels=None)`; `line_number=0`
+Before or right after a push, pre-empt questions on your own change with a note on the exact line.
+With `comment-style=conventional` write `note (non-blocking): …`, e.g. `note (non-blocking): this
+change only moves code; behaviour is unchanged.`; otherwise the same sentence without the label.
+Author notes are new top-level comments, so the label guard applies to them. Post with `post_review_comment(..., unresolved=False, labels=None)`; `line_number=0`
 makes it a file-level note. Author notes join the same batch preview and wait for the same yes.
 
 ## Hard rules
@@ -121,7 +140,7 @@ makes it a file-level note. Author notes join the same batch preview and wait fo
 
 ## References
 
-- `references/conventional-comments.md` — labels, decorations, reviewer label → author action, reply examples.
+- `references/conventional-comments.md` — labels, decorations, reviewer label → author action, reply examples (labels apply to your own new comments only when `comment-style=conventional`).
 - `references/review-json.md` — `CommentInfo`, `ReviewInput`/`CommentInput`, `RelatedChangesInfo`, identifiers, `gerrit-rest.py` subcommands.
 
 ## Pre-flight checklist (re-read before the batch preview and again before posting)
@@ -129,7 +148,8 @@ makes it a file-level note. Author notes join the same batch preview and wait fo
 - [ ] Target resolved via `get_related_changes`; only `NEW` changes in scope; stale patch sets flagged.
 - [ ] Every unresolved thread has one bucket: fix / answer / defer / escalate.
 - [ ] Every **fix** reply waits for a drift-free rewrite (the post-rebase hook feedback is the drift signal: `lost:`/`new:` → stop and repair; `chain-status.sh --verify-ids` confirms, and keeps reporting drift until `--snapshot` is run after the repair) and a new patch set confirmed via `get_change_details`.
-- [ ] Every reply ≤ 3 sentences; `Done.` + why, or `<label> [decorations]: <subject>`.
+- [ ] `comment-style` was read (clone config, else `.gerrit-stack`): new comments/author notes carry a label + `(blocking)`/`(non-blocking)` only when it is `conventional`, plain sentences otherwise.
+- [ ] Every reply ≤ 3 sentences; `Done.` + why, or a direct answer (free-form in both styles).
 - [ ] Every reply carries `in_reply_to` = last comment id of its thread (draft tool or `--in-reply-to`).
 - [ ] `unresolved: false` only on fixed-and-pushed or answered-no-change threads.
 - [ ] Every disagreement cites a principle/ADR/doc link; no thread has two rounds from me.

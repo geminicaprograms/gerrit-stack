@@ -104,12 +104,16 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
 ## Phase 2 — Build the chain (repeat per step)
 
 1. Implement exactly the files in the step (tests travel with the code).
-2. `git config --get gerrit-stack.verify-cmd` — if it prints a command, run that
+2. `git config --get gerrit-stack.verify-cmd` (nothing printed → `git config -f .gerrit-stack --get gerrit-stack.verify-cmd`) — if it prints a command, run that
    command as its own Bash call; fix failures before committing.
 3. `git add <path> [<path>…]` with the step's explicit paths. Never `git add -A` or `.`.
 4. Write the message per [references/commit-message.md](references/commit-message.md)
    to a temp file (no `Change-Id` line, ever), then `git commit -F <file>`
-   (or `git commit -m '<subject>' -m '<body>'` for short ones).
+   (or `git commit -m '<subject>' -m '<body>'` for short ones). When the hook feedback
+   after the commit says the message fails the repo's commitlint config, fix it right away:
+   `git log -1 --format=%B > <file>`, correct the subject in `<file>` (leave the `Change-Id`
+   line untouched), `git commit --amend -F <file>`. A push to `refs/for` is denied until
+   every chain commit passes.
 5. `bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh"` — the new row must show
    exactly one Change-Id. Missing → hook problem, see troubleshooting; do not continue.
 6. Before committing: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" --cached` — over budget (exit 1) means put the one-line justification into this commit message now (a later `--amend -F` is allowed only when the file keeps the Change-Id line). After committing: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" HEAD`
@@ -210,7 +214,10 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
 
 ## Configuration
 
-`git config gerrit-stack.<key>`; full table with defaults in the plugin README.
+`git config gerrit-stack.<key>` in this clone wins; otherwise the committed team file
+`.gerrit-stack` at the repo top level (same keys, section `[gerrit-stack]`, read with
+`git config -f .gerrit-stack --get gerrit-stack.<key>`); otherwise the default. Full table
+in the plugin README.
 
 | Key | Used here for |
 |---|---|
@@ -219,6 +226,8 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
 | `default-wip` | Adds `%wip` without the `wip` answer |
 | `budget.lines`, `budget.files`, `budget.hard-lines` | `diff-budget.sh` thresholds (150 / 8 / 200) |
 | `commit-style`, `footers` | `conventional` (default) or `gerrit`; required trailers such as `Release-Notes` |
+| `commit-lint` | `auto` (default): when the repo has a commitlint config and the `commitlint` command exists, **that config is the commit convention** — it is checked after every commit and before a push to `refs/for`. `off` disables the check |
+| `comment-style` | `conventional` or `none` (default); used by the `gerrit-review` skill |
 | `verify-cmd` | Per-step and per-commit verification command |
 | `allow-direct-push` | Leave `false`; the guard denies `refs/heads` pushes |
 

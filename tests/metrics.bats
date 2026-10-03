@@ -154,3 +154,203 @@ make_chain_repo() {
   run bash "$SCRIPT" "$BATS_TEST_TMPDIR/not-a-repo"
   [ "$status" -eq 2 ]
 }
+
+# ---------------------------------------------------------------------------
+# Split quality: --concerns, tests_travel, --verify-cmd per change.
+# ---------------------------------------------------------------------------
+
+# java_repo — fresh repo $J (root commit only, real commit-msg hook) and a
+# concern map $MAP in the block form the bench cases use.
+java_repo() {
+  J="$BATS_TEST_TMPDIR/java"
+  MAP="$BATS_TEST_TMPDIR/case.yaml"
+  git init -q -b master "$J"
+  hooks=$(git -C "$J" rev-parse --git-path hooks)
+  case "$hooks" in /*) ;; *) hooks="$J/$hooks" ;; esac
+  mkdir -p "$hooks"
+  cp "$HOOK" "$hooks/commit-msg"
+  chmod +x "$hooks/commit-msg"
+  echo base > "$J/README.md"
+  git -C "$J" add -A
+  git -C "$J" commit -q -m "chore: initial import"
+  cat > "$MAP" <<'YAML'
+context:
+  scaffold_script: fixture.sh
+kind: implement
+concerns:
+  # comment inside the list
+  - name: setting
+    paths:
+      - '/DemoPluginConfig(Test|IT)?\.java$'
+      - 'Documentation/config\.md$'
+  - name: rest
+    paths: ['/[A-Za-z]*Maint[a-z]*(Action|View)(Test)?\.java$']
+  - name: ssh
+    paths:
+      - "/[A-Za-z]*Command(Test)?\\.java$"
+
+nudges:
+  stage1: "not a concern"
+YAML
+}
+
+# jcommit <subject> <path>... — touch every path (append a line) and commit.
+jcommit() {
+  local subject=$1 f
+  shift
+  for f in "$@"; do
+    mkdir -p "$J/$(dirname "$f")"
+    echo "$subject" >> "$J/$f"
+  done
+  git -C "$J" add -A
+  git -C "$J" commit -q -m "$subject"
+}
+
+M=src/main/java/demo
+T=src/test/java/demo
+
+@test "--concerns: pure chain, every concern in one change, tests travel" {
+  java_repo
+  jcommit "feat: add setting" "$M/DemoPluginConfig.java" "$T/DemoPluginConfigTest.java" src/main/resources/Documentation/config.md
+  jcommit "feat: add rest view" "$M/GetMaintenanceView.java" "$T/GetMaintenanceViewTest.java" "$M/Module.java"
+  jcommit "feat: add ssh command" "$M/MaintenanceCommand.java" "$T/MaintenanceCommandTest.java"
+  jcommit "docs: readme" README.md
+  run bash "$SCRIPT" --json --concerns "$MAP" "$J"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.concerns_defined == ["setting", "rest", "ssh"] and .concerns_seen == ["setting", "rest", "ssh"]' >/dev/null
+  echo "$output" | jq -e '[.changes[].concerns] == [["setting"], ["rest"], ["ssh"], []]' >/dev/null
+  echo "$output" | jq -e '.purity_pct == 100 and .completeness_pct == 100 and .tests_travel_pct == 100' >/dev/null
+  # paths no concern claims are reported and do not count
+  echo "$output" | jq -e '.changes[1].unmapped_paths == ["src/main/java/demo/Module.java"]' >/dev/null
+  echo "$output" | jq -e '.changes[3].unmapped_paths == ["README.md"] and .changes[3].tests_travel == null' >/dev/null
+  echo "$output" | jq -e '[.changes[0:3][].tests_travel] == [true, true, true]' >/dev/null
+}
+
+@test "--concerns: a mixed-concern commit lowers purity, not completeness" {
+  java_repo
+  jcommit "feat: add setting" "$M/DemoPluginConfig.java" "$T/DemoPluginConfigTest.java"
+  jcommit "feat: rest view and ssh command" "$M/GetMaintenanceView.java" "$M/MaintenanceCommand.java" "$T/MaintenanceCommandTest.java"
+  run bash "$SCRIPT" --json --concerns "$MAP" "$J"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '[.changes[].concerns] == [["setting"], ["rest", "ssh"]]' >/dev/null
+  echo "$output" | jq -e '.purity_pct == 50 and .completeness_pct == 100' >/dev/null
+}
+
+@test "--concerns: a concern split over two commits lowers completeness, not purity" {
+  java_repo
+  jcommit "feat: add setting" "$M/DemoPluginConfig.java" "$T/DemoPluginConfigTest.java"
+  jcommit "feat: add rest view" "$M/GetMaintenanceView.java" "$T/GetMaintenanceViewTest.java"
+  jcommit "docs: document the setting" src/main/resources/Documentation/config.md
+  run bash "$SCRIPT" --json --concerns "$MAP" "$J"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '[.changes[].concerns] == [["setting"], ["rest"], ["setting"]]' >/dev/null
+  echo "$output" | jq -e '.purity_pct == 100 and .completeness_pct == 50' >/dev/null
+  echo "$output" | jq -e '.concerns_seen == ["setting", "rest"]' >/dev/null
+}
+
+@test "--concerns: only unmapped paths -> null rates; flow form parses too" {
+  java_repo
+  jcommit "docs: readme" README.md
+  run bash "$SCRIPT" --json --concerns "$MAP" "$J"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.purity_pct == null and .completeness_pct == null and .concerns_seen == []' >/dev/null
+  flow="$BATS_TEST_TMPDIR/flow.yaml"
+  cat > "$flow" <<'YAML'
+concerns:                  # contract example form
+  - {name: docs, paths: ['README', 'config\.md$']}   # regexes over changed paths
+  - {paths: ['\.java$'], name: "code"}
+kind: implement
+YAML
+  jcommit "feat: code" "$M/A.java"
+  run bash "$SCRIPT" --json --concerns "$flow" "$J"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.concerns_defined == ["docs", "code"]' >/dev/null
+  echo "$output" | jq -e '[.changes[].concerns] == [["docs"], ["code"]] and .purity_pct == 100' >/dev/null
+}
+
+@test "--concerns: reads the real bench concern map" {
+  real="$REPO_ROOT/evals/bench-unprompted/maintenance-mode/case.yaml"
+  grep -q '^concerns:' "$real" 2>/dev/null || skip "no concerns map in $real"
+  java_repo
+  jcommit "feat: setting" "$M/DemoPluginConfig.java" "$T/DemoPluginConfigTest.java" "$M/Module.java" BUILD
+  jcommit "feat: ping" "$M/PingAction.java" "$T/PingActionTest.java"
+  run bash "$SCRIPT" --json --concerns "$real" "$J"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.concerns_defined | index("setting") != null and index("ping") != null and length >= 2' >/dev/null
+  echo "$output" | jq -e '[.changes[].concerns] == [["setting"], ["ping"]]' >/dev/null
+  echo "$output" | jq -e '.changes[0].unmapped_paths == ["BUILD", "src/main/java/demo/Module.java"]' >/dev/null
+  echo "$output" | jq -e '.purity_pct == 100 and .completeness_pct == 100' >/dev/null
+}
+
+@test "tests_travel: code without a test is counted, doc-only changes are not" {
+  java_repo
+  jcommit "feat: with test" "$M/A.java" "$T/ATest.java"
+  jcommit "feat: without test" "$M/B.java"
+  jcommit "docs: only docs" docs/x.md
+  jcommit "test: only a test" "$T/BTest.java"
+  run bash "$SCRIPT" --json "$J"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '[.changes[].tests_travel] == [true, false, null, null]' >/dev/null
+  echo "$output" | jq -e '.tests_travel_pct == 50' >/dev/null
+  # without --concerns the concern fields stay null
+  echo "$output" | jq -e '.purity_pct == null and .concerns_seen == null and .changes[0].concerns == null' >/dev/null
+}
+
+@test "--verify-cmd: a commit that does not build is the only one marked" {
+  java_repo
+  jcommit "feat: fine" "$M/A.java"
+  jcommit "feat: breaks the build" broken.flag
+  git -C "$J" rm -q broken.flag
+  git -C "$J" commit -q -m "fix: repair the build"
+  before_head=$(git -C "$J" rev-parse HEAD)
+  before_index=$(git -C "$J" ls-files -s | shasum)
+  # the command leaves ignored/untracked output behind; it must not leak into the next change
+  run bash "$SCRIPT" --json --verify-cmd 'test ! -e broken.flag && test ! -e out.log && touch out.log' "$J"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '[.changes[].builds_alone] == [true, false, true]' >/dev/null
+  echo "$output" | jq -e '.builds_alone_pct == 66.7 and .verify_timeouts == 0 and .verify_error == null' >/dev/null
+  [ "$(git -C "$J" rev-parse HEAD)" = "$before_head" ]
+  [ "$(git -C "$J" ls-files -s | shasum)" = "$before_index" ]
+  [ "$(git -C "$J" status --porcelain)" = "" ]
+  [ "$(git -C "$J" symbolic-ref HEAD)" = "refs/heads/master" ]
+  [ "$(git -C "$J" worktree list | wc -l | tr -d ' ')" = "1" ]
+}
+
+@test "--verify-timeout: a hanging command fails the change (timeout(1) and built-in watchdog)" {
+  java_repo
+  jcommit "feat: slow" slow.flag
+  jcommit "feat: fast again" "$M/A.java"
+  git -C "$J" rm -q slow.flag
+  git -C "$J" commit -q -m "fix: drop slow"
+  cmd='if [ -e slow.flag ]; then sleep 30; fi'
+  run bash "$SCRIPT" --json --verify-timeout 1 --verify-cmd "$cmd" "$J"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '[.changes[].builds_alone] == [false, false, true]' >/dev/null
+  echo "$output" | jq -e '.verify_timeouts == 2 and .verify_timeout == 1 and .builds_alone_pct == 33.3' >/dev/null
+  CHAIN_METRICS_NO_TIMEOUT_BIN=1 run bash "$SCRIPT" --json --verify-timeout 1 --verify-cmd "$cmd" "$J"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '[.changes[].builds_alone] == [false, false, true] and .verify_timeouts == 2' >/dev/null
+  CHAIN_METRICS_NO_TIMEOUT_BIN=1 run bash "$SCRIPT" --json --verify-cmd 'test ! -e slow.flag' "$J"
+  echo "$output" | jq -e '[.changes[].builds_alone] == [false, false, true] and .verify_timeouts == 0' >/dev/null
+  [ "$(git -C "$J" worktree list | wc -l | tr -d ' ')" = "1" ]
+}
+
+@test "human table shows the split-quality columns" {
+  java_repo
+  jcommit "feat: add setting" "$M/DemoPluginConfig.java" "$T/DemoPluginConfigTest.java"
+  jcommit "feat: rest view" "$M/GetMaintenanceView.java"
+  run bash "$SCRIPT" --concerns "$MAP" --verify-cmd true "$J"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"build tests  concerns  subject"* ]]
+  [[ "$output" == *"yes    setting  feat: add setting"* ]]
+  [[ "$output" == *"no     rest  feat: rest view"* ]]
+  [[ "$output" == *"tests travel 50%  |  purity 100%  |  completeness 100%  |  concerns seen 2/3  |  unmapped paths 0"* ]]
+  [[ "$output" == *"builds alone: 100%"* ]]
+}
+
+@test "--concerns / --verify-timeout usage errors exit 2" {
+  run bash "$SCRIPT" --concerns "$BATS_TEST_TMPDIR/nope.yaml" "$WORK"
+  [ "$status" -eq 2 ]
+  run bash "$SCRIPT" --verify-timeout soon --verify-cmd true "$WORK"
+  [ "$status" -eq 2 ]
+}

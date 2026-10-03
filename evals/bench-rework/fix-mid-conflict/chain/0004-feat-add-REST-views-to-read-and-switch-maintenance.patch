@@ -1,0 +1,237 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Bench Fixture <bench@example.com>
+Date: Sat, 3 Oct 2026 19:26:27 +0200
+Subject: [PATCH] feat: add REST views to read and switch maintenance
+
+GET /projects/{name}/demo-plugin~maintenance reports the state to
+anyone who can see the project. PUT switches maintenance on and DELETE
+switches it off; both require the demo-plugin-maintain capability.
+
+Ping does not look at the state yet.
+---
+ .../example/demoplugin/MaintenanceViews.java  | 99 +++++++++++++++++++
+ .../java/com/example/demoplugin/Module.java   |  3 +
+ src/main/resources/Documentation/about.md     |  8 ++
+ .../demoplugin/MaintenanceViewsTest.java      | 74 ++++++++++++++
+ 4 files changed, 184 insertions(+)
+ create mode 100644 src/main/java/com/example/demoplugin/MaintenanceViews.java
+ create mode 100644 src/test/java/com/example/demoplugin/MaintenanceViewsTest.java
+
+diff --git a/src/main/java/com/example/demoplugin/MaintenanceViews.java b/src/main/java/com/example/demoplugin/MaintenanceViews.java
+new file mode 100644
+index 0000000..9b292c6
+--- /dev/null
++++ b/src/main/java/com/example/demoplugin/MaintenanceViews.java
+@@ -0,0 +1,99 @@
++// Copyright (C) 2026 gerrit-stack demo
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package com.example.demoplugin;
++
++import com.google.gerrit.extensions.annotations.RequiresCapability;
++import com.google.gerrit.extensions.restapi.Response;
++import com.google.gerrit.extensions.restapi.RestModifyView;
++import com.google.gerrit.extensions.restapi.RestReadView;
++import com.google.gerrit.server.project.ProjectResource;
++import com.google.inject.Inject;
++import com.google.inject.Singleton;
++
++/**
++ * REST views behind {@code /projects/{name}/demo-plugin~maintenance}.
++ *
++ * <p>{@code GET} is open to everyone who can see the project; {@code PUT} (on) and {@code DELETE}
++ * (off) need the global capability {@code demo-plugin-maintain}.
++ */
++public final class MaintenanceViews {
++  /** JSON body of the maintenance responses. */
++  public static class MaintenanceInfo {
++    public String project;
++    public boolean maintenance;
++
++    MaintenanceInfo(String project, boolean maintenance) {
++      this.project = project;
++      this.maintenance = maintenance;
++    }
++  }
++
++  /** Empty request body of {@code PUT} and {@code DELETE}. */
++  public static class Input {}
++
++  /** {@code GET /projects/{name}/demo-plugin~maintenance}. */
++  @Singleton
++  public static class Get implements RestReadView<ProjectResource> {
++    private final MaintenanceState state;
++
++    @Inject
++    Get(MaintenanceState state) {
++      this.state = state;
++    }
++
++    @Override
++    public Response<MaintenanceInfo> apply(ProjectResource rsrc) {
++      return Response.ok(new MaintenanceInfo(rsrc.getName(), state.isOn(rsrc.getNameKey())));
++    }
++  }
++
++  /** {@code PUT /projects/{name}/demo-plugin~maintenance} switches maintenance on. */
++  @RequiresCapability(MaintainCapability.ID)
++  @Singleton
++  public static class Put implements RestModifyView<ProjectResource, Input> {
++    private final MaintenanceState state;
++
++    @Inject
++    Put(MaintenanceState state) {
++      this.state = state;
++    }
++
++    @Override
++    public Response<MaintenanceInfo> apply(ProjectResource rsrc, Input input) {
++      state.set(rsrc.getNameKey(), true);
++      return Response.ok(new MaintenanceInfo(rsrc.getName(), true));
++    }
++  }
++
++  /** {@code DELETE /projects/{name}/demo-plugin~maintenance} switches maintenance off. */
++  @RequiresCapability(MaintainCapability.ID)
++  @Singleton
++  public static class Delete implements RestModifyView<ProjectResource, Input> {
++    private final MaintenanceState state;
++
++    @Inject
++    Delete(MaintenanceState state) {
++      this.state = state;
++    }
++
++    @Override
++    public Response<MaintenanceInfo> apply(ProjectResource rsrc, Input input) {
++      state.set(rsrc.getNameKey(), false);
++      return Response.ok(new MaintenanceInfo(rsrc.getName(), false));
++    }
++  }
++
++  private MaintenanceViews() {}
++}
+diff --git a/src/main/java/com/example/demoplugin/Module.java b/src/main/java/com/example/demoplugin/Module.java
+index 346c887..52720bf 100644
+--- a/src/main/java/com/example/demoplugin/Module.java
++++ b/src/main/java/com/example/demoplugin/Module.java
+@@ -42,6 +42,9 @@ public class Module extends AbstractModule {
+           @Override
+           protected void configure() {
+             get(PROJECT_KIND, "ping").to(PingAction.class);
++            get(PROJECT_KIND, "maintenance").to(MaintenanceViews.Get.class);
++            put(PROJECT_KIND, "maintenance").to(MaintenanceViews.Put.class);
++            delete(PROJECT_KIND, "maintenance").to(MaintenanceViews.Delete.class);
+           }
+         });
+   }
+diff --git a/src/main/resources/Documentation/about.md b/src/main/resources/Documentation/about.md
+index da7cbba..df9d892 100644
+--- a/src/main/resources/Documentation/about.md
++++ b/src/main/resources/Documentation/about.md
+@@ -2,6 +2,14 @@ Minimal Gerrit plugin used by the gerrit-stack demo. It exposes one REST view,
+ `GET /projects/{name}/demo-plugin~ping`, and one SSH command,
+ `demo-plugin ping <project>`, both answering with the configured ping message.
+ 
++Maintenance
++-----------
++
++`GET /projects/{name}/demo-plugin~maintenance` answers
++`{"project":"<name>","maintenance":false}`. `PUT` switches maintenance on for
++that project and `DELETE` switches it off; both need the capability below.
++The state is kept in memory and ends with a Gerrit restart.
++
+ Access
+ ------
+ 
+diff --git a/src/test/java/com/example/demoplugin/MaintenanceViewsTest.java b/src/test/java/com/example/demoplugin/MaintenanceViewsTest.java
+new file mode 100644
+index 0000000..70d944d
+--- /dev/null
++++ b/src/test/java/com/example/demoplugin/MaintenanceViewsTest.java
+@@ -0,0 +1,74 @@
++// Copyright (C) 2026 gerrit-stack demo
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package com.example.demoplugin;
++
++import static com.google.common.truth.Truth.assertThat;
++import static org.mockito.Mockito.when;
++
++import com.google.gerrit.entities.Project;
++import com.google.gerrit.extensions.annotations.RequiresCapability;
++import com.google.gerrit.extensions.restapi.Response;
++import com.google.gerrit.server.project.ProjectResource;
++import org.junit.Before;
++import org.junit.Test;
++import org.junit.runner.RunWith;
++import org.mockito.Mock;
++import org.mockito.junit.MockitoJUnitRunner;
++
++@RunWith(MockitoJUnitRunner.class)
++public class MaintenanceViewsTest {
++  private static final Project.NameKey PROJECT = Project.nameKey("team/some-project");
++
++  @Mock private ProjectResource project;
++
++  private final MaintenanceState state = new MaintenanceState();
++
++  @Before
++  public void setUp() {
++    when(project.getName()).thenReturn(PROJECT.get());
++    when(project.getNameKey()).thenReturn(PROJECT);
++  }
++
++  @Test
++  public void getReportsTheCurrentState() {
++    Response<MaintenanceViews.MaintenanceInfo> response =
++        new MaintenanceViews.Get(state).apply(project);
++
++    assertThat(response.statusCode()).isEqualTo(200);
++    assertThat(response.value().project).isEqualTo(PROJECT.get());
++    assertThat(response.value().maintenance).isFalse();
++  }
++
++  @Test
++  public void putSwitchesMaintenanceOnAndDeleteOff() {
++    MaintenanceViews.Input input = new MaintenanceViews.Input();
++
++    assertThat(new MaintenanceViews.Put(state).apply(project, input).value().maintenance).isTrue();
++    assertThat(state.isOn(PROJECT)).isTrue();
++
++    assertThat(new MaintenanceViews.Delete(state).apply(project, input).value().maintenance)
++        .isFalse();
++    assertThat(state.isOn(PROJECT)).isFalse();
++  }
++
++  @Test
++  public void onlyTheWritingViewsRequireTheCapability() {
++    assertThat(MaintenanceViews.Get.class.getAnnotation(RequiresCapability.class)).isNull();
++    assertThat(MaintenanceViews.Put.class.getAnnotation(RequiresCapability.class).value())
++        .isEqualTo(MaintainCapability.ID);
++    assertThat(MaintenanceViews.Delete.class.getAnnotation(RequiresCapability.class).value())
++        .isEqualTo(MaintainCapability.ID);
++  }
++}

@@ -23,6 +23,7 @@ assert_gs_unset() {
 @test "chain.sh sources gerrit-detect.sh and exposes the public API" {
   local f
   for f in gs_detect gs_config gs_trace gs_state_dir gs_chain_commits \
+    gs_commitlint_config gs_commitlint_cmd gs_commitlint_active gs_commitlint_check \
     gs_change_ids_of gs_subject_of gs_is_fixup gs_diffstat_of \
     gs_snapshot_write gs_snapshot_diff gs_session_mark gs_session_marked \
     gs_parse_git_cmd gs_git_args_have; do
@@ -357,6 +358,133 @@ assert_gs_unset() {
   assert_eq 42 "$(gs_config budget.lines)"   # reads the detected repo, not cwd
 }
 
+@test "gs_config: per-clone git config > committed .gerrit-stack > default" {
+  local repo
+  repo=$(make_gerrit_repo)
+  cd "$repo"
+  assert_eq none "$(gs_config comment-style none)" "default"
+  team_config "$repo" comment-style conventional
+  team_config "$repo" budget.lines 99
+  assert_eq conventional "$(gs_config comment-style none)" "team file"
+  assert_eq 99 "$(gs_config budget.lines 150)" "team file, dotted key"
+  git config gerrit-stack.comment-style none
+  git config gerrit-stack.budget.lines 42
+  assert_eq none "$(gs_config comment-style conventional)" "clone wins"
+  assert_eq 42 "$(gs_config budget.lines 150)" "clone wins, dotted key"
+  git config --unset gerrit-stack.comment-style
+  gs_detect
+  cd "$BATS_TEST_TMPDIR"
+  assert_eq conventional "$(gs_config comment-style none)" "detected repo, not cwd"
+}
+
+@test "gs_config: unknown keys and foreign sections in .gerrit-stack are ignored" {
+  local repo
+  repo=$(make_gerrit_repo)
+  cd "$repo"
+  team_config "$repo" made-up-key yes
+  git config -f "$repo/.gerrit-stack" other.comment-style conventional
+  assert_eq "" "$(gs_config made-up-key)"
+  assert_eq fallback "$(gs_config made-up-key fallback)"
+  assert_eq none "$(gs_config comment-style none)"
+  git config gerrit-stack.made-up-key local   # per-clone config is not whitelisted
+  assert_eq local "$(gs_config made-up-key)"
+}
+
+@test "gs_config: no team file is read outside a work tree; a broken file is ignored" {
+  local repo
+  cd "$BATS_TEST_TMPDIR"
+  printf '[gerrit-stack]\n\tcomment-style = conventional\n' > "$BATS_TEST_TMPDIR/.gerrit-stack"
+  assert_eq none "$(gs_config comment-style none)"
+  repo=$(make_gerrit_repo)
+  cd "$repo"
+  printf '[gerrit-stack\ncomment-style = = [\n' > "$repo/.gerrit-stack"
+  assert_eq none "$(gs_config comment-style none)"
+}
+
+@test "gs_detect: enabled / branch / host come from .gerrit-stack, per-clone config wins" {
+  local repo
+  repo=$(make_gerrit_repo)
+  cd "$repo"
+  team_config "$repo" host https://gerrit.example.com/
+  team_config "$repo" branch stable
+  gs_detect
+  assert_eq https://gerrit.example.com "$GS_HOST" GS_HOST
+  assert_eq stable "$GS_BRANCH" GS_BRANCH
+  git config gerrit-stack.branch main
+  gs_detect
+  assert_eq main "$GS_BRANCH" "clone wins"
+  team_config "$repo" enabled false
+  if gs_detect; then fail "detected although the team file disables the plugin"; fi
+  git config gerrit-stack.enabled true
+  gs_detect || fail "per-clone enabled=true must win"
+}
+
+# ---------------------------------------------------------------- commitlint helpers
+
+@test "gs_commitlint_config: every documented config location, package.json key only at top level" {
+  local repo f
+  repo=$(make_gerrit_repo)
+  cd "$repo"
+  if gs_commitlint_config; then fail "config found in a bare repo"; fi
+  for f in commitlint.config.js commitlint.config.cjs commitlint.config.mjs commitlint.config.ts \
+    .commitlintrc .commitlintrc.json .commitlintrc.yaml .commitlintrc.yml \
+    .commitlintrc.js .commitlintrc.cjs .commitlintrc.mjs; do
+    : > "$repo/$f"
+    gs_commitlint_config || fail "$f not recognised"
+    rm -f "$repo/$f"
+  done
+  printf '{"devDependencies":{"commitlint":"^19"}}\n' > "$repo/package.json"
+  if gs_commitlint_config; then fail "a dependency named commitlint is not a config"; fi
+  printf '{"name":"x","commitlint":{"extends":["@commitlint/config-conventional"]}}\n' > "$repo/package.json"
+  gs_commitlint_config || fail "package.json commitlint key not recognised"
+}
+
+@test "gs_commitlint_cmd / gs_commitlint_active: no config, config + tool, tool missing, node_modules, off" {
+  local repo bin
+  repo=$(make_gerrit_repo)
+  cd "$repo"
+  bin=$(stub_commitlint); PATH="$bin:$PATH"
+  assert_eq "$bin/commitlint" "$(gs_commitlint_cmd)" "PATH tool"
+  if gs_commitlint_active; then fail "active without a config"; fi
+  add_commitlint_config "$repo"
+  gs_commitlint_active || fail "inactive with config + tool"
+  team_config "$repo" commit-lint off
+  if gs_commitlint_active; then fail "active although commit-lint=off"; fi
+  git config gerrit-stack.commit-lint auto
+  gs_commitlint_active || fail "per-clone auto must win over the team file"
+  git config --unset gerrit-stack.commit-lint
+  team_config "$repo" commit-lint auto
+
+  rm -f "$bin/commitlint"
+  PATH=$(path_without commitlint)
+  if gs_commitlint_cmd >/dev/null; then fail "tool resolved on a PATH without commitlint"; fi
+  if gs_commitlint_active; then fail "active without the tool"; fi
+  gs_commitlint_check HEAD || fail "check must pass (fail-open) without the tool"
+
+  mkdir -p "$repo/node_modules/.bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/node_modules/.bin/commitlint"
+  chmod +x "$repo/node_modules/.bin/commitlint"
+  assert_eq "$(physical_path "$repo")/node_modules/.bin/commitlint" "$(gs_commitlint_cmd)" "node_modules tool"
+  gs_commitlint_active || fail "inactive with node_modules/.bin/commitlint"
+}
+
+@test "gs_commitlint_check: rule lines on a bad subject, pass on a good one, fail-open on a crashing tool" {
+  local repo bin
+  repo=$(make_gerrit_repo)
+  cd "$repo"
+  bin=$(stub_commitlint); PATH="$bin:$PATH"
+  add_commitlint_config "$repo"
+  commit_file "$repo" a.txt a "feat: good one" >/dev/null
+  gs_commitlint_check HEAD || fail "good subject rejected"
+  assert_eq "" "$_gs_lint_out"
+  commit_file "$repo" b.txt b "Added rate limit" >/dev/null
+  if gs_commitlint_check HEAD; then fail "bad subject accepted"; fi
+  assert_eq "subject may not be empty [subject-empty]" "$(printf '%s\n' "$_gs_lint_out" | head -n 1)"
+  assert_eq 2 "$(count_lines "$_gs_lint_out")" "rule lines only"
+  printf '#!/usr/bin/env bash\necho "ReferenceError: x is not defined" >&2\nexit 1\n' > "$bin/commitlint"
+  gs_commitlint_check HEAD || fail "a crashing commitlint must not count as a lint failure"
+}
+
 @test "gs_trace: no-op without GERRIT_STACK_TRACE, TAB-separated append with it" {
   local trace="$BATS_TEST_TMPDIR/trace"
   gs_trace git-guard push ask
@@ -654,6 +782,11 @@ gs_parse_git_cmd "" >/dev/null
 if gs_git_args_have "-a" "-n"; then :; fi
 gs_config nope >/dev/null
 gs_config nope default >/dev/null
+gs_config comment-style none >/dev/null
+if gs_commitlint_config; then :; fi
+if gs_commitlint_cmd >/dev/null; then :; fi
+if gs_commitlint_active; then :; fi
+if gs_commitlint_check HEAD; then :; fi
 gs_state_dir >/dev/null
 gs_trace a b c
 if gs_detect /nonexistent; then :; fi
@@ -696,4 +829,17 @@ EOF
   run bash -c "source '$REPO_ROOT/scripts/lib/gerrit-detect.sh'; cd '$repo' && gs_detect && printf '%s|%s|%s|%s' \"\$GS_REMOTE\" \"\$GS_HOST\" \"\$GS_PROJECT\" \"\$GS_BRANCH\""
   [ "$status" -eq 0 ]
   [ "$output" = "origin|http://localhost:8080|demo-plugin|master" ]
+}
+
+@test "gs_config: verify-cmd and allow-direct-push are never read from the committed .gerrit-stack" {
+  make_gerrit_repo
+  printf '[gerrit-stack]\n\tverify-cmd = touch /tmp/pwned\n\tallow-direct-push = true\n\tcomment-style = conventional\n' > .gerrit-stack
+  run bash -c "source '$BATS_TEST_DIRNAME/../scripts/lib/gerrit-detect.sh'; gs_config verify-cmd none; gs_config allow-direct-push false; gs_config comment-style none"
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "none" ]
+  [ "${lines[1]}" = "false" ]
+  [ "${lines[2]}" = "conventional" ]
+  git config gerrit-stack.verify-cmd 'bash tools/quick-check.sh'
+  run bash -c "source '$BATS_TEST_DIRNAME/../scripts/lib/gerrit-detect.sh'; gs_config verify-cmd none"
+  [ "${lines[0]}" = "bash tools/quick-check.sh" ]
 }

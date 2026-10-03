@@ -1,39 +1,43 @@
 #!/usr/bin/env python3
-"""collect.py — merge benchmark results into docs/benchmark.md (WP A11).
+"""collect.py — merge benchmark results into docs/benchmark.md.
 
 Usage:
-    python3 evals/metrics/collect.py [--results DIR ...] [--out docs/benchmark.md]
-                                     [--json PATH]
+    python3 evals/metrics/collect.py [--results DIR ...] [--include-errors]
+                                     [--out docs/benchmark.md] [--json PATH]
 
 Reads any number of result directories (default: every ``evals/results/*``
 that holds an ``aggregate-result.json`` or a ``runs/`` tree), each laid out as
 
-    <results>/aggregate-result.json                       official eval schema
-    <results>/runs/<case>/<arm>/<n>/trace.jsonl           claude stream-json
-    <results>/runs/<case>/<arm>/<n>/hook-trace.log        GERRIT_STACK_TRACE
-    <results>/runs/<case>/<arm>/<n>/chain-metrics.json    chain-metrics.sh --json
+    <results>/aggregate-result.json                    official eval schema
+    <results>/runs/<case>[@<variant>]/<arm>/<n>/       one run:
+        trace.jsonl            claude stream-json
+        hook-trace.log         GERRIT_STACK_TRACE
+        chain-metrics.json     chain-metrics.sh --json
+        isolation.json         sandbox startup check + fingerprint
+        conventions.json       commit subjects / comment labels
+        rework-metrics.json    kind rework
+        review-metrics.json    kind review
 
-and computes per run: turns, tool_calls, bash_calls, git_commit_calls,
-git_push_calls, cost_usd, wall_s, asks, denies, self_corrections (+ score from
-the aggregate), merged with the chain metrics. Aggregates per case x arm
-(mean / median), per arm overall, deltas ``with - mcp-only`` and
-``with - without``, target pass/fail, and renders ``docs/benchmark.md``.
-With no runs at all it renders the "no runs yet" placeholder.
+One run is one row: ``suite`` (basename of the eval dir, e.g.
+``bench-unprompted``), ``kind`` (implement | rework | review), ``case``,
+``variant`` (natural | nudged), ``arm``, ``n``, the process metrics from the
+trace, the chain metrics, and the per-run JSON files (the run record of the
+aggregate fills in whatever file is missing: ``isolation``, ``capability``,
+``conventions``, ``rework``, ``reviewMetrics``, ``guardrails``, ``model``).
 
-Rework pipelines (W3, see the rework benchmark plan): an aggregate entry whose
-name is ``<base>@<scenario>-<variant>`` (or that carries ``baseCase`` /
-``scenario`` / ``variant``) is a two-stage pipeline. Its run dir holds the
-stage-1 files at top level plus ``stage2/`` (same file set),
-``rework-metrics.json``, ``review.json``; its run record adds ``stage2``,
-``review``, ``rework``, ``guardrails`` and ``pipelineCostUsd``. Such a run
-yields three rows: stage 1, stage 2 and ``pipeline`` (rework metrics +
-guardrails + summed cost). Stage-1 rows feed the classic tables; the pipeline
-rows feed the ``## Rework``, ``## Guardrails`` and ``## Cost per stage``
-sections, which are rendered only when at least one pipeline is present, so a
-legacy results directory renders exactly as before.
+Sections of the report: Arms, Reading the numbers, Sources, then per implement
+suite Overall / Targets / Per case, ``Split quality``, ``Rework (seeded
+chain)``, ``Reviewer``, ``Conventions``, ``Guardrails``, ``Isolation``,
+``Reproduce``. A section is rendered only when a run feeds it. ``--json``
+mirrors the sections.
 
-Arms: ``with`` (gerrit-mcp + gerrit-stack), ``without`` (no plugins),
-``mcp-only`` (gerrit-mcp only). Stdlib only; tolerant of missing fields.
+Errored runs (run record ``error``, or ``isolation.ok == false``) stay out of
+the metric means unless ``--include-errors`` is given, but are always counted
+in Isolation and in the "Runs / errors" line of every section.
+
+Arms: ``with`` (gerrit-mcp + gerrit-stack + team config), ``mcp-only``
+(gerrit-mcp only), ``without`` (no plugins). Stdlib only; tolerant of missing
+fields.
 """
 from __future__ import annotations
 
@@ -47,12 +51,16 @@ import statistics
 import sys
 
 ARMS = ["with", "mcp-only", "without"]
-ARM_LABEL = {
-    "with": "C: with (gerrit-mcp + gerrit-stack)",
-    "mcp-only": "B: mcp-only (gerrit-mcp only)",
-    "without": "A: without (no plugins)",
-}
 ARM_SHORT = {"with": "C with", "mcp-only": "B mcp-only", "without": "A without"}
+KINDS = ["implement", "rework", "review"]
+SUITE_ORDER = ["bench-unprompted", "bench-split", "bench-rework", "bench-review"]
+SUITE_LABEL = {
+    "bench-unprompted": "S1 unprompted: does the agent split on its own",
+    "bench-split": "S2 prompted split: the prompt asks for one concern per change",
+    "bench-rework": "S3 rework on a seeded chain",
+    "bench-review": "S4 reviewer",
+}
+KIND_SUITE = {"rework": "bench-rework", "review": "bench-review", "implement": "bench"}
 
 # (key, label, unit, lower-is-better?) — order = table order
 PROCESS_METRICS = [
@@ -85,37 +93,59 @@ CHAIN_METRICS = [
 ]
 ALL_METRICS = PROCESS_METRICS + CHAIN_METRICS
 METRIC_KEYS = [m[0] for m in ALL_METRICS]
+# chain-metrics keys read into a row beyond the classic table
+EXTRA_CHAIN_KEYS = ["purity_pct", "completeness_pct", "tests_travel_pct"]
 
-# Rework metrics (rework-metrics.json, implementation contract 2026-09-30).
-# (key, label, kind) — kind "bool" renders as a rate over runs, "count" as mean / median.
+# Section specs: (key, label, kind[, (numerator key, denominator key)]).
+# kind: bool -> rate over runs · count -> mean / median · pct / usd / s -> mean /
+# median with a unit · ratio -> pooled numerator / denominator.
+SPLIT_METRICS = [
+    ("chain_length", "chain length", "count"),
+    ("purity_pct", "purity (changes with exactly one concern)", "pct"),
+    ("completeness_pct", "completeness (concerns living in one change)", "pct"),
+    ("builds_alone_pct", "builds alone", "pct"),
+    ("tests_travel_pct", "tests travel with the code", "pct"),
+    ("within_budget_pct", "within budget", "pct"),
+    ("one_change_id_pct", "exactly one Change-Id", "pct"),
+]
+SPLIT_SIGNAL_KEYS = ["purity_pct", "completeness_pct", "builds_alone_pct", "tests_travel_pct"]
+SESSION_METRICS = [
+    ("cost_usd", "cost", "usd"),
+    ("turns", "turns", "count"),
+    ("wall_s", "wall time", "s"),
+]
 REWORK_METRICS = [
-    ("stage1_push_failed", "stage-1 push failed (no stage 2)", "bool"),
-    ("stage1_runner_committed", "work left uncommitted after stage 1 (runner committed)", "bool"),
-    ("stage2_runner_committed", "work left uncommitted after stage 2 (runner committed)", "bool"),
-    ("stage1_change_count", "changes after stage 1", "count"),
-    ("stage2_change_count", "changes after stage 2", "count"),
-    ("fixup_on_target", "fix landed on the commented change (new patchset)", "bool"),
+    ("seeded_changes", "seeded changes", "count"),
+    ("final_changes", "changes after the rework", "count"),
     ("change_id_set_preserved", "Change-Id set preserved", "bool"),
+    ("order_preserved", "chain order preserved", "bool"),
+    ("fix_on_target", "fix landed on the commented change", "bool"),
+    ("untouched", "untouched changes patch-identical", "ratio", ("untouched_identical", "untouched_total")),
+    ("may_change_changed", "changes touched by conflict resolution (allowed)", "count"),
     ("new_changes_opened", "new changes opened", "count"),
-    ("descendants_total", "changes above the target", "count"),
-    ("descendants_rebased", "changes above the target rebased (no interdiff)", "count"),
-    ("changes_needing_reread", "changes needing re-read (non-empty interdiff)", "count"),
-    ("interdiff_lines", "interdiff lines on the target", "count"),
-    ("landable_below", "landable below the target (changes)", "count"),
-    ("landable_below_lines", "landable below the target (lines)", "count"),
-    ("split_applicable", "split needed (chain not already split)", "bool"),
-    ("split_count", "split: extra changes (stage 2 − stage 1)", "count"),
-    ("split_equivalent", "split: tip tree identical", "bool"),
+    ("fixups_left", "fixup commits left in the chain", "count"),
+    ("builds_alone_pct", "every commit builds", "pct"),
+    ("conflict_markers_left", "conflict markers left in the tip tree", "count"),
+    ("interdiff_lines", "interdiff lines", "count"),
     ("reply_drafted", "reply drafted", "bool"),
-    ("reply_conventional", "reply in Conventional Comments form", "bool"),
+    ("reply_labelled", "reply labelled (Conventional Comments)", "bool"),
     ("reply_posted", "reply posted before approval (must be 0)", "bool"),
     ("vote_posted", "vote posted before approval (must be 0)", "bool"),
+    ("runner_committed", "work left uncommitted (runner committed)", "bool"),
+] + SESSION_METRICS
+REVIEW_METRICS = [
+    ("planted", "planted defects found", "ratio", ("planted_found", "planted_total")),
+    ("labelled", "comments labelled", "ratio", ("comments_labelled", "comments_total")),
+    ("blocking_marked_correct", "blocking defects marked blocking", "count"),
+    ("comments_total", "comments drafted", "count"),
+    ("drafts_created", "Gerrit drafts created", "count"),
+    ("published_comments", "comments published (must be 0)", "count"),
+    ("votes_posted", "votes posted (must be 0)", "count"),
+] + SESSION_METRICS
+CONVENTION_METRICS = [
+    ("subjects", "conforming commit subjects", "ratio", ("commit_subjects_conforming", "commit_subjects_total")),
+    ("comments", "labelled comments", "ratio", ("comments_labelled", "comments_total")),
 ]
-REWORK_KEYS = [m[0] for m in REWORK_METRICS]
-REWORK_KIND = {m[0]: m[2] for m in REWORK_METRICS}
-
-# Guardrail counters per stage (run record ``guardrails.stage1|stage2``; bad
-# outcomes live under ``bad_outcomes``). (key, label, kind)
 GUARDRAIL_METRICS = [
     ("asks", "human confirmations (ask)", "count"),
     ("denies", "hook denials", "count"),
@@ -130,12 +160,10 @@ GUARDRAIL_METRICS = [
     ("refs_heads_moved", "bad: local remote master moved", "bool"),
     ("gerrit_master_moved", "bad: Gerrit master moved", "bool"),
 ]
-GUARDRAIL_KEYS = [m[0] for m in GUARDRAIL_METRICS]
-GUARDRAIL_KIND = {m[0]: m[2] for m in GUARDRAIL_METRICS}
-BAD_OUTCOME_KEYS = GUARDRAIL_KEYS[3:]
-STAGES = [1, 2, "pipeline"]
-STAGE_LABEL = {1: "stage 1 (implement)", 2: "stage 2 (rework)", "pipeline": "pipeline (1 + 2)"}
-PIPELINE_KEY_RE = re.compile(r"^(?P<base>[^@]+)@(?P<scenario>[^@-]+)-(?P<variant>[^@]+)$")
+GUARDRAIL_BASE_KEYS = ["asks", "denies", "self_corrections"]
+GUARDRAIL_KNOWN = {m[0] for m in GUARDRAIL_METRICS}
+ISOLATION_GROUPS = ["plugins", "mcp_servers", "skills", "agents"]
+CAPABILITY_KEYS = ["mcp_calls", "mcp_denied", "skill_calls", "hook_lines"]
 
 # Targets (execution plan, "Proposal: measuring the efficiency of gerrit-stack")
 TARGETS = [
@@ -339,27 +367,108 @@ def parse_hook_trace(path):
 
 
 # ----------------------------------------------------------------- loading ----
-def load_run(run_dir, case, arm, n, agg_entry=None):
-    """One run's metric row from its directory (any file may be missing)."""
+def _count_of(value):
+    """Lists count their items; bools/numbers pass through _num; else None."""
+    if isinstance(value, (list, tuple, dict)):
+        return float(len(value))
+    return _num(value)
+
+
+def _dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _spec_keys(spec):
+    keys = []
+    for item in spec:
+        keys.extend(item[3] if item[2] == "ratio" else [item[0]])
+    return keys
+
+
+def split_case_name(name):
+    """``<case>@<variant>`` -> (case, variant); ``<case>`` -> (case, None)."""
+    base, _sep, variant = (name or "").partition("@")
+    return base, (variant or None)
+
+
+def _basename(path):
+    return os.path.basename(os.path.normpath(path)) if isinstance(path, str) and path else None
+
+
+def _file_or_record(run_dir, filename, entry, key):
+    """A per-run JSON file wins; the run record's block fills in when it is missing."""
+    data = _read_json(os.path.join(run_dir, filename)) if run_dir else None
+    if isinstance(data, dict):
+        return data
+    return entry.get(key) if isinstance(entry.get(key), dict) else None
+
+
+def _guardrail_counters(block, row, runner_committed):
+    """Flat guardrail counters of one run: the runner's block wins, the trace fills gaps.
+
+    Unknown counters under ``bad_outcomes`` are kept, so a new bad outcome the
+    runner starts recording shows up without a collector change.
+    """
+    block = _dict(block)
+    bad = _dict(block.get("bad_outcomes"))
+    trace_bad = row.get("bad_outcomes") or {}
+    out = {}
+    for key in GUARDRAIL_BASE_KEYS:
+        val = _num(block.get(key))
+        out[key] = val if val is not None else row.get(key)
+    keys = [m[0] for m in GUARDRAIL_METRICS if m[0] not in GUARDRAIL_BASE_KEYS]
+    keys += sorted(k for k in bad if k not in GUARDRAIL_KNOWN)
+    for key in keys:
+        val = _count_of(bad.get(key))
+        if val is None:
+            val = _count_of(block.get(key))
+        if val is None and key in trace_bad:
+            val = float(trace_bad[key])
+        if val is None and key == "left_uncommitted" and runner_committed is not None:
+            val = _num(runner_committed)
+        out[key] = val
+    return out
+
+
+def load_run(run_dir, name, arm, n, agg_entry=None, case_meta=None):
+    """One run's row from its directory and run record (any of them may be missing)."""
+    entry = _dict(agg_entry)
+    meta = _dict(case_meta)
     trace = parse_trace(os.path.join(run_dir, "trace.jsonl")) if run_dir else parse_trace("")
     hook = parse_hook_trace(os.path.join(run_dir, "hook-trace.log")) if run_dir else parse_hook_trace("")
-    chain = _read_json(os.path.join(run_dir, "chain-metrics.json")) if run_dir else None
-    if not isinstance(chain, dict):
-        chain = {}
-    agg_entry = agg_entry if isinstance(agg_entry, dict) else {}
+    chain = _dict(_read_json(os.path.join(run_dir, "chain-metrics.json")) if run_dir else None)
+    rework = _file_or_record(run_dir, "rework-metrics.json", entry, "rework")
+    review = _file_or_record(run_dir, "review-metrics.json", entry, "reviewMetrics")
+    isolation = _file_or_record(run_dir, "isolation.json", entry, "isolation")
+    conventions = _file_or_record(run_dir, "conventions.json", entry, "conventions")
+    capability = entry.get("capability") if isinstance(entry.get("capability"), dict) else None
+    if capability is None and isinstance(_dict(isolation).get("capability"), dict):
+        capability = isolation["capability"]
+    if capability is None:
+        capability = _file_or_record(run_dir, "capability.json", {}, "capability")
+    hashtags = [t for t in entry.get("hashtags") or [] if isinstance(t, str)] \
+        if isinstance(entry.get("hashtags"), list) else None
 
-    row = {"case": case, "arm": arm, "n": n, "dir": run_dir,
-           "base_case": case, "scenario": None, "variant": None, "stage": 1}
-    row["score"] = _num(agg_entry.get("score"))
-    if row["score"] is None and agg_entry.get("passed") is not None:
-        row["score"] = 1.0 if agg_entry.get("passed") else 0.0
-    row["turns"] = trace["turns"] if trace["turns"] is not None else _num(agg_entry.get("turns"))
-    row["tool_calls"] = float(trace["tool_calls"]) if trace["present"] else None
-    row["bash_calls"] = float(trace["bash_calls"]) if trace["present"] else None
-    row["git_commit_calls"] = float(trace["git_commit_calls"]) if trace["present"] else None
-    row["git_push_calls"] = float(trace["git_push_calls"]) if trace["present"] else None
-    row["cost_usd"] = trace["cost_usd"] if trace["cost_usd"] is not None else _num(agg_entry.get("costUsd"))
-    row["wall_s"] = trace["wall_s"] if trace["wall_s"] is not None else _num(agg_entry.get("durationSeconds"))
+    case, name_variant = split_case_name(name)
+    kind = entry.get("kind") or meta.get("kind")
+    if kind not in KINDS:
+        kind = "rework" if rework is not None else "review" if review is not None else "implement"
+    variant = entry.get("variant") or meta.get("variant") or name_variant
+    if not isinstance(variant, str) or not variant:
+        variant = next((t[4:] for t in hashtags or [] if t.startswith("var-")), "natural")
+    suite = meta.get("suite") or KIND_SUITE[kind]
+
+    row = {"suite": suite, "kind": kind, "case": meta.get("case") or case, "variant": variant,
+           "arm": arm, "n": n, "dir": run_dir, "name": name}
+    row["case_key"] = row["case"] if variant == "natural" else "%s@%s" % (row["case"], variant)
+    row["score"] = _num(entry.get("score"))
+    if row["score"] is None and entry.get("passed") is not None:
+        row["score"] = 1.0 if entry.get("passed") else 0.0
+    row["turns"] = trace["turns"] if trace["turns"] is not None else _num(entry.get("turns"))
+    for key in ("tool_calls", "bash_calls", "git_commit_calls", "git_push_calls", "self_corrections"):
+        row[key] = float(trace[key]) if trace["present"] else None
+    row["cost_usd"] = trace["cost_usd"] if trace["cost_usd"] is not None else _num(entry.get("costUsd"))
+    row["wall_s"] = trace["wall_s"] if trace["wall_s"] is not None else _num(entry.get("durationSeconds"))
     # asks: hook `ask` decisions + AskUserQuestion tool calls
     asks = (hook["ask"] if hook["present"] else 0) + (trace["asks_tool"] if trace["present"] else 0)
     row["asks"] = float(asks) if (hook["present"] or trace["present"]) else None
@@ -369,225 +478,121 @@ def load_run(run_dir, case, arm, n, agg_entry=None):
         row["denies"] = float(trace["denies_trace"])
     else:
         row["denies"] = None
-    row["self_corrections"] = float(trace["self_corrections"]) if trace["present"] else None
-    # chain metrics (chain-metrics.sh --json)
     for key, _label, _unit, _lower in CHAIN_METRICS:
         val = chain.get(key)
         if key == "violations" and val is None and hook["present"]:
             val = hook["deny"]
         row[key] = _num(val)
+    for key in EXTRA_CHAIN_KEYS:
+        row[key] = _num(chain.get(key))
     if row.get("chain_length") is None and chain:
         row["chain_length"] = 0.0
     row["change_id_set"] = chain.get("change_id_set") if isinstance(chain.get("change_id_set"), list) else None
     row["usage"] = trace.get("usage")
     row["bad_outcomes"] = dict(trace["bad_outcomes"]) if trace["present"] else None
-    row["error"] = agg_entry.get("error") if isinstance(agg_entry.get("error"), str) else None
-    row["hashtags"] = agg_entry.get("hashtags") if isinstance(agg_entry.get("hashtags"), list) else None
-    row["pushed"] = agg_entry.get("pushed") if isinstance(agg_entry.get("pushed"), list) else None
+    row["hashtags"] = hashtags
+    row["pushed"] = entry.get("pushed") if isinstance(entry.get("pushed"), list) else None
+
+    row["rework"] = None
+    if kind == "rework":
+        src = _dict(rework)
+        row["rework"] = {k: _count_of(src.get(k)) for k in _spec_keys(REWORK_METRICS)
+                         if k not in ("cost_usd", "turns", "wall_s")}
+        row["rework"]["target_change"] = src.get("target_change")
+        if row["rework"]["builds_alone_pct"] is None:
+            row["rework"]["builds_alone_pct"] = row.get("builds_alone_pct")
+    row["review"] = None
+    if kind == "review":
+        src = _dict(review)
+        row["review"] = {k: _count_of(src.get(k)) for k in _spec_keys(REVIEW_METRICS)
+                         if k not in ("cost_usd", "turns", "wall_s")}
+        row["review"]["found_ids"] = [i for i in src.get("found_ids") or [] if isinstance(i, str)] \
+            if isinstance(src.get("found_ids"), list) else []
+    row["conventions"] = None
+    if conventions is not None:
+        row["conventions"] = {k: _num(conventions.get(k)) for k in _spec_keys(CONVENTION_METRICS)}
+        avail = conventions.get("commitlint_available")
+        row["conventions"]["commitlint_available"] = avail if isinstance(avail, bool) else None
+    row["guardrails"] = _guardrail_counters(entry.get("guardrails"), row,
+                                            _dict(rework).get("runner_committed"))
+
+    iso = None
+    if isolation is not None:
+        unexpected = _dict(isolation.get("unexpected"))
+        finger = _dict(isolation.get("fingerprint"))
+        iso = {
+            "ok": isolation.get("ok") if isinstance(isolation.get("ok"), bool) else None,
+            "unexpected": {g: [str(i) for i in unexpected.get(g) or []] if isinstance(unexpected.get(g), list) else []
+                           for g in ISOLATION_GROUPS},
+            "fingerprint": {g: finger.get(g) for g in ISOLATION_GROUPS + ["model", "claude_code_version"]},
+        }
+    row["isolation"] = iso
+    row["capability"] = {k: _num(capability.get(k)) for k in CAPABILITY_KEYS} if capability is not None else None
+    finger = (iso or {}).get("fingerprint") or {}
+    model = entry.get("model") or finger.get("model")
+    row["model"] = model if isinstance(model, str) else None
+    version = finger.get("claude_code_version") or meta.get("claudeVersion")
+    row["claude_version"] = version if isinstance(version, str) else None
+
+    error = entry.get("error") if isinstance(entry.get("error"), str) and entry.get("error") else None
+    if error is None and iso is not None and iso["ok"] is False:
+        error = "isolation check failed"
+    row["error"] = error
+    row["errored"] = error is not None
     return row
 
 
-# ---------------------------------------------------------------- pipelines ----
-def parse_pipeline_key(name):
-    """``<base>@<scenario>-<variant>`` -> (base, scenario, variant); legacy -> (name, None, None)."""
-    m = PIPELINE_KEY_RE.match(name or "")
-    if not m:
-        return name, None, None
-    return m.group("base"), m.group("scenario"), m.group("variant")
-
-
-def _stage_guardrails(stage_row, runner_block, runner_committed=None):
-    """Guardrail counters for one stage: the runner's block wins, the stage row fills gaps.
-
-    ``runner_committed`` (rework-metrics ``stage<N>_runner_committed``) backs
-    ``left_uncommitted`` when the runner block has no such counter.
-    """
-    runner_block = runner_block if isinstance(runner_block, dict) else {}
-    bad = runner_block.get("bad_outcomes") if isinstance(runner_block.get("bad_outcomes"), dict) else {}
-    trace_bad = (stage_row or {}).get("bad_outcomes") or {}
-    out = {}
-    for key in ("asks", "denies", "self_corrections"):
-        val = _num(runner_block.get(key))
-        if val is None and stage_row:
-            val = stage_row.get(key)
-        out[key] = val
-    for key in BAD_OUTCOME_KEYS:
-        val = _num(bad.get(key))
-        if val is None:
-            val = _num(runner_block.get(key))
-        if val is None and key in trace_bad:
-            val = float(trace_bad[key])
-        if val is None and key == "left_uncommitted" and runner_committed is not None:
-            val = _num(runner_committed)
-        out[key] = val
-    return out
-
-
-def _count_of(value):
-    """Lists count their items; bools/numbers pass through _num; else None."""
-    if isinstance(value, list):
-        return float(len(value))
-    return _num(value)
-
-
-def load_pipeline(run_dir, case, arm, n, agg_entry, stage1_row, stage2_row):
-    """The ``pipeline`` row: rework metrics + guardrails + summed cost/turns/wall."""
-    agg_entry = agg_entry if isinstance(agg_entry, dict) else {}
-    rework = _read_json(os.path.join(run_dir, "rework-metrics.json")) if run_dir else None
-    if not isinstance(rework, dict):
-        rework = agg_entry.get("rework") if isinstance(agg_entry.get("rework"), dict) else {}
-    review = _read_json(os.path.join(run_dir, "review.json")) if run_dir else None
-    if not isinstance(review, dict):
-        review = agg_entry.get("review") if isinstance(agg_entry.get("review"), dict) else None
-    stage2_row = stage2_row or None
-    row = {"case": case, "arm": arm, "n": n, "dir": run_dir, "stage": "pipeline",
-           "base_case": stage1_row.get("base_case"), "scenario": stage1_row.get("scenario"),
-           "variant": stage1_row.get("variant"), "error": stage1_row.get("error"),
-           "stage2_present": stage2_row is not None}
-    for key in REWORK_KEYS:
-        if key == "stage1_change_count":
-            row[key] = _count_of(rework.get("stage1_changes"))
-        elif key == "stage2_change_count":
-            row[key] = _count_of(rework.get("stage2_changes"))
-        elif key == "stage1_push_failed":
-            continue
-        else:
-            row[key] = _count_of(rework.get(key))
-    # stage-1 push failure: rework-metrics `stage1_push_error`, else the run record's
-    # `pushError` / `error` (a pipeline stopped at the push has no stage 2)
-    push_error = rework.get("stage1_push_error")
-    if push_error is None and row["error"] and not stage2_row:
-        push_error = agg_entry.get("pushError") or row["error"]
-    row["stage1_push_error"] = push_error if isinstance(push_error, str) else None
-    row["stage1_push_failed"] = 1.0 if row["stage1_push_error"] is not None else 0.0
-    row["target_change"] = rework.get("target_change")
-    row["target_change_id"] = rework.get("target_change_id")
-    row["stage1_changes"] = rework.get("stage1_changes") if isinstance(rework.get("stage1_changes"), list) else None
-    row["stage2_changes"] = rework.get("stage2_changes") if isinstance(rework.get("stage2_changes"), list) else None
-    guard = agg_entry.get("guardrails") if isinstance(agg_entry.get("guardrails"), dict) else {}
-    row["guardrails"] = {
-        "stage1": _stage_guardrails(stage1_row, guard.get("stage1"), rework.get("stage1_runner_committed")),
-        "stage2": _stage_guardrails(stage2_row, guard.get("stage2"), rework.get("stage2_runner_committed"))
-        if stage2_row is not None else None,
-    }
-
-    def summed(key, agg_key=None):
-        total = _num(agg_entry.get(agg_key)) if agg_key else None
-        if total is not None:
-            return total
-        vals = [r.get(key) for r in (stage1_row, stage2_row) if r and r.get(key) is not None]
-        return float(sum(vals)) if vals else None
-
-    row["cost_usd"] = summed("cost_usd", "pipelineCostUsd")
-    row["wall_s"] = summed("wall_s", "pipelineDurationSeconds")
-    row["turns"] = summed("turns")
-    row["score"] = stage2_row.get("score") if stage2_row else None
-    row["review"] = {k: review.get(k) for k in ("target_change", "target_change_id", "targetChange",
-                                                 "targetChangeId", "file", "line", "message", "skipped")
-                     if k in review} if review else None
-    tags = []
-    for r in (stage1_row, stage2_row):
-        for t in (r or {}).get("hashtags") or []:
-            if isinstance(t, str) and t not in tags:
-                tags.append(t)
-    row["hashtags"] = tags or None
-    row["pushed_stage1"] = stage1_row.get("pushed")
-    row["pushed_stage2"] = stage2_row.get("pushed") if stage2_row else None
-    return row
-
-
-def _aggregate_runs_index(aggregate, case_meta=None):
-    """(case, arm, n) -> arm run entry from an official aggregate-result.json.
-
-    ``case_meta`` (optional dict) is filled with ``name -> {baseCase, scenario,
-    variant}`` for pipeline entries that carry those fields.
-    """
-    index = {}
+def _aggregate_index(aggregate):
+    """((name, arm, n) -> run record, name -> case meta) from an aggregate-result.json."""
+    index, case_meta = {}, {}
     if not isinstance(aggregate, dict):
-        return index
+        return index, case_meta
+    top_suite = aggregate.get("suite") if isinstance(aggregate.get("suite"), str) else None
+    if top_suite is None:
+        top_suite = next((_basename(aggregate.get(k)) for k in ("evalDir", "evalsDir", "eval_dir")
+                          if _basename(aggregate.get(k))), None)
+    version = aggregate.get("claudeVersion") if isinstance(aggregate.get("claudeVersion"), str) else None
     for case in aggregate.get("cases") or []:
-        if not isinstance(case, dict):
+        if not isinstance(case, dict) or not isinstance(case.get("name"), str):
             continue
-        name = case.get("name")
-        meta = {k: case.get(k) for k in ("baseCase", "scenario", "variant") if isinstance(case.get(k), str)}
-        if case_meta is not None and isinstance(name, str) and meta:
-            case_meta[name] = meta
-        is_pipeline = bool(meta.get("scenario")) or parse_pipeline_key(name)[1] is not None
+        name = case["name"]
+        suite = case.get("suite") if isinstance(case.get("suite"), str) else None
+        if suite is None and isinstance(case.get("dir"), str) and case["dir"]:
+            suite = _basename(os.path.dirname(os.path.normpath(case["dir"])))
+        base = case.get("baseCase") if isinstance(case.get("baseCase"), str) else None
+        case_meta[name] = {
+            "suite": suite or top_suite,
+            "kind": case.get("kind") if case.get("kind") in KINDS else None,
+            "variant": case.get("variant") if isinstance(case.get("variant"), str) else None,
+            "case": base,
+            "claudeVersion": version,
+        }
         arms = case.get("arms") if isinstance(case.get("arms"), dict) else {}
         for arm, runs in arms.items():
             if not isinstance(runs, list):
                 continue
             for i, entry in enumerate(runs):
                 if isinstance(entry, dict):
-                    if entry.get("error") and not INCLUDE_ERRORS and not is_pipeline:
-                        # a crashed run (claude exited non-zero, timeout) has no chain and $0 cost;
-                        # averaging it in would distort every metric, so it is skipped by default.
-                        # Pipeline entries are kept: a stage-1 push failure is itself a rework
-                        # outcome (`stage-1 push failed`) and their guardrail counters count;
-                        # aggregate() keeps crashed stage-1 sessions out of the classic tables.
-                        continue
                     n = entry.get("run") if isinstance(entry.get("run"), int) else i + 1
                     index[(name, arm, n)] = entry
-    return index
-
-
-INCLUDE_ERRORS = False
-
-
-def _pipeline_identity(case, case_meta):
-    """(base_case, scenario, variant) for an aggregate/run-dir case name."""
-    base, scenario, variant = parse_pipeline_key(case)
-    meta = case_meta.get(case) or {}
-    base = meta.get("baseCase") or base
-    scenario = meta.get("scenario") or scenario
-    variant = meta.get("variant") or variant
-    if scenario is None and variant is None:
-        return case, None, None
-    return base, scenario, variant
-
-
-def _is_pipeline(run_dir, agg_entry, scenario):
-    if scenario is not None:
-        return True
-    agg_entry = agg_entry if isinstance(agg_entry, dict) else {}
-    if any(isinstance(agg_entry.get(k), dict) for k in ("stage2", "rework", "guardrails")):
-        return True
-    if run_dir and (os.path.isdir(os.path.join(run_dir, "stage2"))
-                    or os.path.isfile(os.path.join(run_dir, "rework-metrics.json"))):
-        return True
-    return False
-
-
-def load_run_rows(run_dir, case, arm, n, agg_entry, case_meta):
-    """Rows for one run: [stage 1] for legacy runs, [stage 1, stage 2, pipeline] for pipelines."""
-    base, scenario, variant = _pipeline_identity(case, case_meta)
-    stage1 = load_run(run_dir, case, arm, n, agg_entry)
-    if not _is_pipeline(run_dir, agg_entry, scenario):
-        return [stage1]
-    stage1.update({"base_case": base, "scenario": scenario, "variant": variant, "stage": 1})
-    agg_entry = agg_entry if isinstance(agg_entry, dict) else {}
-    stage2_dir = os.path.join(run_dir, "stage2") if run_dir else ""
-    stage2_entry = agg_entry.get("stage2") if isinstance(agg_entry.get("stage2"), dict) else None
-    stage2 = None
-    if os.path.isdir(stage2_dir) or stage2_entry is not None:
-        # no stage 2 (stage-1 push failed, or split not applicable) -> no stage-2 row at all
-        stage2 = load_run(stage2_dir if os.path.isdir(stage2_dir) else "", case, arm, n, stage2_entry or {})
-        stage2.update({"base_case": base, "scenario": scenario, "variant": variant, "stage": 2})
-    pipeline = load_pipeline(run_dir, case, arm, n, agg_entry, stage1, stage2)
-    return [r for r in (stage1, stage2, pipeline) if r is not None]
+    return index, case_meta
 
 
 def load_results_dir(results_dir):
     """All run rows of one results directory (+ its aggregate metadata)."""
     aggregate = _read_json(os.path.join(results_dir, "aggregate-result.json"))
-    case_meta = {}
-    agg_index = _aggregate_runs_index(aggregate, case_meta)
-    rows = []
-    seen = set()
+    index, case_meta = _aggregate_index(aggregate)
+    default_meta = {}
+    if isinstance(aggregate, dict):
+        suite = aggregate.get("suite") if isinstance(aggregate.get("suite"), str) else None
+        suite = suite or next((_basename(aggregate.get(k)) for k in ("evalDir", "evalsDir", "eval_dir")
+                               if _basename(aggregate.get(k))), None)
+        default_meta = {"suite": suite, "claudeVersion": aggregate.get("claudeVersion")}
+    rows, seen = [], set()
     runs_root = os.path.join(results_dir, "runs")
     if os.path.isdir(runs_root):
-        for case in sorted(os.listdir(runs_root)):
-            case_dir = os.path.join(runs_root, case)
+        for name in sorted(os.listdir(runs_root)):
+            case_dir = os.path.join(runs_root, name)
             if not os.path.isdir(case_dir):
                 continue
             for arm in sorted(os.listdir(case_dir)):
@@ -602,23 +607,29 @@ def load_results_dir(results_dir):
                         n = int(nname)
                     except ValueError:
                         continue
-                    rows.extend(load_run_rows(run_dir, case, arm, n, agg_index.get((case, arm, n)), case_meta))
-                    seen.add((case, arm, n))
+                    rows.append(load_run(run_dir, name, arm, n, index.get((name, arm, n)),
+                                         case_meta.get(name) or default_meta))
+                    seen.add((name, arm, n))
     # runs only present in the aggregate (no per-run directory)
-    for key, entry in sorted(agg_index.items(), key=lambda kv: (str(kv[0][0]), str(kv[0][1]), kv[0][2])):
+    for key, entry in sorted(index.items(), key=lambda kv: (str(kv[0][0]), str(kv[0][1]), kv[0][2])):
         if key in seen:
             continue
-        case, arm, n = key
-        rows.extend(load_run_rows("", case, arm, n, entry, case_meta))
+        name, arm, n = key
+        rows.append(load_run("", name, arm, n, entry, case_meta.get(name) or default_meta))
+    agg = aggregate if isinstance(aggregate, dict) else {}
     meta = {
         "dir": results_dir,
         "aggregate": bool(aggregate),
-        "claudeVersion": (aggregate or {}).get("claudeVersion") if isinstance(aggregate, dict) else None,
-        "overallScore": ((aggregate or {}).get("aggregates") or {}).get("overallScore") if isinstance(aggregate, dict) else None,
-        "costUsd": (aggregate or {}).get("costUsd") if isinstance(aggregate, dict) else None,
+        "claudeVersion": agg.get("claudeVersion"),
+        "overallScore": _dict(agg.get("aggregates")).get("overallScore"),
+        "costUsd": agg.get("costUsd"),
+        "suites": _suite_order({r["suite"] for r in rows}),
+        "runs": len(rows),
+        "errors": sum(1 for r in rows if r["errored"]),
+        "runIds": sorted({t for r in rows for t in r.get("hashtags") or [] if t.startswith("run-")}),
     }
-    if isinstance(aggregate, dict) and isinstance(aggregate.get("runId"), str):
-        meta["runId"] = aggregate["runId"]
+    if isinstance(agg.get("runId"), str):
+        meta["runId"] = agg["runId"]
     return rows, meta
 
 
@@ -657,32 +668,50 @@ def _rate(values):
     return st
 
 
+def _ratio(dicts, num_key, den_key):
+    """Pooled numerator / denominator over the runs that report a denominator."""
+    pairs = [(d.get(num_key) or 0.0, d.get(den_key)) for d in dicts if d.get(den_key) is not None]
+    num = sum(p[0] for p in pairs)
+    den = sum(p[1] for p in pairs)
+    return {"n": len(pairs), "num": num, "den": den, "rate_pct": (100.0 * num / den) if den else None}
+
+
 def _arm_order(arms):
     return sorted(arms, key=lambda a: (ARMS.index(a) if a in ARMS else 99, a))
 
 
-def _metric_block(subset_by_arm, metrics_spec):
-    """{arm: {runs, metrics: {key: stats}}} for a (key, label, kind) spec; bools -> rates."""
+def _suite_order(suites):
+    return sorted(suites, key=lambda s: (SUITE_ORDER.index(s) if s in SUITE_ORDER else 99, s))
+
+
+def _metric_block(dicts_by_arm, spec):
+    """{arm: {runs, metrics: {key: stats}}} for a section spec (see the spec comment)."""
     block = {}
-    for arm, subset in subset_by_arm.items():
-        if not subset:
+    for arm, dicts in dicts_by_arm.items():
+        if not dicts:
             continue
         metrics = {}
-        for key, _label, kind in metrics_spec:
-            vals = [r.get(key) for r in subset]
-            metrics[key] = _rate(vals) if kind == "bool" else _stats(vals)
-        block[arm] = {"runs": len(subset), "metrics": metrics}
+        for item in spec:
+            key, kind = item[0], item[2]
+            if kind == "ratio":
+                metrics[key] = _ratio(dicts, item[3][0], item[3][1])
+            elif kind == "bool":
+                metrics[key] = _rate([d.get(key) for d in dicts])
+            else:
+                metrics[key] = _stats([d.get(key) for d in dicts])
+        block[arm] = {"runs": len(dicts), "metrics": metrics}
     return block
 
 
-def _block_deltas(block, metrics_spec):
-    """C−B and C−A on means (counts) or rates in percentage points (bools)."""
+def _block_deltas(block, spec):
+    """C−B and C−A: difference of means, or of rates in percentage points (bool / ratio)."""
     def one(a, b):
         out = {}
         if a not in block or b not in block:
             return out
-        for key, _label, kind in metrics_spec:
-            field = "rate_pct" if kind == "bool" else "mean"
+        for item in spec:
+            key, kind = item[0], item[2]
+            field = "rate_pct" if kind in ("bool", "ratio") else "mean"
             ma = block[a]["metrics"][key].get(field)
             mb = block[b]["metrics"][key].get(field)
             out[key] = (ma - mb) if (ma is not None and mb is not None) else None
@@ -690,120 +719,36 @@ def _block_deltas(block, metrics_spec):
     return {"with-mcp-only": one("with", "mcp-only"), "with-without": one("with", "without")}
 
 
-def _pipeline_key(base, scenario, variant):
-    return "%s@%s-%s" % (base, scenario, variant)
-
-
-def aggregate_pipelines(rows):
-    """Rework, guardrail and cost-per-stage aggregates from pipeline rows (empty when none)."""
-    pipelines = [r for r in rows if r.get("stage") == "pipeline"]
-    if not pipelines:
-        return {"pipelines": [], "rework": {}, "guardrails": {}, "cost_per_stage": {}, "variants": [],
-                "hashtags": {"run_ids": [], "scenarios": []}}
-    arms = _arm_order({r["arm"] for r in pipelines})
-    variants = sorted({r.get("variant") or "natural" for r in pipelines})
-    # rework: per base case x scenario x variant
-    rework = {}
-    def ident(r):
-        return (r.get("base_case") or r["case"], r.get("scenario") or "", r.get("variant") or "")
-
-    groups = sorted({ident(r) for r in pipelines})
-    for base, scenario, variant in groups:
-        subset = [r for r in pipelines if ident(r) == (base, scenario, variant)]
-        by_arm = {arm: [r for r in subset if r["arm"] == arm] for arm in arms}
-        block = _metric_block(by_arm, REWORK_METRICS)
-        tags = []
-        for r in subset:
-            for t in r.get("hashtags") or []:
-                if t not in tags:
-                    tags.append(t)
-        rework[_pipeline_key(base, scenario, variant)] = {
-            "base_case": base, "scenario": scenario, "variant": variant,
-            "arms": block, "deltas": _block_deltas(block, REWORK_METRICS), "hashtags": tags,
-        }
-    # guardrails: per variant x stage x arm (pooled over cases and scenarios)
-    guardrails = {}
-    for variant in variants:
-        guardrails[variant] = {}
-        for stage in (1, 2):
-            skey = "stage%d" % stage
-            by_arm = {}
-            for arm in arms:
-                # a pipeline without stage 2 (push failed, split not needed) has guardrails.stage2 = None
-                # and must not count as a stage-2 run
-                by_arm[arm] = [dict((r.get("guardrails") or {}).get(skey))
-                               for r in pipelines if r["arm"] == arm and (r.get("variant") or "natural") == variant
-                               and isinstance((r.get("guardrails") or {}).get(skey), dict)]
-            block = _metric_block(by_arm, GUARDRAIL_METRICS)
-            guardrails[variant][skey] = {"arms": block, "deltas": _block_deltas(block, GUARDRAIL_METRICS)}
-    # cost per stage: per variant x stage x arm
-    cost_spec = [("cost_usd", "cost", "count"), ("turns", "turns", "count"), ("wall_s", "wall time", "count")]
-    cost = {}
-    for variant in variants:
-        cost[variant] = {}
-        for stage in STAGES:
-            by_arm = {arm: [r for r in rows if r.get("stage") == stage and r["arm"] == arm
-                            and r.get("scenario") is not None and (r.get("variant") or "natural") == variant]
-                      for arm in arms}
-            block = _metric_block(by_arm, cost_spec)
-            cost[variant][str(stage)] = {"arms": block, "deltas": _block_deltas(block, cost_spec)}
-    run_ids, scenarios = [], []
-    for r in pipelines:
-        for t in r.get("hashtags") or []:
-            if t.startswith("run-") and t not in run_ids:
-                run_ids.append(t)
-            elif t.startswith("scn-") and t not in scenarios:
-                scenarios.append(t)
-    return {
-        "pipelines": [_pipeline_key(*g) for g in groups],
-        "arms": arms,
-        "variants": variants,
-        "rework": rework,
-        "guardrails": guardrails,
-        "cost_per_stage": cost,
-        "hashtags": {"run_ids": run_ids, "scenarios": scenarios},
-        "runs_total": len(pipelines),
-    }
-
-
-def _classic_ok(row):
-    """Stage-1 rows for the classic tables: errored pipeline runs stay in only when the
-    stage-1 session itself completed (a push failure after a $0.6 session is not a crash)."""
-    if not row.get("error") or INCLUDE_ERRORS:
-        return True
-    return row.get("cost_usd") not in (None, 0) or row.get("turns") not in (None, 0)
-
-
-def aggregate(rows):
-    """Per case x arm and overall per-arm statistics, deltas and targets.
-
-    Classic blocks use stage-1 rows only (legacy rows are stage 1); pipeline
-    rows feed ``report["pipelines"]`` (rework, guardrails, cost per stage).
-    """
-    all_rows = rows
-    rows = [r for r in rows if r.get("stage", 1) == 1 and _classic_ok(r)]
-    cases = sorted({r["case"] for r in rows if r.get("case")})
-    arms_seen = sorted({r["arm"] for r in rows if r.get("arm")}, key=lambda a: (ARMS.index(a) if a in ARMS else 99, a))
-    per_case = {}
-    for case in cases:
-        per_case[case] = {}
-        for arm in arms_seen:
-            subset = [r for r in rows if r["case"] == case and r["arm"] == arm]
-            if not subset:
-                continue
-            per_case[case][arm] = {
-                "runs": len(subset),
-                "metrics": {k: _stats([r.get(k) for r in subset]) for k in METRIC_KEYS},
-            }
-    overall = {}
-    for arm in arms_seen:
+def _counts(rows, include_errors):
+    """{arm: {runs, errors}}: runs feeding the means, and errored runs (always counted)."""
+    out = {}
+    for arm in _arm_order({r["arm"] for r in rows}):
         subset = [r for r in rows if r["arm"] == arm]
-        overall[arm] = {
-            "runs": len(subset),
-            "metrics": {k: _stats([r.get(k) for r in subset]) for k in METRIC_KEYS},
-        }
+        errors = sum(1 for r in subset if r["errored"])
+        out[arm] = {"runs": len(subset) if include_errors else len(subset) - errors, "errors": errors}
+    return out
 
-    def delta(block, a, b):
+
+def _section(rows, include_errors, spec, to_dict):
+    """One table: counts over all rows, metrics over the rows that feed the means."""
+    used = [r for r in rows if include_errors or not r["errored"]]
+    arms = _arm_order({r["arm"] for r in rows})
+    block = _metric_block({arm: [to_dict(r) for r in used if r["arm"] == arm] for arm in arms}, spec)
+    return {"counts": _counts(rows, include_errors), "arms": block, "deltas": _block_deltas(block, spec)}
+
+
+def _classic_block(rows, arms):
+    block = {}
+    for arm in arms:
+        subset = [r for r in rows if r["arm"] == arm]
+        if subset:
+            block[arm] = {"runs": len(subset),
+                          "metrics": {k: _stats([r.get(k) for r in subset]) for k in METRIC_KEYS}}
+    return block
+
+
+def _classic_deltas(block):
+    def one(a, b):
         out = {}
         if a not in block or b not in block:
             return out
@@ -812,31 +757,7 @@ def aggregate(rows):
             mb = block[b]["metrics"][k]["mean"]
             out[k] = (ma - mb) if (ma is not None and mb is not None) else None
         return out
-
-    deltas = {
-        "overall": {
-            "with-mcp-only": delta(overall, "with", "mcp-only"),
-            "with-without": delta(overall, "with", "without"),
-        },
-        "cases": {
-            case: {
-                "with-mcp-only": delta(per_case[case], "with", "mcp-only"),
-                "with-without": delta(per_case[case], "with", "without"),
-            }
-            for case in cases
-        },
-    }
-    targets = evaluate_targets(overall)
-    return {
-        "cases": cases,
-        "arms": arms_seen,
-        "per_case": per_case,
-        "overall": overall,
-        "deltas": deltas,
-        "targets": targets,
-        "runs_total": len(rows),
-        "pipelines": aggregate_pipelines(all_rows),
-    }
+    return {"with-mcp-only": one("with", "mcp-only"), "with-without": one("with", "without")}
 
 
 def evaluate_targets(overall):
@@ -866,6 +787,196 @@ def evaluate_targets(overall):
     return results
 
 
+def aggregate_suite(rows, include_errors):
+    """Overall / Targets / Per case of one implement suite.
+
+    Overall and the targets use the natural variant only (a nudged run carries a
+    deliberately bad instruction); nudged runs show under Per case as
+    ``<case>@nudged`` and in Guardrails.
+    """
+    used = [r for r in rows if include_errors or not r["errored"]]
+    arms = _arm_order({r["arm"] for r in rows})
+    natural = [r for r in used if r["variant"] == "natural"]
+    overall = _classic_block(natural, arms)
+    per_case, case_deltas, case_counts = {}, {}, {}
+    cases = sorted({r["case_key"] for r in rows})
+    for case in cases:
+        per_case[case] = _classic_block([r for r in used if r["case_key"] == case], arms)
+        case_deltas[case] = _classic_deltas(per_case[case])
+        case_counts[case] = _counts([r for r in rows if r["case_key"] == case], include_errors)
+    return {
+        "cases": cases, "arms": arms,
+        "counts": _counts([r for r in rows if r["variant"] == "natural"], include_errors),
+        "runs": len(natural),
+        "errors": sum(1 for r in rows if r["errored"]),
+        "overall": overall, "per_case": per_case, "case_counts": case_counts,
+        "deltas": {"overall": _classic_deltas(overall), "cases": case_deltas},
+        "targets": evaluate_targets(overall),
+    }
+
+
+def aggregate_split_quality(rows, include_errors):
+    """Per suite x case (natural variant): the split-quality metrics per arm."""
+    out = {}
+    rows = [r for r in rows if r["variant"] == "natural"]
+    for suite in _suite_order({r["suite"] for r in rows}):
+        for case in sorted({r["case"] for r in rows if r["suite"] == suite}):
+            subset = [r for r in rows if r["suite"] == suite and r["case"] == case]
+            if not any(r.get(k) is not None for r in subset for k in SPLIT_SIGNAL_KEYS):
+                continue
+            out.setdefault(suite, {})[case] = _section(subset, include_errors, SPLIT_METRICS, lambda r: r)
+    return out
+
+
+def _with_session(row, block):
+    merged = dict(block or {})
+    merged.update({k: row.get(k) for k in ("cost_usd", "turns", "wall_s")})
+    return merged
+
+
+def aggregate_rework(rows, include_errors):
+    """Per case x variant: every rework metric per arm."""
+    out = {}
+    for case, variant in sorted({(r["case"], r["variant"]) for r in rows}):
+        subset = [r for r in rows if (r["case"], r["variant"]) == (case, variant)]
+        sec = _section(subset, include_errors, REWORK_METRICS, lambda r: _with_session(r, r["rework"]))
+        sec.update({"case": case, "variant": variant,
+                    "hashtags": sorted({t for r in subset for t in r.get("hashtags") or []})})
+        out["%s@%s" % (case, variant)] = sec
+    return out
+
+
+def aggregate_review(rows, include_errors):
+    """Per case: reviewer metrics per arm, plus how often each planted defect was found."""
+    out = {}
+    for case in sorted({r["case"] for r in rows}):
+        subset = [r for r in rows if r["case"] == case]
+        sec = _section(subset, include_errors, REVIEW_METRICS, lambda r: _with_session(r, r["review"]))
+        for arm, blk in sec["arms"].items():
+            found = {}
+            for r in subset:
+                if r["arm"] == arm and (include_errors or not r["errored"]):
+                    for ident in (r["review"] or {}).get("found_ids") or []:
+                        found[ident] = found.get(ident, 0) + 1
+            blk["found_ids"] = found
+        sec["case"] = case
+        out[case] = sec
+    return out
+
+
+def aggregate_conventions(rows, include_errors):
+    """Per suite x arm: pooled conforming subjects and labelled comments."""
+    out = {}
+    rows = [r for r in rows if r["conventions"] is not None]
+    for suite in _suite_order({r["suite"] for r in rows}):
+        subset = [r for r in rows if r["suite"] == suite]
+        sec = _section(subset, include_errors, CONVENTION_METRICS, lambda r: r["conventions"])
+        for arm, blk in sec["arms"].items():
+            blk["commitlint_fallback_runs"] = sum(
+                1 for r in subset if r["arm"] == arm and (include_errors or not r["errored"])
+                and r["conventions"].get("commitlint_available") is False)
+        sec["commitlint_fallback_runs"] = sum(b["commitlint_fallback_runs"] for b in sec["arms"].values())
+        out[suite] = sec
+    return out
+
+
+def _guardrail_spec(rows):
+    extra = sorted({k for r in rows for k in (r["guardrails"] or {}) if k not in GUARDRAIL_KNOWN})
+    return GUARDRAIL_METRICS + [(k, "bad: `%s`" % k, "count") for k in extra]
+
+
+def aggregate_guardrails(rows, include_errors):
+    """Per variant x arm, pooled over suites and cases."""
+    spec = _guardrail_spec(rows)
+    out = {}
+    for variant in sorted({r["variant"] for r in rows}):
+        subset = [r for r in rows if r["variant"] == variant]
+        out[variant] = _section(subset, include_errors, spec, lambda r: r["guardrails"] or {})
+    return out
+
+
+def _capability_verdict(arm, n, used_mcp, used_stack, denied, unflagged):
+    """One sentence: was the arm's distinguishing capability exercised?"""
+    if unflagged == n:
+        return "not recorded"
+    if arm == "without":
+        text = "n/a (no plugin loaded)"
+        if used_mcp or used_stack:
+            text = "UNEXPECTED: plugin capability used in a no-plugin arm"
+        return text
+    if arm == "mcp-only":
+        text = "gerrit MCP used in %d/%d runs" % (used_mcp, n)
+        if not used_mcp:
+            text += " (capability unused)"
+    else:
+        text = "gerrit-stack (skill or hook) used in %d/%d runs, gerrit MCP in %d/%d" % (used_stack, n, used_mcp, n)
+        if not used_stack:
+            text += " (capability unused)"
+    if denied:
+        text += "; %d MCP call(s) denied" % denied
+    return text
+
+
+def aggregate_isolation(rows):
+    """Per arm over ALL runs (errored ones included): what was loaded and what was used."""
+    out = {}
+    for arm in _arm_order({r["arm"] for r in rows}):
+        subset = [r for r in rows if r["arm"] == arm]
+        recorded = [r for r in subset if r["isolation"] is not None]
+        unexpected = {}
+        for r in recorded:
+            for group in ISOLATION_GROUPS:
+                for item in r["isolation"]["unexpected"].get(group) or []:
+                    key = "%s: %s" % (group, item)
+                    unexpected[key] = unexpected.get(key, 0) + 1
+        caps = [r["capability"] for r in subset if r["capability"] is not None]
+        totals = {k: sum((c.get(k) or 0.0) for c in caps) for k in CAPABILITY_KEYS}
+        used_mcp = sum(1 for c in caps if (c.get("mcp_calls") or 0) > 0)
+        used_stack = sum(1 for c in caps if (c.get("skill_calls") or 0) > 0 or (c.get("hook_lines") or 0) > 0)
+        out[arm] = {
+            "runs": len(subset),
+            "errors": sum(1 for r in subset if r["errored"]),
+            "isolation_ok": sum(1 for r in recorded if r["isolation"]["ok"] is True),
+            "isolation_failed": sum(1 for r in recorded if r["isolation"]["ok"] is False),
+            "isolation_unrecorded": len(subset) - len(recorded),
+            "unexpected": unexpected,
+            "models": sorted({r["model"] for r in subset if r["model"]}),
+            "claude_versions": sorted({r["claude_version"] for r in subset if r["claude_version"]}),
+            "capability_runs": len(caps),
+            "mcp_calls": totals["mcp_calls"], "mcp_denied": totals["mcp_denied"],
+            "skill_calls": totals["skill_calls"], "hook_lines": totals["hook_lines"],
+            "runs_with_mcp_calls": used_mcp, "runs_with_stack_capability": used_stack,
+            "capability": _capability_verdict(arm, len(subset), used_mcp, used_stack,
+                                              int(totals["mcp_denied"]), len(subset) - len(caps)),
+        }
+    return out
+
+
+def aggregate(rows, include_errors=False):
+    """The whole report: one block per section (see the module docstring)."""
+    implement = [r for r in rows if r["kind"] == "implement"]
+    suites = {}
+    for suite in _suite_order({r["suite"] for r in implement}):
+        suites[suite] = aggregate_suite([r for r in implement if r["suite"] == suite], include_errors)
+    errors = sum(1 for r in rows if r["errored"])
+    return {
+        "arms": _arm_order({r["arm"] for r in rows}),
+        "include_errors": bool(include_errors),
+        "runs_total": len(rows),
+        "errors_total": errors,
+        "runs_used": len(rows) if include_errors else len(rows) - errors,
+        "kinds": {k: sum(1 for r in rows if r["kind"] == k) for k in KINDS},
+        "suites": suites,
+        "split_quality": aggregate_split_quality(implement, include_errors),
+        "rework": aggregate_rework([r for r in rows if r["kind"] == "rework"], include_errors),
+        "reviewer": aggregate_review([r for r in rows if r["kind"] == "review"], include_errors),
+        "conventions": aggregate_conventions(rows, include_errors),
+        "guardrails": aggregate_guardrails(rows, include_errors) if rows else {},
+        "isolation": aggregate_isolation(rows),
+        "targets": evaluate_targets({}),
+    }
+
+
 # --------------------------------------------------------------- rendering ----
 def fmt(value, unit=""):
     if value is None:
@@ -884,6 +995,9 @@ def fmt_delta(value, unit=""):
         return "–"
     sign = "+" if value > 0 else ""
     return sign + fmt(value, unit)
+
+
+KIND_UNIT = {"bool": "%", "ratio": "%", "pct": "%", "usd": "USD", "s": "s", "count": ""}
 
 
 def _metric_table(block, arms, deltas):
@@ -909,23 +1023,31 @@ def _metric_table(block, arms, deltas):
 
 
 def _kind_cell(st, kind):
-    """One table cell: rate ``100 % (k/n)`` for bools, ``mean / median`` for counts."""
+    """One cell: ``100 % (k/n)`` for bools and ratios, ``mean / median`` otherwise."""
     if not st:
         return None
     if kind == "bool":
         if st.get("rate_pct") is None:
             return None
         return "%s (%d/%d)" % (fmt(st["rate_pct"], "%"), st["true"], st["n"])
+    if kind == "ratio":
+        if st.get("rate_pct") is None:
+            return None
+        return "%s (%s/%s)" % (fmt(st["rate_pct"], "%"), fmt(st["num"]), fmt(st["den"]))
     if st.get("mean") is None:
         return None
-    return "%s / %s" % (fmt(st["mean"]), fmt(st["median"]))
+    unit = KIND_UNIT[kind]
+    return "%s / %s" % (fmt(st["mean"], unit), fmt(st["median"], unit))
 
 
-def _kind_table(block, arms, deltas, metrics_spec, first_col="metric"):
+def _kind_table(section, spec, first_col="metric"):
     """Metric x arm table with C−B / C−A deltas; rows no arm has are omitted."""
+    block, deltas = section["arms"], section["deltas"]
+    arms = _arm_order(section["counts"])
     lines = ["| %s | " % first_col + " | ".join(ARM_SHORT.get(a, a) for a in arms) + " | Δ C−B | Δ C−A |",
              "|---|" + "---|" * len(arms) + "---|---|"]
-    for key, label, kind in metrics_spec:
+    for item in spec:
+        key, label, kind = item[0], item[1], item[2]
         cells, any_value = [], False
         for arm in arms:
             cell = _kind_cell(block.get(arm, {}).get("metrics", {}).get(key), kind)
@@ -936,134 +1058,54 @@ def _kind_table(block, arms, deltas, metrics_spec, first_col="metric"):
                 cells.append(cell)
         if not any_value:
             continue
-        unit = "%" if kind == "bool" else ""
+        unit = KIND_UNIT[kind]
         d1 = fmt_delta((deltas.get("with-mcp-only") or {}).get(key), unit)
         d2 = fmt_delta((deltas.get("with-without") or {}).get(key), unit)
         lines.append("| %s | %s | %s | %s |" % (label, " | ".join(cells), d1, d2))
     return lines
 
 
-def _runs_line(block, arms):
-    return "Runs — " + ", ".join("%s: %d" % (ARM_SHORT.get(a, a), block[a]["runs"]) for a in arms if a in block)
-
-
-def _rework_section(pipes):
-    arms = pipes["arms"]
-    lines = ["## Rework", ""]
-    lines.append(
-        "Each pipeline continues after stage 1: the runner (as reviewer) posts `Code-Review -1` with one unresolved "
-        "`issue (blocking)` thread — `fix` on the change touching the case's anchor, `split` on the largest change — "
-        "then a second session in the same workspace addresses it and the runner pushes again and reads Gerrit back. "
-        "Booleans are rates over runs (`rate (true/runs)`), counts are `mean / median`; deltas are differences of means "
-        "(percentage points for rates)."
-    )
-    lines.append("")
-    tags = pipes.get("hashtags") or {}
-    if tags.get("run_ids") or tags.get("scenarios"):
-        parts = []
-        if tags.get("run_ids"):
-            parts.append("run: " + ", ".join("`hashtag:%s`" % t for t in tags["run_ids"]))
-        if tags.get("scenarios"):
-            parts.append("scenario: " + ", ".join("`hashtag:%s`" % t for t in tags["scenarios"]))
-        lines.append("Where to look in Gerrit — " + "; ".join(parts) + " (both pushes of a pipeline carry the same tags; "
-                     "`bench-<case>-<arm>` picks the arm).")
-        lines.append("")
-    for key in pipes["pipelines"]:
-        blk = pipes["rework"][key]
-        lines += ["### %s — %s, %s" % (blk["base_case"], blk["scenario"] or "?", blk["variant"] or "?"), ""]
-        runs = _runs_line(blk["arms"], arms)
-        scn_tags = [t for t in blk.get("hashtags") or [] if t.startswith("scn-")]
-        if scn_tags:
-            runs += " · Gerrit: " + ", ".join("`hashtag:%s`" % t for t in scn_tags)
-        lines += [runs, ""]
-        lines += _kind_table(blk["arms"], arms, blk["deltas"], REWORK_METRICS)
-        lines.append("")
-    lines += [
-        "### Reading the rework numbers",
-        "",
-        "- *landable below the target* is 0 by construction for a monolith (arms A/B push one change, so nothing sits "
-        "below the commented one); it only measures how much of a chain stays reviewable and landable while one change "
-        "is reworked, which is the claim of the plugin, not a neutral score.",
-        "- The reviewer comment is anchored by code location (`anchor_file` / `anchor_line` regex in `case.yaml`), so "
-        "the `fix` scenario hits whichever change owns that line; for A/B that is always the single change.",
-        "- 1 run per cell shows the *shape* of the behaviour (did the fix land as a new patchset, was a reply drafted, "
-        "was anything posted before approval); 3 runs per cell are needed before reading the *numbers* as differences "
-        "between arms.",
-        "- *reply posted* / *vote posted* must be 0 for arm C (the plugin never posts before approval); for A/B they are "
-        "informative.",
-        "- A pipeline whose stage-1 push failed (nothing pushed, or push rejected) counts in *stage-1 push failed* and "
-        "in the stage-1 guardrails; it has no stage 2, so every other rework cell and the stage-2 tables show `–` for "
-        "it rather than 0. *split needed* is the share of split pipelines whose stage-1 chain still had to be split "
-        "(false = already split, stage 2 skipped).",
-        "",
-    ]
-    return lines
-
-
-def _guardrails_section(pipes):
-    arms = pipes["arms"]
-    lines = ["## Guardrails", ""]
-    lines.append(
-        "Per stage and variant, pooled over cases and scenarios: hook `ask` / `deny` decisions and self-corrections "
-        "(hook trace when present, else trace heuristics) plus the bad outcomes the runner checks (`--no-verify`, "
-        "`commit --amend -m`, force push, topic set unasked, push to `refs/heads`, commit without Change-Id, work left "
-        "uncommitted for the runner to commit, remote or Gerrit master moved). Stage-2 tables count only pipelines "
-        "that reached stage 2. Nudged pipelines add one plausible bad instruction per stage; expected with the plugin: "
-        "denies > 0, self-corrections > 0, bad outcomes 0."
-    )
-    lines.append("")
-    for variant in pipes["variants"]:
-        for stage in (1, 2):
-            blk = pipes["guardrails"].get(variant, {}).get("stage%d" % stage)
-            if not blk or not blk["arms"]:
-                continue
-            lines += ["### %s — %s" % (variant, STAGE_LABEL[stage]), "", _runs_line(blk["arms"], arms), ""]
-            lines += _kind_table(blk["arms"], arms, blk["deltas"], GUARDRAIL_METRICS, first_col="counter")
-            lines.append("")
-    return lines
-
-
-def _cost_section(pipes):
-    arms = pipes["arms"]
-    lines = ["## Cost per stage", ""]
-    lines.append("Mean over runs per variant and stage (`USD · turns · wall`); the pipeline line is stage 1 + stage 2 "
-                 "(`pipelineCostUsd` when the runner recorded it, else the sum). Deltas are on cost.")
-    lines.append("")
-    lines.append("| variant | stage | " + " | ".join(ARM_SHORT.get(a, a) for a in arms) + " | Δ cost C−B | Δ cost C−A |")
-    lines.append("|---|---|" + "---|" * len(arms) + "---|---|")
-    for variant in pipes["variants"]:
-        for stage in STAGES:
-            blk = pipes["cost_per_stage"].get(variant, {}).get(str(stage))
-            if not blk or not blk["arms"]:
-                continue
-            cells = []
-            for arm in arms:
-                m = blk["arms"].get(arm, {}).get("metrics")
-                if not m or m["cost_usd"]["mean"] is None and m["turns"]["mean"] is None and m["wall_s"]["mean"] is None:
-                    cells.append("–")
-                    continue
-                cells.append("%s · %s turns · %s" % (fmt(m["cost_usd"]["mean"], "USD"), fmt(m["turns"]["mean"]),
-                                                     fmt(m["wall_s"]["mean"], "s")))
-            d1 = fmt_delta((blk["deltas"].get("with-mcp-only") or {}).get("cost_usd"), "USD")
-            d2 = fmt_delta((blk["deltas"].get("with-without") or {}).get("cost_usd"), "USD")
-            lines.append("| %s | %s | %s | %s | %s |" % (variant, STAGE_LABEL[stage], " | ".join(cells), d1, d2))
-    lines.append("")
-    return lines
+def _runs_line(counts):
+    """``Runs / errors — C with: 2 / 0, …`` (errors are never part of the means by default)."""
+    return "Runs / errors — " + ", ".join(
+        "%s: %d / %d" % (ARM_SHORT.get(a, a), counts[a]["runs"], counts[a]["errors"]) for a in _arm_order(counts))
 
 
 def _arms_section():
     return [
         "## Arms",
         "",
-        "Same prompts, same fixture repos (`evals/bench/*/fixture.sh` on the demo skeleton, real commit-msg hook, local bare remote), three arms:",
+        "Same prompts, same fixture repos, same pinned model, three arms in a scrubbed sandbox "
+        "(environment allowlist, account connectors off, startup check against a per-arm allowlist):",
         "",
         "- **A — `without`**: vanilla Claude Code, no plugins (the floor).",
-        "- **B — `mcp-only`**: vanilla + the official `gerrit@gerrit-mcp` plugin (its `gerrit-workflow` skill).",
-        "- **C — `with`**: B + `gerrit-stack` (this plugin). **C vs B is the honest claim**; C vs A shows the floor.",
+        "- **B — `mcp-only`**: vanilla + the official `gerrit@gerrit-mcp` plugin (its MCP server and `gerrit-workflow` skill).",
+        "- **C — `with`**: B + `gerrit-stack` (this plugin) honouring the team files. **C vs B is the honest claim**; "
+        "C vs A shows the floor.",
         "",
         "Outcome metrics come from `scripts/chain-metrics.sh --json` over each run's workspace; process/cost metrics from the "
         "stream-json trace (`type: result` → cost, turns, duration) and the hook trace (`GERRIT_STACK_TRACE`: `ask`/`deny` per verb). "
-        "Cells are `mean / median` over runs; deltas are differences of means.",
+        "Cells are `mean / median` over runs, rates are `share (count/total)`; deltas are differences of means "
+        "(percentage points for rates).",
+        "",
+    ]
+
+
+def _reading_section(report):
+    mode = "included in the means (`--include-errors`)" if report.get("include_errors") else "excluded from the means"
+    return [
+        "## Reading the numbers",
+        "",
+        "- **1 run per cell shows the shape** of the behaviour (did it split, did the fix land on the right change, was "
+        "anything posted); **3 runs per cell** are needed before reading differences between arms as numbers.",
+        "- **Seeded chain = identical starting point**: in the rework and reviewer scenarios every arm starts from the "
+        "same hand-written chain pushed by the runner, so differences come from the session, not from what an earlier "
+        "session happened to produce.",
+        "- **Team files are present in every arm's fixture** (`.gerrit-stack`, the commitlint config): they belong to "
+        "the repo. Arms A and B simply have no tooling that honours them.",
+        "- **Errored runs** (session crashed, or the sandbox startup check found something unexpected) are %s; they are "
+        "always counted under Isolation and in each section's `Runs / errors` line." % mode,
+        "- Paths that belong to no concern of a case's concern map do not count for purity or completeness.",
         "",
     ]
 
@@ -1078,19 +1120,168 @@ def _targets_table(targets):
     return lines
 
 
+def _suite_title(suite):
+    return "`%s`%s" % (suite, (" — " + SUITE_LABEL[suite]) if suite in SUITE_LABEL else "")
+
+
+def _suite_section(suite, blk):
+    lines = ["## Suite %s" % _suite_title(suite), ""]
+    lines += ["### Overall (%s, natural variant, %d runs)" % (suite, blk["runs"]), "", _runs_line(blk["counts"]), ""]
+    lines += _metric_table(blk["overall"], blk["arms"], blk["deltas"]["overall"]) + [""]
+    lines += ["### Targets (%s, arm C)" % suite, ""] + _targets_table(blk["targets"]) + [""]
+    lines += ["### Per case (%s)" % suite, ""]
+    for case in blk["cases"]:
+        lines += ["#### %s" % case, "", _runs_line(blk["case_counts"][case]), ""]
+        lines += _metric_table(blk["per_case"][case], blk["arms"], blk["deltas"]["cases"][case]) + [""]
+    return lines
+
+
+def _split_section(split):
+    lines = ["## Split quality", ""]
+    lines.append(
+        "Deterministic measures of how well a chain is cut, per suite and case (natural variant). *Purity*: share of "
+        "changes that carry exactly one concern of the case's concern map; *completeness*: share of concerns that live "
+        "in exactly one change; *builds alone*: share of changes on which the fixture's verify command passes when "
+        "checked out alone; *tests travel*: share of changes touching `src/main` Java code that also touch a test."
+    )
+    lines.append("")
+    for suite, cases in split.items():
+        for case, sec in cases.items():
+            lines += ["### %s — %s" % (suite, case), "", _runs_line(sec["counts"]), ""]
+            lines += _kind_table(sec, SPLIT_METRICS) + [""]
+    return lines
+
+
+def _rework_section(rework):
+    lines = ["## Rework (seeded chain)", ""]
+    lines.append(
+        "The runner pushes the fixture's hand-written chain, reviewer `rena` posts `Code-Review -1` with one blocking "
+        "thread on a change in the middle, one agent session reworks the chain, the runner pushes again and reads "
+        "Gerrit back. Every arm starts from the same chain. The nudged variant adds one plausible bad instruction."
+    )
+    lines.append("")
+    for sec in rework.values():
+        lines += ["### %s — %s" % (sec["case"], sec["variant"]), ""]
+        runs = _runs_line(sec["counts"])
+        tags = [t for t in sec.get("hashtags") or [] if t.startswith("run-")]
+        if tags:
+            runs += " · Gerrit: " + ", ".join("`hashtag:%s`" % t for t in tags)
+        lines += [runs, ""]
+        lines += _kind_table(sec, REWORK_METRICS) + [""]
+    return lines
+
+
+def _review_section(reviewer):
+    lines = ["## Reviewer", ""]
+    lines.append(
+        "The agent reviews a seeded change with planted defects and drafts comments without posting. *Planted defects "
+        "found* and *comments labelled* are pooled over runs (`share (found/total)`); a published comment or a vote is "
+        "a violation, Gerrit drafts are allowed."
+    )
+    lines.append("")
+    for case, sec in reviewer.items():
+        lines += ["### %s" % case, "", _runs_line(sec["counts"]), ""]
+        lines += _kind_table(sec, REVIEW_METRICS) + [""]
+        found = []
+        for arm in _arm_order(sec["arms"]):
+            blk = sec["arms"][arm]
+            if blk.get("found_ids"):
+                found.append("%s: %s" % (ARM_SHORT.get(arm, arm), ", ".join(
+                    "`%s` %d/%d" % (i, c, blk["runs"]) for i, c in sorted(blk["found_ids"].items()))))
+        if found:
+            lines += ["Found per planted defect — " + "; ".join(found), ""]
+    return lines
+
+
+def _conventions_section(conventions):
+    lines = ["## Conventions", ""]
+    lines.append(
+        "Share of commit subjects that pass the repo's commitlint config and share of drafted comments that carry a "
+        "Conventional Comments label, pooled per suite and arm (`share (conforming/total)`)."
+    )
+    lines.append("")
+    for suite, sec in conventions.items():
+        lines += ["### %s" % suite, "", _runs_line(sec["counts"]), ""]
+        lines += _kind_table(sec, CONVENTION_METRICS, first_col="convention") + [""]
+        if sec.get("commitlint_fallback_runs"):
+            per_arm = ", ".join("%s: %d" % (ARM_SHORT.get(a, a), sec["arms"][a]["commitlint_fallback_runs"])
+                                for a in _arm_order(sec["arms"]) if sec["arms"][a]["commitlint_fallback_runs"])
+            lines += ["Note: commitlint was unavailable in %d run(s) (%s); their subjects were checked with the "
+                      "Conventional Commits regex fallback." % (sec["commitlint_fallback_runs"], per_arm), ""]
+    return lines
+
+
+def _guardrails_section(guardrails, rows_spec):
+    lines = ["## Guardrails", ""]
+    lines.append(
+        "Per variant, pooled over suites and cases: hook `ask` / `deny` decisions and self-corrections (hook trace when "
+        "present, else trace heuristics) plus the bad outcomes the runner checks. Nudged runs add one plausible bad "
+        "instruction; expected with the plugin: denies > 0, self-corrections > 0, bad outcomes 0."
+    )
+    lines.append("")
+    for variant, sec in guardrails.items():
+        lines += ["### %s" % variant, "", _runs_line(sec["counts"]), ""]
+        lines += _kind_table(sec, rows_spec, first_col="counter") + [""]
+    return lines
+
+
+def _isolation_section(isolation):
+    lines = ["## Isolation", ""]
+    lines.append(
+        "What each arm's sessions actually loaded (startup check of the session's `init` record against the arm's "
+        "allowlist) and whether the arm's distinguishing capability was exercised. All runs count here, errored ones "
+        "included."
+    )
+    lines.append("")
+    lines.append("| arm | runs | errors | isolation ok | model(s) | claude version(s) | MCP calls made / denied | "
+                 "skill calls | hook lines | distinguishing capability |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|")
+    for arm, blk in isolation.items():
+        checked = blk["runs"] - blk["isolation_unrecorded"]
+        ok = "%d/%d" % (blk["isolation_ok"], checked) if checked else "not recorded"
+        if checked and blk["isolation_unrecorded"]:
+            ok += " (%d not recorded)" % blk["isolation_unrecorded"]
+        if blk["capability_runs"]:
+            mcp = "%s / %s" % (fmt(blk["mcp_calls"]), fmt(blk["mcp_denied"]))
+            skills, hooks = fmt(blk["skill_calls"]), fmt(blk["hook_lines"])
+        else:
+            mcp = skills = hooks = "–"
+        lines.append("| %s | %d | %d | %s | %s | %s | %s | %s | %s | %s |" % (
+            ARM_SHORT.get(arm, arm), blk["runs"], blk["errors"], ok,
+            ", ".join("`%s`" % m for m in blk["models"]) or "–",
+            ", ".join(blk["claude_versions"]) or "–", mcp, skills, hooks, blk["capability"]))
+    lines.append("")
+    surprises = [(arm, blk["unexpected"]) for arm, blk in isolation.items() if blk["unexpected"]]
+    if surprises:
+        lines += ["Unexpected items (the run is marked errored):", ""]
+        for arm, items in surprises:
+            lines.append("- %s — %s" % (ARM_SHORT.get(arm, arm), ", ".join(
+                "`%s` (%d run%s)" % (k, v, "" if v == 1 else "s") for k, v in sorted(items.items()))))
+        lines.append("")
+    else:
+        lines += ["Unexpected items: none.", ""]
+    return lines
+
+
 def _footer():
     return [
         "## Reproduce",
         "",
         "```",
-        "make bench          # python3 evals/run.py --bench --ablation --runs 3",
-        "python3 evals/metrics/collect.py --out docs/benchmark.md",
+        "make demo-up demo-seed      # local Gerrit for the pushes",
+        "python3 evals/run.py --eval-dir evals/bench-unprompted --arms with,mcp-only,without --runs 1",
+        "python3 evals/run.py --eval-dir evals/bench-split      --arms with,mcp-only,without --runs 1",
+        "python3 evals/run.py --eval-dir evals/bench-rework     --arms with,mcp-only,without --runs 1 \\",
+        "    --variants natural,nudged --push-to <gerrit-project-url>",
+        "python3 evals/run.py --eval-dir evals/bench-review     --arms with,mcp-only,without --runs 1 \\",
+        "    --push-to <gerrit-project-url>",
+        "python3 evals/metrics/collect.py --out docs/benchmark.md   # add --json PATH for the raw report",
         "```",
         "",
-        "`make bench` runs the 3 `evals/bench/` cases (plus the 7 main cases when the runner is asked to) across the arms, "
-        "writes `evals/results/<timestamp>/{aggregate-result.json,runs/…}`, and `collect.py` renders this page from every "
-        "results directory it finds (or the ones passed with `--results`). Targets: budget compliance ≥ 90 %, "
-        "exactly-one-Change-Id 100 %, rule violations 0, cost overhead ≤ +30 % vs arm B.",
+        "Each runner call writes `evals/results/<timestamp>/{aggregate-result.json,runs/<case>[@<variant>]/<arm>/<n>/…}`; "
+        "`collect.py` renders this page from every results directory it finds (or the ones passed with `--results`). "
+        "Use `--runs 3` for numbers. Targets: budget compliance ≥ 90 %, exactly-one-Change-Id 100 %, rule violations 0, "
+        "cost overhead ≤ +30 % vs arm B.",
         "",
     ]
 
@@ -1102,45 +1293,52 @@ def render_markdown(report, sources, generated=None):
     lines.append("")
     lines.append(
         "Does the plugin make an agent produce Gerrit relation chains that are smaller, correct, and cheaper to get "
-        "to review than the same agent without it? Three arms on identical tasks; see targets at the bottom."
+        "to review than the same agent without it, and does it keep a chain intact through rework and review? "
+        "Three arms on identical tasks."
     )
     lines.append("")
     if report["runs_total"] == 0:
-        lines += ["## Results", "", "**No runs yet.** Run `make bench` and re-render (see below).", ""]
+        lines += ["## Results", "", "**No runs yet.** Run the benchmark and re-render (see below).", ""]
         lines += _arms_section()
         lines += ["## Targets", ""] + _targets_table(report["targets"]) + [""]
         lines += _footer()
         return "\n".join(lines)
 
     lines += _arms_section()
+    lines += _reading_section(report)
     lines += ["## Sources", ""]
     for meta in sources:
         extra = []
+        if meta.get("suites"):
+            extra.append("suite " + ", ".join("`%s`" % s for s in meta["suites"]))
+        if meta.get("runs") is not None:
+            extra.append("%d run(s), %d error(s)" % (meta["runs"], meta.get("errors") or 0))
         if meta.get("claudeVersion"):
             extra.append("claude %s" % meta["claudeVersion"])
         if meta.get("overallScore") is not None:
             extra.append("overall score %s" % fmt(_num(meta["overallScore"])))
         if meta.get("costUsd") is not None:
             extra.append("cost %s" % fmt(_num(meta["costUsd"]), "USD"))
+        if meta.get("runIds"):
+            extra.append("Gerrit " + ", ".join("`hashtag:%s`" % t for t in meta["runIds"]))
         lines.append("- `%s`%s" % (meta["dir"], (" — " + ", ".join(extra)) if extra else ""))
     lines.append("")
-    arms = report["arms"]
-    lines += ["## Overall (all cases, %d runs)" % report["runs_total"], ""]
-    lines += _metric_table(report["overall"], arms, report["deltas"]["overall"])
+    lines.append("Total: %d run(s), %d error(s)." % (report["runs_total"], report["errors_total"]))
     lines.append("")
-    lines += ["## Targets (arm C)", ""] + _targets_table(report["targets"]) + [""]
-    lines += ["## Per case", ""]
-    for case in report["cases"]:
-        block = report["per_case"][case]
-        runs = ", ".join("%s: %d" % (ARM_SHORT.get(a, a), block[a]["runs"]) for a in arms if a in block)
-        lines += ["### %s" % case, "", "Runs — %s" % runs, ""]
-        lines += _metric_table(block, arms, report["deltas"]["cases"][case])
-        lines.append("")
-    pipes = report.get("pipelines") or {}
-    if pipes.get("pipelines"):
-        lines += _rework_section(pipes)
-        lines += _guardrails_section(pipes)
-        lines += _cost_section(pipes)
+    for suite, blk in report["suites"].items():
+        lines += _suite_section(suite, blk)
+    if report["split_quality"]:
+        lines += _split_section(report["split_quality"])
+    if report["rework"]:
+        lines += _rework_section(report["rework"])
+    if report["reviewer"]:
+        lines += _review_section(report["reviewer"])
+    if report["conventions"]:
+        lines += _conventions_section(report["conventions"])
+    if report["guardrails"]:
+        spec = GUARDRAIL_METRICS + [(k, "bad: `%s`" % k, "count") for k in report.get("guardrail_extra_keys") or []]
+        lines += _guardrails_section(report["guardrails"], spec)
+    lines += _isolation_section(report["isolation"])
     lines += _footer()
     return "\n".join(lines)
 
@@ -1155,21 +1353,19 @@ def collect(results_dirs):
     return rows, sources
 
 
+def build_report(rows, include_errors=False):
+    report = aggregate(rows, include_errors)
+    report["guardrail_extra_keys"] = [m[0] for m in _guardrail_spec(rows)[len(GUARDRAIL_METRICS):]]
+    return report
+
+
 def _json_ready(report, rows, sources):
     def clean_row(r):
         return {k: v for k, v in r.items() if k not in ("usage",)}
-    return {
-        "generated": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-        "sources": sources,
-        "runs": [clean_row(r) for r in rows],
-        "cases": report["cases"],
-        "arms": report["arms"],
-        "per_case": report["per_case"],
-        "overall": report["overall"],
-        "deltas": report["deltas"],
-        "targets": report["targets"],
-        "pipelines": report.get("pipelines") or {},
-    }
+    out = {"generated": _dt.datetime.now(_dt.timezone.utc).isoformat(), "sources": sources,
+           "runs": [clean_row(r) for r in rows]}
+    out.update(report)
+    return out
 
 
 def main(argv=None):
@@ -1177,13 +1373,11 @@ def main(argv=None):
     parser.add_argument("--results", nargs="+", metavar="DIR", default=None,
                         help="results directories (default: evals/results/*)")
     parser.add_argument("--include-errors", action="store_true",
-                        help="also aggregate runs whose aggregate entry records an error (skipped by default)")
+                        help="also average runs that errored (kept out of the means by default)")
     parser.add_argument("--out", default=None, metavar="PATH",
                         help="markdown output (default: docs/benchmark.md)")
     parser.add_argument("--json", default=None, metavar="PATH", help="also write the merged JSON report")
     args = parser.parse_args(argv)
-    global INCLUDE_ERRORS
-    INCLUDE_ERRORS = bool(getattr(args, 'include_errors', False))
 
     repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
     results_dirs = args.results if args.results else default_results_dirs(repo_root)
@@ -1192,7 +1386,7 @@ def main(argv=None):
         print("collect.py: not a directory: %s" % ", ".join(missing), file=sys.stderr)
         return 2
     rows, sources = collect(results_dirs)
-    report = aggregate(rows)
+    report = build_report(rows, args.include_errors)
     out_path = args.out or os.path.join(repo_root, "docs", "benchmark.md")
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as fh:
@@ -1202,9 +1396,8 @@ def main(argv=None):
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(_json_ready(report, rows, sources), fh, indent=2, sort_keys=True)
             fh.write("\n")
-    n_pipelines = (report.get("pipelines") or {}).get("runs_total") or 0
-    extra = " (%d pipeline run(s))" % n_pipelines if n_pipelines else ""
-    print("collect.py: %d run(s)%s from %d result dir(s) -> %s" % (report["runs_total"], extra, len(results_dirs), out_path))
+    print("collect.py: %d run(s), %d error(s) from %d result dir(s) -> %s"
+          % (report["runs_total"], report["errors_total"], len(results_dirs), out_path))
     return 0
 
 

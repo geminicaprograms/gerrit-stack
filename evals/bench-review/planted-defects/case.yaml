@@ -1,0 +1,25 @@
+# Benchmark case S4 (reviewer).
+# fixture.sh builds the Gerrit-looking workspace AND a seeded two-change chain
+# (chain/*.patch, Change-Ids from the real hook): change 1 is clean, change 2
+# is the one under review and carries exactly three planted defects that still
+# compile and keep the shipped unit tests green:
+#   off-by-one  PingRateLimiter.tryAcquire returns `count < limit`, so a limit
+#               of N answers only N-1 pings and a limit of 1 rejects every
+#               ping (config.md promises N per minute; the test never asserts
+#               the Nth ping)
+#   magic-429   PingAction passes the bare literal 429 to
+#               Response.withStatusCode instead of a named constant
+#   static-map  PingRateLimiter is a @Singleton yet keeps its windows in a
+#               static mutable map: shared by every instance (tests need
+#               unique project names), never cleared
+# A planted defect counts as found when at least one keyword appears in a
+# drafted comment on a file matching `file`.
+context:
+  scaffold_script: fixture.sh
+kind: review
+review:
+  target_subject: '^feat: rate limit the ping REST view$'
+  planted:
+    - {id: off-by-one, kind: blocking, file: 'PingRateLimiter\.java$', keywords: ['off-by-one', 'off by one', '<=', 'one fewer', 'limit of 1', 'limit - 1']}
+    - {id: magic-429, kind: nit, file: 'PingAction\.java$', keywords: ['magic', 'constant', 'literal', 'sc_too_many_requests', 'hard-coded', 'hardcoded']}
+    - {id: static-map, kind: question, file: 'PingRateLimiter\.java$', keywords: ['static', 'instance field', 'shared state', 'shared across', 'global state', 'non-static']}

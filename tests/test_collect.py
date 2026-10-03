@@ -1,15 +1,18 @@
-"""tests/test_collect.py — evals/metrics/collect.py (WP A11).
+"""tests/test_collect.py — evals/metrics/collect.py.
 
-Builds a synthetic results directory (official aggregate-result.json shape +
-runs/<case>/<arm>/<n>/{trace.jsonl,hook-trace.log,chain-metrics.json}) in a
-temp dir and checks per-run parsing, per case x arm aggregation, deltas,
-targets and the rendered markdown cells. Stdlib only.
+Builds synthetic results directories in a temp dir, one per benchmark suite
+(official aggregate-result.json shape + runs/<case>[@<variant>]/<arm>/<n>/ with
+trace.jsonl, hook-trace.log, chain-metrics.json, isolation.json,
+conventions.json, rework-metrics.json / review-metrics.json):
 
-W3 (rework benchmark): ``PipelineResults`` builds ``<base>@<scenario>-<variant>``
-pipelines with ``stage2/``, ``rework-metrics.json`` and guardrails and checks the
-stage rows, rates, deltas and the Rework / Guardrails / Cost per stage sections;
-``LegacyRegression`` pins the legacy rendering to a golden captured from the
-pre-pipeline collector.
+    S1  bench-unprompted   implement, incl. an errored run and a run whose
+                           startup check found an unexpected plugin
+    S2  bench-split        implement with split-quality metrics + a nudged run
+    S3  bench-rework       rework, natural + nudged
+    S4  bench-review       review, incl. a denied MCP call
+
+and checks row fields, rates / means, deltas, section headings, the isolation
+table, errored-run handling and the JSON output. Stdlib only.
 """
 import importlib.util
 import json
@@ -31,7 +34,11 @@ def _load_collect():
 
 collect = _load_collect()
 
+MODEL = "claude-opus-5-5"
+VERSION = "2.1.260"
 
+
+# ------------------------------------------------------------ trace builders ----
 def _assistant(*tool_uses):
     content = [{"type": "tool_use", "id": tid, "name": name, "input": inp} for tid, name, inp in tool_uses]
     return {"type": "assistant", "message": {"role": "assistant", "content": content}}
@@ -47,7 +54,7 @@ def _result(cost, turns, ms):
             "duration_ms": ms, "usage": {"input_tokens": 100, "output_tokens": 50}}
 
 
-def _trace_lines(cost, turns, ms, commits=1, pushes=0, denied_then_fixed=False):
+def _trace_lines(cost, turns, ms, commits=1, pushes=0, denied_then_fixed=False, commands=()):
     events = [{"type": "system", "subtype": "init"}]
     tid = 0
     for _ in range(commits):
@@ -67,10 +74,13 @@ def _trace_lines(cost, turns, ms, commits=1, pushes=0, denied_then_fixed=False):
         tid += 1
         events.append(_assistant((f"t{tid}", "Bash", {"command": "git push origin HEAD:refs/for/master"})))
         events.append(_tool_result(f"t{tid}", "ok"))
-        pushes += 2
-    for _ in range(pushes - (2 if denied_then_fixed else 0)):
+    for _ in range(pushes):
         tid += 1
         events.append(_assistant((f"t{tid}", "Bash", {"command": "git -C . push origin HEAD:refs/for/master"})))
+        events.append(_tool_result(f"t{tid}", "ok"))
+    for command in commands:
+        tid += 1
+        events.append(_assistant((f"t{tid}", "Bash", {"command": command})))
         events.append(_tool_result(f"t{tid}", "ok"))
     events.append(_result(cost, turns, ms))
     return "\n".join(json.dumps(e) for e in events) + "\n"
@@ -88,126 +98,215 @@ def _chain(chain_length, lines_median, within, one_cid, violations=0, **extra):
     return d
 
 
-class SyntheticResults(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="collect-test.")
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.results = os.path.join(self.tmp, "2026-09-30T00-00-00")
-        os.makedirs(self.results)
-        # case feature-3-concern: with x2, mcp-only x2, without x1 (+ without run 2 only in aggregate)
-        self.write_run("feature-3-concern", "with", 1, _trace_lines(0.50, 20, 100_000, commits=3, denied_then_fixed=True),
-                       "git-guard.sh\tpush\tdeny\ngit-guard.sh\tpush\task\n", _chain(3, 40, 100, 100, violations=1))
-        self.write_run("feature-3-concern", "with", 2, _trace_lines(0.70, 30, 200_000, commits=3),
-                       "git-guard.sh\tpush\task\n", _chain(3, 60, 100, 100))
-        self.write_run("feature-3-concern", "mcp-only", 1, _trace_lines(0.40, 15, 80_000, commits=1, pushes=1),
-                       None, _chain(1, 200, 0, 100))
-        self.write_run("feature-3-concern", "mcp-only", 2, _trace_lines(0.60, 25, 120_000, commits=2, pushes=1),
-                       None, _chain(2, 120, 50, 100))
-        self.write_run("feature-3-concern", "without", 1, _trace_lines(0.30, 12, 60_000, commits=1, pushes=1),
-                       None, _chain(1, 250, 0, 0))
-        # a run with a chain-metrics.json but no trace and no hook trace
-        self.write_run("bugfix-1-concern", "with", 1, None, None, _chain(1, 8, 100, 100))
-        aggregate = {
-            "schemaVersion": 1,
-            "claudeVersion": "2.1.284",
-            "costUsd": 2.5,
-            "aggregates": {"overallScore": 0.9, "casesPassed": 1, "casesTotal": 2, "meanDelta": 0.2},
-            "cases": [
-                {"name": "feature-3-concern", "aggregates": {"score": 0.9, "delta": 0.3},
-                 "arms": {"with": [{"score": 1.0}, {"score": 0.8}],
-                          "mcp-only": [{"score": 0.6}, {"score": 0.7}],
-                          "without": [{"score": 0.5}, {"score": 0.4, "costUsd": 0.2, "durationSeconds": 30, "turns": 9}]}},
-                {"name": "bugfix-1-concern", "aggregates": {"score": 1.0},
-                 "arms": {"with": [{"passed": True}]}},
-            ],
-        }
-        with open(os.path.join(self.results, "aggregate-result.json"), "w") as fh:
-            json.dump(aggregate, fh)
+def _isolation(arm, ok=True, unexpected_plugins=()):
+    plugins = {"with": ["gerrit", "gerrit-stack"], "mcp-only": ["gerrit"], "without": []}[arm]
+    return {
+        "ok": ok,
+        "unexpected": {"plugins": list(unexpected_plugins), "mcp_servers": [], "skills": [], "agents": []},
+        "fingerprint": {"plugins": plugins + list(unexpected_plugins),
+                        "mcp_servers": [] if arm == "without" else ["plugin:gerrit:gerrit"],
+                        "skills": [], "agents": [], "model": MODEL, "claude_code_version": VERSION},
+    }
 
-    def write_run(self, case, arm, n, trace, hook, chain):
-        d = os.path.join(self.results, "runs", case, arm, str(n))
+
+def _capability(arm, mcp_denied=0):
+    return {
+        "with": {"mcp_calls": 3, "mcp_denied": mcp_denied, "skill_calls": 2, "hook_lines": 5},
+        "mcp-only": {"mcp_calls": 4, "mcp_denied": mcp_denied, "skill_calls": 1, "hook_lines": 0},
+        "without": {"mcp_calls": 0, "mcp_denied": 0, "skill_calls": 0, "hook_lines": 0},
+    }[arm]
+
+
+class ResultsBuilder:
+    """One results directory: write_run() lays the files down and returns the run record."""
+
+    def __init__(self, root, name):
+        self.dir = os.path.join(root, name)
+        os.makedirs(self.dir)
+        self.cases = {}
+
+    def write_run(self, name, arm, n, trace=None, hook=None, chain=None, files=None, record=None,
+                  isolation="default", capability="default", case_fields=None):
+        d = os.path.join(self.dir, "runs", name, arm, str(n))
         os.makedirs(d)
+        payload = dict(files or {})
+        if chain is not None:
+            payload["chain-metrics.json"] = chain
+        if isolation == "default":
+            isolation = _isolation(arm)
+        if isolation is not None:
+            payload["isolation.json"] = isolation
+        for fname, data in payload.items():
+            with open(os.path.join(d, fname), "w") as fh:
+                json.dump(data, fh)
         if trace is not None:
             with open(os.path.join(d, "trace.jsonl"), "w") as fh:
                 fh.write(trace)
         if hook is not None:
             with open(os.path.join(d, "hook-trace.log"), "w") as fh:
                 fh.write(hook)
-        if chain is not None:
-            with open(os.path.join(d, "chain-metrics.json"), "w") as fh:
-                json.dump(chain, fh)
+        rec = {"run": n, "model": MODEL}
+        if capability == "default":
+            capability = _capability(arm)
+        if capability is not None:
+            rec["capability"] = capability
+        rec.update(record or {})
+        self.add_record(name, arm, rec, case_fields)
         return d
 
-    def rows(self):
-        rows, sources = collect.collect([self.results])
-        return rows, sources
+    def add_record(self, name, arm, rec, case_fields=None):
+        case = self.cases.setdefault(name, {"name": name, "aggregates": {"score": 1.0}, "arms": {}})
+        case.update(case_fields or {})
+        case["arms"].setdefault(arm, []).append(rec)
 
-    def row(self, rows, case, arm, n):
-        return next(r for r in rows if (r["case"], r["arm"], r["n"]) == (case, arm, n))
+    def finish(self, **top):
+        aggregate = {"schemaVersion": 1, "claudeVersion": VERSION, "costUsd": 2.5,
+                     "aggregates": {"overallScore": 0.9}, "cases": list(self.cases.values())}
+        aggregate.update(top)
+        with open(os.path.join(self.dir, "aggregate-result.json"), "w") as fh:
+            json.dump(aggregate, fh)
+        return self.dir
 
-    # ---- per-run parsing --------------------------------------------------
-    def test_trace_process_metrics(self):
-        rows, _ = self.rows()
-        r = self.row(rows, "feature-3-concern", "with", 1)
-        self.assertEqual(r["turns"], 20)
-        self.assertEqual(r["cost_usd"], 0.50)
-        self.assertEqual(r["wall_s"], 100.0)
-        self.assertEqual(r["tool_calls"], 7)        # 3 commits + Read + denied push + Ask + push
-        self.assertEqual(r["bash_calls"], 5)
-        self.assertEqual(r["git_commit_calls"], 3)
-        self.assertEqual(r["git_push_calls"], 2)    # the denied attempt still counts
-        self.assertEqual(r["asks"], 2)              # 1 hook ask + 1 AskUserQuestion
-        self.assertEqual(r["denies"], 1)            # from hook-trace.log
-        self.assertEqual(r["self_corrections"], 1)  # push denied, later push succeeded
-        self.assertEqual(r["score"], 1.0)
-        self.assertEqual(r["chain_length"], 3)
-        self.assertEqual(r["violations"], 1)
-        self.assertEqual(len(r["change_id_set"]), 3)
 
-    def test_denies_fall_back_to_trace_when_no_hook_log(self):
-        rows, _ = self.rows()
-        r = self.row(rows, "feature-3-concern", "mcp-only", 1)
-        self.assertEqual(r["denies"], 0)
-        self.assertEqual(r["asks"], 0)
-        self.assertEqual(r["git_push_calls"], 1)    # `git -C . push` is recognised
-        self.assertEqual(r["score"], 0.6)
+# ---------------------------------------------------------------- fixtures ----
+def build_s1(root):
+    """bench-unprompted / maintenance-mode: C x3 (one crashed), B x2 (one failed the startup check), A x2."""
+    b = ResultsBuilder(root, "s1")
+    case = {"dir": "/repo/evals/bench-unprompted/maintenance-mode"}
+    name = "maintenance-mode"
+    b.write_run(name, "with", 1, _trace_lines(0.50, 20, 100_000, commits=3, denied_then_fixed=True),
+                "git-guard.sh\tpush\tdeny\ngit-guard.sh\tpush\task\n", _chain(3, 40, 100, 100, violations=1),
+                record={"score": 1.0, "hashtags": ["bench-maintenance-mode-with", "run-s1", "var-natural", "rep-1"]},
+                case_fields=case)
+    b.write_run(name, "with", 2, _trace_lines(0.70, 30, 200_000, commits=3),
+                "git-guard.sh\tpush\task\n", _chain(3, 60, 100, 100), record={"score": 0.8})
+    b.write_run(name, "with", 3, record={"error": "claude exited 1", "costUsd": 0.0})
+    b.write_run(name, "mcp-only", 1, _trace_lines(0.40, 15, 80_000, commits=1, pushes=1), None,
+                _chain(1, 200, 0, 100), record={"score": 0.6})
+    b.write_run(name, "mcp-only", 2, _trace_lines(0.60, 25, 120_000, commits=2, pushes=1), None,
+                _chain(2, 120, 50, 100), record={"score": 0.7},
+                isolation=_isolation("mcp-only", ok=False, unexpected_plugins=["rogue-plugin"]))
+    b.write_run(name, "without", 1, _trace_lines(0.30, 12, 60_000, commits=1, pushes=1), None,
+                _chain(1, 250, 0, 0), record={"score": 0.5})
+    # a run that exists only in the aggregate (no run dir, so no isolation record either)
+    b.add_record(name, "without", {"run": 2, "score": 0.4, "costUsd": 0.2, "durationSeconds": 30, "turns": 9})
+    return b.finish()
 
-    def test_missing_trace_uses_aggregate_and_chain_only(self):
-        rows, _ = self.rows()
-        r = self.row(rows, "bugfix-1-concern", "with", 1)
-        self.assertIsNone(r["turns"])
-        self.assertIsNone(r["tool_calls"])
-        self.assertIsNone(r["denies"])
-        self.assertEqual(r["score"], 1.0)           # from `passed: true`
-        self.assertEqual(r["chain_length"], 1)
-        self.assertEqual(r["within_budget_pct"], 100)
 
-    def test_aggregate_only_run_is_included(self):
-        rows, sources = self.rows()
-        r = self.row(rows, "feature-3-concern", "without", 2)
-        self.assertEqual(r["dir"], "")
-        self.assertEqual(r["cost_usd"], 0.2)
-        self.assertEqual(r["wall_s"], 30)
-        # run.py writes the field as "turns" (not "numTurns"); this run has no trace.jsonl,
-        # so the value must come from the aggregate-result.json fallback.
-        self.assertEqual(r["turns"], 9)
-        self.assertIsNone(r["chain_length"])
-        self.assertEqual(len(rows), 7)
-        self.assertEqual(sources[0]["claudeVersion"], "2.1.284")
-        self.assertEqual(sources[0]["overallScore"], 0.9)
+def build_s2(root):
+    """bench-split / maintenance-mode: split-quality metrics, conventions, and one nudged run for C."""
+    b = ResultsBuilder(root, "s2")
+    case = {"suite": "bench-split", "kind": "implement"}
+    name = "maintenance-mode"
+    quality = {
+        "with": dict(purity_pct=100, completeness_pct=100, builds_alone_pct=100, tests_travel_pct=80),
+        "mcp-only": dict(purity_pct=50, completeness_pct=66.7, builds_alone_pct=100, tests_travel_pct=50),
+        "without": dict(purity_pct=0, completeness_pct=100, builds_alone_pct=100, tests_travel_pct=100),
+    }
+    shape = {"with": (6, 30, 100), "mcp-only": (2, 150, 50), "without": (1, 300, 0)}
+    conv = {
+        "with": {"commit_subjects_total": 3, "commit_subjects_conforming": 3, "commitlint_available": True,
+                 "comments_total": 0, "comments_labelled": 0},
+        "mcp-only": {"commit_subjects_total": 2, "commit_subjects_conforming": 1, "commitlint_available": True,
+                     "comments_total": 0, "comments_labelled": 0},
+        "without": {"commit_subjects_total": 1, "commit_subjects_conforming": 0, "commitlint_available": False,
+                    "comments_total": 0, "comments_labelled": 0},
+    }
+    for arm in ("with", "mcp-only", "without"):
+        length, lines, within = shape[arm]
+        b.write_run(name, arm, 1, _trace_lines(0.5, 20, 100_000, commits=length), None,
+                    _chain(length, lines, within, 100, **quality[arm]),
+                    files={"conventions.json": conv[arm]}, record={"score": 1.0}, case_fields=case)
+    b.write_run(name + "@nudged", "with", 1, _trace_lines(0.9, 40, 300_000, commits=6), None,
+                _chain(6, 35, 100, 100, purity_pct=83.3, completeness_pct=100, builds_alone_pct=100,
+                       tests_travel_pct=80),
+                record={"score": 1.0, "variant": "nudged",
+                        "guardrails": {"asks": 0, "denies": 1, "self_corrections": 1,
+                                       "bad_outcomes": {"no_verify_used": 0, "squash_all": 1}}},
+                case_fields=case)
+    return b.finish()
 
-    def test_turns_falls_back_to_aggregate_entry_when_no_trace(self):
-        # Regression for a key mismatch: run.py's aggregate entries carry "turns", not
-        # "numTurns" — load_run must read agg_entry.get("turns") for the fallback to work
-        # when there is no trace.jsonl (aggregate-only run, or a run dir without a trace).
-        row = collect.load_run("", "case", "with", 1, {"turns": 7})
-        self.assertEqual(row["turns"], 7)
-        # A trace's own turns count (when present) still wins over the aggregate value.
-        row_dir = self.write_run("turns-fallback-case", "with", 1,
-                                 _trace_lines(0.1, 42, 1_000), None, None)
-        row2 = collect.load_run(row_dir, "case", "with", 1, {"turns": 7})
-        self.assertEqual(row2["turns"], 42)
 
+def _rework(arm):
+    good = arm == "with"
+    return {
+        "target_change": 103, "seeded_changes": [101, 102, 103, 104, 105, 106],
+        "final_changes": [101, 102, 103, 104, 105, 106] + ([] if good else [107]),
+        "change_id_set_preserved": good, "order_preserved": True, "fix_on_target": good,
+        "untouched_identical": 4 if good else 2, "untouched_total": 4, "may_change_changed": 1,
+        "new_changes_opened": 0 if good else 1, "fixups_left": 0 if good else 1,
+        "builds_alone_pct": 100 if good else 83.3, "conflict_markers_left": 0,
+        "interdiff_lines": 12 if good else 40, "reply_drafted": True, "reply_labelled": good,
+        "reply_posted": not good, "vote_posted": False, "runner_committed": not good,
+    }
+
+
+BAD_REWORK_CMD = "git commit --amend -m 'fix' && git push -f origin HEAD:refs/for/master"
+
+
+def build_s3(root):
+    """bench-rework / fix-mid-conflict x {natural, nudged} x {with, without}."""
+    b = ResultsBuilder(root, "s3")
+    for variant in ("natural", "nudged"):
+        name = "fix-mid-conflict@" + variant
+        case = {"dir": "/repo/evals/bench-rework/fix-mid-conflict", "kind": "rework", "variant": variant}
+        for arm in ("with", "without"):
+            good = arm == "with"
+            trace = _trace_lines(0.8 if good else 0.5, 10, 50_000, commits=1,
+                                 commands=() if good else (BAD_REWORK_CMD,))
+            record = {"score": 1.0, "kind": "rework", "variant": variant,
+                      "hashtags": ["bench-fix-mid-conflict-" + arm, "run-s3", "var-" + variant, "rep-1"]}
+            if variant == "nudged":
+                record["guardrails"] = {
+                    "asks": 0, "denies": 1 if good else 0, "self_corrections": 1 if good else 0,
+                    "bad_outcomes": {"amend_m_used": 0 if good else 1, "force_push_attempted": 0 if good else 1,
+                                     "no_verify_used": 0, "left_uncommitted": 0 if good else 1,
+                                     "refs_heads_moved": False}}
+            b.write_run(name, arm, 1, trace, "git-guard.sh\tpush\task\n" if good else None,
+                        _chain(6 if good else 7, 30, 100, 100),
+                        files={"rework-metrics.json": _rework(arm),
+                               "conventions.json": {"commit_subjects_total": 6, "commit_subjects_conforming": 6,
+                                                    "commitlint_available": True, "comments_total": 1,
+                                                    "comments_labelled": 1 if good else 0}},
+                        record=record, case_fields=case)
+    return b.finish()
+
+
+def build_s4(root):
+    """bench-review / planted-defects: C x2 (second run only in the run record), B x1 with denied MCP calls."""
+    b = ResultsBuilder(root, "s4")
+    name = "planted-defects"
+    case = {"dir": "/repo/evals/bench-review/planted-defects", "kind": "review"}
+    r1 = {"planted_total": 3, "planted_found": 3, "found_ids": ["npe", "nit", "design"], "comments_total": 3,
+          "comments_labelled": 3, "blocking_marked_correct": 1, "published_comments": 0, "votes_posted": 0,
+          "drafts_created": 3}
+    r2 = {"planted_total": 3, "planted_found": 2, "found_ids": ["npe", "nit"], "comments_total": 4,
+          "comments_labelled": 3, "blocking_marked_correct": 1, "published_comments": 0, "votes_posted": 0,
+          "drafts_created": 0}
+    rb = {"planted_total": 3, "planted_found": 1, "found_ids": ["npe"], "comments_total": 2,
+          "comments_labelled": 0, "blocking_marked_correct": 0, "published_comments": 1, "votes_posted": 1,
+          "drafts_created": 0}
+    b.write_run(name, "with", 1, _trace_lines(0.3, 8, 40_000, commits=0), None, None,
+                files={"review-metrics.json": r1}, record={"kind": "review"}, case_fields=case)
+    b.write_run(name, "with", 2, _trace_lines(0.5, 12, 60_000, commits=0), None, None,
+                record={"kind": "review", "reviewMetrics": r2})
+    b.write_run(name, "mcp-only", 1, _trace_lines(0.2, 6, 30_000, commits=0), None, None,
+                files={"review-metrics.json": rb}, record={"kind": "review"},
+                capability=_capability("mcp-only", mcp_denied=2))
+    return b.finish()
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="collect-test.")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def row(self, rows, name, arm, n=1):
+        return next(r for r in rows if (r["name"], r["arm"], r["n"]) == (name, arm, n))
+
+
+# --------------------------------------------------------------- parsing ----
+class Parsing(Base):
     def test_hook_trace_parser_tolerates_blank_and_space_separated(self):
         p = os.path.join(self.tmp, "h.log")
         with open(p, "w") as fh:
@@ -223,661 +322,496 @@ class SyntheticResults(unittest.TestCase):
         self.assertEqual(collect.git_verbs("GIT_EDITOR=true git commit --amend"), ["commit"])
         self.assertEqual(collect.git_verbs(None), [])
 
-    # ---- aggregation ------------------------------------------------------
-    def test_per_case_mean_median_and_deltas(self):
-        rows, _ = self.rows()
-        rep = collect.aggregate(rows)
-        self.assertEqual(rep["cases"], ["bugfix-1-concern", "feature-3-concern"])
-        self.assertEqual(rep["arms"], ["with", "mcp-only", "without"])
-        fc = rep["per_case"]["feature-3-concern"]
-        self.assertEqual(fc["with"]["runs"], 2)
-        self.assertAlmostEqual(fc["with"]["metrics"]["cost_usd"]["mean"], 0.60)
-        self.assertAlmostEqual(fc["with"]["metrics"]["lines_median"]["median"], 50)
-        self.assertAlmostEqual(fc["mcp-only"]["metrics"]["within_budget_pct"]["mean"], 25)
-        self.assertAlmostEqual(fc["with"]["metrics"]["chain_length"]["mean"], 3)
-        self.assertAlmostEqual(fc["mcp-only"]["metrics"]["chain_length"]["mean"], 1.5)
-        d = rep["deltas"]["cases"]["feature-3-concern"]
-        self.assertAlmostEqual(d["with-mcp-only"]["chain_length"], 1.5)
-        self.assertAlmostEqual(d["with-mcp-only"]["within_budget_pct"], 75)
-        self.assertAlmostEqual(d["with-mcp-only"]["cost_usd"], 0.10)
-        self.assertAlmostEqual(d["with-without"]["cost_usd"], 0.60 - 0.25)   # without: 0.30 and 0.20
-        self.assertAlmostEqual(d["with-without"]["one_change_id_pct"], 100)
-        # metrics no arm has stay None instead of raising
-        self.assertIsNone(fc["with"]["metrics"]["builds_alone_pct"]["mean"])
+    def test_bad_outcomes_from_command(self):
+        f = collect.bad_outcomes_from_command
+        self.assertEqual(f("git commit --no-verify -m x")["no_verify_used"], 1)
+        self.assertEqual(f("git commit --amend --no-edit")["amend_m_used"], 0)
+        self.assertEqual(f("git commit -m 'y' --amend")["amend_m_used"], 1)
+        self.assertEqual(f("git push origin +HEAD:refs/for/master")["force_push_attempted"], 1)
+        self.assertEqual(f("git push origin HEAD:refs/for/master%topic=x")["topic_used_unasked"], 1)
+        self.assertEqual(sum(f("git push origin HEAD:refs/for/master").values()), 0)
+        self.assertEqual(f("git push origin HEAD:master")["refs_heads_push_attempted"], 1)
+        self.assertEqual(sum(f(None).values()), 0)
 
-    def test_overall_and_targets(self):
-        rows, _ = self.rows()
-        rep = collect.aggregate(rows)
-        ov = rep["overall"]
-        self.assertEqual(ov["with"]["runs"], 3)
-        self.assertAlmostEqual(ov["with"]["metrics"]["cost_usd"]["mean"], 0.60)       # 0.5, 0.7 (bugfix has none)
-        self.assertAlmostEqual(ov["with"]["metrics"]["within_budget_pct"]["mean"], 100)
-        self.assertAlmostEqual(ov["with"]["metrics"]["violations"]["mean"], 1 / 3)
-        targets = {t["key"]: t for t in rep["targets"]}
+    def test_split_case_name(self):
+        self.assertEqual(collect.split_case_name("fix-mid-conflict@nudged"), ("fix-mid-conflict", "nudged"))
+        self.assertEqual(collect.split_case_name("greeting"), ("greeting", None))
+        self.assertEqual(collect.split_case_name(None), ("", None))
+
+    def test_turns_fall_back_to_the_run_record(self):
+        row = collect.load_run("", "case", "with", 1, {"turns": 7})
+        self.assertEqual(row["turns"], 7)
+        self.assertEqual((row["suite"], row["kind"], row["variant"]), ("bench", "implement", "natural"))
+
+    def test_old_pipeline_code_is_gone(self):
+        for name in ("parse_pipeline_key", "load_pipeline", "aggregate_pipelines", "STAGES", "PIPELINE_KEY_RE"):
+            self.assertFalse(hasattr(collect, name), name)
+        with open(COLLECT) as fh:
+            src = fh.read()
+        for word in ("stage2", "Cost per stage", "pipelineCostUsd", "split_applicable"):
+            self.assertNotIn(word, src)
+
+
+# ------------------------------------------------------- S1: implement ----
+class ImplementUnprompted(Base):
+    def setUp(self):
+        super().setUp()
+        self.results = build_s1(self.tmp)
+        self.rows, self.sources = collect.collect([self.results])
+
+    def test_row_fields(self):
+        self.assertEqual(len(self.rows), 7)
+        r = self.row(self.rows, "maintenance-mode", "with", 1)
+        self.assertEqual((r["suite"], r["kind"], r["case"], r["variant"], r["case_key"]),
+                         ("bench-unprompted", "implement", "maintenance-mode", "natural", "maintenance-mode"))
+        self.assertEqual(r["turns"], 20)
+        self.assertEqual(r["cost_usd"], 0.50)
+        self.assertEqual(r["wall_s"], 100.0)
+        self.assertEqual(r["tool_calls"], 7)        # 3 commits + Read + denied push + Ask + push
+        self.assertEqual(r["bash_calls"], 5)
+        self.assertEqual(r["git_commit_calls"], 3)
+        self.assertEqual(r["git_push_calls"], 2)    # the denied attempt still counts
+        self.assertEqual(r["asks"], 2)              # 1 hook ask + 1 AskUserQuestion
+        self.assertEqual(r["denies"], 1)            # from hook-trace.log
+        self.assertEqual(r["self_corrections"], 1)
+        self.assertEqual(r["score"], 1.0)
+        self.assertEqual(r["chain_length"], 3)
+        self.assertEqual(r["violations"], 1)
+        self.assertEqual(r["model"], MODEL)
+        self.assertEqual(r["claude_version"], VERSION)
+        self.assertTrue(r["isolation"]["ok"])
+        self.assertEqual(r["capability"]["skill_calls"], 2)
+        self.assertFalse(r["errored"])
+        self.assertIsNone(r["rework"])
+        self.assertIsNone(r["review"])
+        self.assertEqual(r["guardrails"]["denies"], 1)          # no runner block -> hook trace
+        self.assertEqual(r["guardrails"]["refs_heads_push_attempted"], 1)   # ... and trace heuristics
+        self.assertIsNone(r["guardrails"]["gerrit_master_moved"])           # runner-only counter, unknown
+
+    def test_aggregate_only_run(self):
+        r = self.row(self.rows, "maintenance-mode", "without", 2)
+        self.assertEqual(r["dir"], "")
+        self.assertEqual((r["cost_usd"], r["wall_s"], r["turns"]), (0.2, 30, 9))
+        self.assertIsNone(r["chain_length"])
+        self.assertIsNone(r["isolation"])
+        self.assertEqual(r["suite"], "bench-unprompted")
+
+    def test_errored_runs_are_flagged(self):
+        crashed = self.row(self.rows, "maintenance-mode", "with", 3)
+        self.assertTrue(crashed["errored"])
+        self.assertEqual(crashed["error"], "claude exited 1")
+        rogue = self.row(self.rows, "maintenance-mode", "mcp-only", 2)
+        self.assertTrue(rogue["errored"])                       # isolation.ok == false marks the run errored
+        self.assertEqual(rogue["error"], "isolation check failed")
+        self.assertEqual(rogue["isolation"]["unexpected"]["plugins"], ["rogue-plugin"])
+
+    def test_errors_excluded_from_means_by_default(self):
+        rep = collect.build_report(self.rows)
+        self.assertEqual((rep["runs_total"], rep["errors_total"], rep["runs_used"]), (7, 2, 5))
+        self.assertEqual(list(rep["suites"]), ["bench-unprompted"])
+        s = rep["suites"]["bench-unprompted"]
+        self.assertEqual(s["arms"], ["with", "mcp-only", "without"])
+        self.assertEqual(s["counts"], {"with": {"runs": 2, "errors": 1}, "mcp-only": {"runs": 1, "errors": 1},
+                                       "without": {"runs": 2, "errors": 0}})
+        self.assertEqual(s["cases"], ["maintenance-mode"])
+        ov = s["overall"]
+        self.assertEqual(ov["with"]["runs"], 2)
+        self.assertAlmostEqual(ov["with"]["metrics"]["cost_usd"]["mean"], 0.60)
+        self.assertAlmostEqual(ov["with"]["metrics"]["lines_median"]["median"], 50)
+        self.assertAlmostEqual(ov["mcp-only"]["metrics"]["chain_length"]["mean"], 1)     # run 2 is errored
+        self.assertAlmostEqual(ov["without"]["metrics"]["cost_usd"]["mean"], 0.25)
+        d = s["deltas"]["overall"]
+        self.assertAlmostEqual(d["with-mcp-only"]["chain_length"], 2)
+        self.assertAlmostEqual(d["with-mcp-only"]["within_budget_pct"], 100)
+        self.assertAlmostEqual(d["with-mcp-only"]["cost_usd"], 0.20)
+        self.assertAlmostEqual(d["with-without"]["cost_usd"], 0.35)
+        self.assertAlmostEqual(d["with-without"]["one_change_id_pct"], 100)
+        self.assertIsNone(ov["with"]["metrics"]["builds_alone_pct"]["mean"])
+        targets = {t["key"]: t for t in s["targets"]}
         self.assertTrue(targets["within_budget_pct"]["pass"])
         self.assertTrue(targets["one_change_id_pct"]["pass"])
         self.assertFalse(targets["violations"]["pass"])
-        # cost overhead: with 0.60 vs mcp-only 0.50 -> +20 % -> pass
-        self.assertAlmostEqual(targets["cost_overhead_pct"]["value"], 20.0)
-        self.assertTrue(targets["cost_overhead_pct"]["pass"])
+        self.assertAlmostEqual(targets["cost_overhead_pct"]["value"], 50.0)
+        self.assertFalse(targets["cost_overhead_pct"]["pass"])
+        # no split-quality signal, no rework, no review in this directory
+        self.assertEqual((rep["split_quality"], rep["rework"], rep["reviewer"], rep["conventions"]), ({}, {}, {}, {}))
+
+    def test_include_errors_averages_them_in(self):
+        rep = collect.build_report(self.rows, include_errors=True)
+        s = rep["suites"]["bench-unprompted"]
+        self.assertEqual(s["counts"]["with"], {"runs": 3, "errors": 1})
+        self.assertAlmostEqual(s["overall"]["with"]["metrics"]["cost_usd"]["mean"], 0.40)   # 0.5, 0.7, 0.0
+        self.assertAlmostEqual(s["overall"]["mcp-only"]["metrics"]["chain_length"]["mean"], 1.5)
+        self.assertEqual(rep["runs_used"], 7)
+
+    def test_isolation_counts_every_run(self):
+        iso = collect.build_report(self.rows)["isolation"]
+        self.assertEqual(list(iso), ["with", "mcp-only", "without"])
+        self.assertEqual((iso["with"]["runs"], iso["with"]["errors"], iso["with"]["isolation_ok"]), (3, 1, 3))
+        b = iso["mcp-only"]
+        self.assertEqual((b["runs"], b["errors"], b["isolation_ok"], b["isolation_failed"]), (2, 1, 1, 1))
+        self.assertEqual(b["unexpected"], {"plugins: rogue-plugin": 1})
+        self.assertEqual(b["mcp_calls"], 8)                      # errored run still counted
+        a = iso["without"]
+        self.assertEqual((a["runs"], a["isolation_ok"], a["isolation_unrecorded"]), (2, 1, 1))
+        self.assertEqual(a["models"], [MODEL])
+        self.assertEqual(a["capability"], "n/a (no plugin loaded)")
+        self.assertEqual(iso["with"]["claude_versions"], [VERSION])
+
+    def test_markdown(self):
+        md = collect.render_markdown(collect.build_report(self.rows), self.sources, generated="now")
+        for heading in ("## Arms", "## Reading the numbers", "## Sources",
+                        "## Suite `bench-unprompted` — S1 unprompted: does the agent split on its own",
+                        "### Overall (bench-unprompted, natural variant, 5 runs)",
+                        "### Targets (bench-unprompted, arm C)", "### Per case (bench-unprompted)",
+                        "#### maintenance-mode", "## Guardrails", "## Isolation", "## Reproduce"):
+            self.assertIn(heading, md)
+        for heading in ("## Split quality", "## Rework", "## Reviewer", "## Conventions", "Cost per stage"):
+            self.assertNotIn(heading, md)
+        self.assertIn("Runs / errors — C with: 2 / 1, B mcp-only: 1 / 1, A without: 2 / 0", md)
+        self.assertIn("| chain length | 3 / 3 | 1 / 1 | 1 / 1 | +2 | +2 |", md)
+        self.assertIn("| within budget | 100 % / 100 % | 0 % / 0 % | 0 % / 0 % | +100 % | +100 % |", md)
+        self.assertIn("| cost | $0.600 / $0.600 | $0.400 / $0.400 | $0.250 / $0.250 | +$0.200 | +$0.350 |", md)
+        self.assertIn("| budget compliance | >= 90 % | 100.0 % | PASS |", md)
+        self.assertIn("| cost overhead vs mcp-only | <= 30 % | 50.0 % | FAIL |", md)
+        self.assertIn("Total: 7 run(s), 2 error(s).", md)
+        self.assertIn("suite `bench-unprompted`, 7 run(s), 2 error(s), claude %s" % VERSION, md)
+        self.assertIn("`hashtag:run-s1`", md)
+        self.assertIn("1 run per cell shows the shape", md)
+        self.assertIn("Seeded chain = identical starting point", md)
+        self.assertIn("Team files are present in every arm's fixture", md)
+        self.assertIn("excluded from the means", md)
+        self.assertNotIn("builds alone", md.split("## Reproduce")[0].split("## Suite")[1].split("## Guardrails")[0])
+        # isolation table: the unexpected plugin is named, the errored runs are counted
+        self.assertIn("| B mcp-only | 2 | 1 | 1/2 | `%s` | %s | 8 / 0 | 2 | 0 | gerrit MCP used in 2/2 runs |"
+                      % (MODEL, VERSION), md)
+        self.assertIn("| A without | 2 | 0 | 1/1 (1 not recorded) |", md)
+        self.assertIn("- B mcp-only — `plugins: rogue-plugin` (1 run)", md)
+        order = [md.index(h) for h in ("## Arms", "## Reading the numbers", "## Sources", "## Suite",
+                                       "## Guardrails", "## Isolation", "## Reproduce")]
+        self.assertEqual(order, sorted(order))
 
     def test_empty_report(self):
-        rep = collect.aggregate([])
+        rep = collect.build_report([])
         self.assertEqual(rep["runs_total"], 0)
         self.assertTrue(all(t["pass"] is None for t in rep["targets"]))
         md = collect.render_markdown(rep, [], generated="now")
         self.assertIn("No runs yet", md)
-        self.assertIn("make bench", md)
         self.assertIn("| budget compliance | >= 90 % | – | – |", md)
+        self.assertIn("## Reproduce", md)
 
-    # ---- rendering --------------------------------------------------------
-    def test_markdown_cells(self):
-        rows, sources = self.rows()
-        rep = collect.aggregate(rows)
+
+# ------------------------------------------------- S2: split quality ----
+class ImplementSplit(Base):
+    def setUp(self):
+        super().setUp()
+        self.s1 = build_s1(self.tmp)
+        self.s2 = build_s2(self.tmp)
+        self.rows, self.sources = collect.collect([self.s1, self.s2])
+
+    def test_two_suites_are_kept_apart(self):
+        rep = collect.build_report(self.rows)
+        self.assertEqual(list(rep["suites"]), ["bench-unprompted", "bench-split"])
+        s2 = rep["suites"]["bench-split"]
+        self.assertEqual(s2["runs"], 3)                                   # the nudged run is not in Overall
+        self.assertEqual(s2["cases"], ["maintenance-mode", "maintenance-mode@nudged"])
+        self.assertAlmostEqual(s2["overall"]["with"]["metrics"]["chain_length"]["mean"], 6)
+        self.assertAlmostEqual(s2["per_case"]["maintenance-mode@nudged"]["with"]["metrics"]["cost_usd"]["mean"], 0.9)
+        self.assertAlmostEqual(rep["suites"]["bench-unprompted"]["overall"]["with"]["metrics"]["chain_length"]["mean"], 3)
+        nudged = self.row(self.rows, "maintenance-mode@nudged", "with")
+        self.assertEqual((nudged["suite"], nudged["case"], nudged["variant"], nudged["case_key"]),
+                         ("bench-split", "maintenance-mode", "nudged", "maintenance-mode@nudged"))
+
+    def test_split_quality_block(self):
+        rep = collect.build_report(self.rows)
+        self.assertEqual(list(rep["split_quality"]), ["bench-split"])     # S1 has no split-quality signal
+        sec = rep["split_quality"]["bench-split"]["maintenance-mode"]
+        self.assertEqual(sec["counts"]["with"], {"runs": 1, "errors": 0})
+        m = sec["arms"]["with"]["metrics"]
+        self.assertEqual((m["purity_pct"]["mean"], m["tests_travel_pct"]["mean"], m["chain_length"]["mean"]),
+                         (100, 80, 6))
+        self.assertAlmostEqual(sec["deltas"]["with-mcp-only"]["purity_pct"], 50)
+        self.assertAlmostEqual(sec["deltas"]["with-mcp-only"]["completeness_pct"], 33.3)
+        self.assertAlmostEqual(sec["deltas"]["with-without"]["tests_travel_pct"], -20)
+
+    def test_conventions_block(self):
+        rep = collect.build_report(self.rows)
+        self.assertEqual(list(rep["conventions"]), ["bench-split"])
+        sec = rep["conventions"]["bench-split"]
+        w = sec["arms"]["with"]["metrics"]["subjects"]                    # natural 3/3 + nudged run without a file
+        self.assertEqual((w["num"], w["den"], w["rate_pct"]), (3, 3, 100.0))
+        self.assertEqual(sec["arms"]["mcp-only"]["metrics"]["subjects"]["rate_pct"], 50.0)
+        self.assertAlmostEqual(sec["deltas"]["with-without"]["subjects"], 100.0)
+        self.assertEqual(sec["commitlint_fallback_runs"], 1)
+        self.assertEqual(sec["arms"]["without"]["commitlint_fallback_runs"], 1)
+
+    def test_guardrails_keep_unknown_bad_outcomes(self):
+        rep = collect.build_report(self.rows)
+        self.assertEqual(rep["guardrail_extra_keys"], ["squash_all"])
+        g = rep["guardrails"]["nudged"]
+        self.assertEqual(g["counts"], {"with": {"runs": 1, "errors": 0}})
+        self.assertEqual(g["arms"]["with"]["metrics"]["squash_all"]["mean"], 1)
+        self.assertEqual(g["arms"]["with"]["metrics"]["denies"]["mean"], 1)
+        self.assertEqual(rep["guardrails"]["natural"]["counts"]["with"], {"runs": 3, "errors": 1})
+
+    def test_markdown(self):
+        md = collect.render_markdown(collect.build_report(self.rows), self.sources, generated="now")
+        self.assertIn("## Suite `bench-split` — S2 prompted split", md)
+        self.assertIn("### Overall (bench-split, natural variant, 3 runs)", md)
+        self.assertIn("#### maintenance-mode@nudged", md)
+        self.assertIn("## Split quality", md)
+        self.assertIn("### bench-split — maintenance-mode", md)
+        self.assertNotIn("### bench-unprompted — maintenance-mode", md)
+        self.assertIn("| chain length | 6 / 6 | 2 / 2 | 1 / 1 | +4 | +5 |", md)
+        self.assertIn("| purity (changes with exactly one concern) | 100 % / 100 % | 50 % / 50 % | 0 % / 0 % "
+                      "| +50 % | +100 % |", md)
+        self.assertIn("| completeness (concerns living in one change) | 100 % / 100 % | 66.7 % / 66.7 % "
+                      "| 100 % / 100 % | +33.3 % | 0 % |", md)
+        self.assertIn("| tests travel with the code | 80 % / 80 % | 50 % / 50 % | 100 % / 100 % | +30 % | -20 % |", md)
+        self.assertIn("| builds alone | 100 % / 100 % | 100 % / 100 % | 100 % / 100 % | 0 % | 0 % |", md)
+        self.assertIn("| exactly one Change-Id | 100 % / 100 % |", md)
+        self.assertIn("## Conventions", md)
+        self.assertIn("| conforming commit subjects | 100 % (3/3) | 50 % (1/2) | 0 % (0/1) | +50 % | +100 % |", md)
+        self.assertNotIn("| labelled comments |", md)                     # nothing drafted -> row omitted
+        self.assertIn("Note: commitlint was unavailable in 1 run(s) (A without: 1); their subjects were checked "
+                      "with the Conventional Commits regex fallback.", md)
+        self.assertIn("### nudged", md)
+        self.assertIn("| bad: `squash_all` | 1 / 1 | – | – |", md)
+        self.assertLess(md.index("## Suite `bench-unprompted`"), md.index("## Suite `bench-split`"))
+        self.assertLess(md.index("## Suite `bench-split`"), md.index("## Split quality"))
+        self.assertLess(md.index("## Split quality"), md.index("## Conventions"))
+        self.assertLess(md.index("## Conventions"), md.index("## Guardrails"))
+
+
+# ------------------------------------------------------- S3: rework ----
+class Rework(Base):
+    def setUp(self):
+        super().setUp()
+        self.results = build_s3(self.tmp)
+        self.rows, self.sources = collect.collect([self.results])
+
+    def test_row_fields(self):
+        self.assertEqual(len(self.rows), 4)
+        r = self.row(self.rows, "fix-mid-conflict@nudged", "without")
+        self.assertEqual((r["suite"], r["kind"], r["case"], r["variant"]),
+                         ("bench-rework", "rework", "fix-mid-conflict", "nudged"))
+        rw = r["rework"]
+        self.assertEqual((rw["seeded_changes"], rw["final_changes"]), (6, 7))      # lists are counted
+        self.assertEqual((rw["change_id_set_preserved"], rw["order_preserved"]), (0.0, 1.0))
+        self.assertEqual((rw["untouched_identical"], rw["untouched_total"]), (2, 4))
+        self.assertEqual(rw["target_change"], 103)
+        self.assertEqual(r["guardrails"]["amend_m_used"], 1)                        # runner block
+        self.assertEqual(r["guardrails"]["refs_heads_moved"], 0.0)
+        nat = self.row(self.rows, "fix-mid-conflict@natural", "without")
+        self.assertEqual(nat["guardrails"]["amend_m_used"], 1)                      # trace fallback
+        self.assertEqual(nat["guardrails"]["force_push_attempted"], 1)
+        self.assertEqual(nat["guardrails"]["left_uncommitted"], 1.0)                # from runner_committed
+        self.assertIsNone(nat["guardrails"]["refs_heads_moved"])
+
+    def test_kind_and_variant_are_inferred_without_an_aggregate(self):
+        bare = os.path.join(self.tmp, "bare")
+        d = os.path.join(bare, "runs", "fix-mid-conflict@nudged", "with", "1")
+        os.makedirs(d)
+        with open(os.path.join(d, "rework-metrics.json"), "w") as fh:
+            json.dump(_rework("with"), fh)
+        rows, sources = collect.collect([bare])
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual((r["suite"], r["kind"], r["case"], r["variant"]),
+                         ("bench-rework", "rework", "fix-mid-conflict", "nudged"))
+        self.assertIsNone(r["isolation"])
+        self.assertEqual(sources[0]["suites"], ["bench-rework"])
+        iso = collect.build_report(rows)["isolation"]["with"]
+        self.assertEqual((iso["isolation_unrecorded"], iso["capability"]), (1, "not recorded"))
+
+    def test_rates_means_and_deltas(self):
+        rep = collect.build_report(self.rows)
+        self.assertEqual(rep["suites"], {})                              # no implement runs
+        self.assertEqual(list(rep["rework"]), ["fix-mid-conflict@natural", "fix-mid-conflict@nudged"])
+        sec = rep["rework"]["fix-mid-conflict@natural"]
+        self.assertEqual((sec["case"], sec["variant"]), ("fix-mid-conflict", "natural"))
+        self.assertEqual(sec["counts"], {"with": {"runs": 1, "errors": 0}, "without": {"runs": 1, "errors": 0}})
+        w, a = sec["arms"]["with"]["metrics"], sec["arms"]["without"]["metrics"]
+        self.assertEqual((w["fix_on_target"]["true"], w["fix_on_target"]["n"], w["fix_on_target"]["rate_pct"]),
+                         (1, 1, 100.0))
+        self.assertEqual(a["fix_on_target"]["rate_pct"], 0.0)
+        self.assertEqual((a["untouched"]["num"], a["untouched"]["den"], a["untouched"]["rate_pct"]), (2, 4, 50.0))
+        self.assertEqual(w["interdiff_lines"]["mean"], 12)
+        self.assertEqual(a["final_changes"]["mean"], 7)
+        d = sec["deltas"]
+        self.assertEqual(d["with-mcp-only"], {})                         # no arm B here
+        self.assertAlmostEqual(d["with-without"]["untouched"], 50.0)
+        self.assertAlmostEqual(d["with-without"]["reply_posted"], -100.0)
+        self.assertAlmostEqual(d["with-without"]["interdiff_lines"], -28)
+        self.assertAlmostEqual(d["with-without"]["builds_alone_pct"], 16.7)
+        self.assertAlmostEqual(d["with-without"]["cost_usd"], 0.3)
+        # every rework-metrics key of the contract is aggregated
+        contract = ["seeded_changes", "final_changes", "change_id_set_preserved", "order_preserved", "fix_on_target",
+                    "untouched_identical", "untouched_total", "may_change_changed", "new_changes_opened",
+                    "fixups_left", "builds_alone_pct", "conflict_markers_left", "interdiff_lines", "reply_drafted",
+                    "reply_labelled", "reply_posted", "vote_posted", "runner_committed"]
+        self.assertTrue(set(contract) <= set(collect._spec_keys(collect.REWORK_METRICS)))
+        self.assertEqual(sec["hashtags"], ["bench-fix-mid-conflict-with", "bench-fix-mid-conflict-without",
+                                           "rep-1", "run-s3", "var-natural"])
+
+    def test_guardrails_per_variant(self):
+        g = collect.build_report(self.rows)["guardrails"]
+        self.assertEqual(list(g), ["natural", "nudged"])
+        n = g["nudged"]
+        self.assertEqual(n["arms"]["without"]["metrics"]["amend_m_used"]["mean"], 1)
+        self.assertEqual(n["arms"]["with"]["metrics"]["self_corrections"]["mean"], 1)
+        self.assertEqual(n["arms"]["with"]["metrics"]["refs_heads_moved"]["rate_pct"], 0.0)
+        self.assertAlmostEqual(n["deltas"]["with-without"]["denies"], 1)
+        self.assertAlmostEqual(n["deltas"]["with-without"]["force_push_attempted"], -1)
+        self.assertEqual(g["natural"]["arms"]["with"]["metrics"]["asks"]["mean"], 1)   # hook trace ask
+
+    def test_markdown(self):
+        md = collect.render_markdown(collect.build_report(self.rows), self.sources, generated="now")
+        self.assertIn("## Rework (seeded chain)", md)
+        self.assertIn("### fix-mid-conflict — natural", md)
+        self.assertIn("### fix-mid-conflict — nudged", md)
+        self.assertIn("Runs / errors — C with: 1 / 0, A without: 1 / 0 · Gerrit: `hashtag:run-s3`", md)
+        self.assertIn("| seeded changes | 6 / 6 | 6 / 6 | – | 0 |", md)
+        self.assertIn("| changes after the rework | 6 / 6 | 7 / 7 | – | -1 |", md)
+        self.assertIn("| Change-Id set preserved | 100 % (1/1) | 0 % (0/1) | – | +100 % |", md)
+        self.assertIn("| untouched changes patch-identical | 100 % (4/4) | 50 % (2/4) | – | +50 % |", md)
+        self.assertIn("| every commit builds | 100 % / 100 % | 83.3 % / 83.3 % | – | +16.7 % |", md)
+        self.assertIn("| interdiff lines | 12 / 12 | 40 / 40 | – | -28 |", md)
+        self.assertIn("| reply labelled (Conventional Comments) | 100 % (1/1) | 0 % (0/1) | – | +100 % |", md)
+        self.assertIn("| reply posted before approval (must be 0) | 0 % (0/1) | 100 % (1/1) | – | -100 % |", md)
+        self.assertIn("| work left uncommitted (runner committed) | 0 % (0/1) | 100 % (1/1) | – | -100 % |", md)
+        self.assertIn("| cost | $0.800 / $0.800 | $0.500 / $0.500 | – | +$0.300 |", md)
+        self.assertIn("| bad: `commit --amend -m` used | 0 / 0 | 1 / 1 | – | -1 |", md)
+        self.assertIn("| bad: local remote master moved | 0 % (0/1) | 0 % (0/1) | – | 0 % |", md)
+        self.assertIn("### bench-rework", md)                            # conventions per suite
+        self.assertIn("| labelled comments | 100 % (2/2) | 0 % (0/2) | – | +100 % |", md)
+        self.assertNotIn("## Suite", md)
+        self.assertNotIn("## Split quality", md)
+        self.assertNotIn("## Reviewer", md)
+        self.assertLess(md.index("## Rework (seeded chain)"), md.index("## Conventions"))
+
+
+# ------------------------------------------------------- S4: review ----
+class Reviewer(Base):
+    def setUp(self):
+        super().setUp()
+        self.results = build_s4(self.tmp)
+        self.rows, self.sources = collect.collect([self.results])
+
+    def test_row_fields(self):
+        self.assertEqual(len(self.rows), 3)
+        r1 = self.row(self.rows, "planted-defects", "with", 1)
+        self.assertEqual((r1["suite"], r1["kind"], r1["variant"]), ("bench-review", "review", "natural"))
+        self.assertEqual(r1["review"]["found_ids"], ["npe", "nit", "design"])
+        self.assertEqual((r1["review"]["planted_found"], r1["review"]["planted_total"]), (3, 3))
+        r2 = self.row(self.rows, "planted-defects", "with", 2)
+        self.assertEqual(r2["review"]["planted_found"], 2)                # from the run record (no file)
+        self.assertEqual(self.row(self.rows, "planted-defects", "mcp-only")["capability"]["mcp_denied"], 2)
+
+    def test_block(self):
+        sec = collect.build_report(self.rows)["reviewer"]["planted-defects"]
+        w, b = sec["arms"]["with"], sec["arms"]["mcp-only"]
+        self.assertEqual((w["metrics"]["planted"]["num"], w["metrics"]["planted"]["den"]), (5, 6))
+        self.assertAlmostEqual(w["metrics"]["planted"]["rate_pct"], 83.3333, places=3)
+        self.assertAlmostEqual(w["metrics"]["labelled"]["rate_pct"], 600 / 7)
+        self.assertEqual(w["metrics"]["drafts_created"]["mean"], 1.5)
+        self.assertEqual(b["metrics"]["published_comments"]["mean"], 1)
+        self.assertEqual(w["found_ids"], {"npe": 2, "nit": 2, "design": 1})
+        self.assertAlmostEqual(sec["deltas"]["with-mcp-only"]["planted"], 50.0)
+        self.assertAlmostEqual(sec["deltas"]["with-mcp-only"]["votes_posted"], -1)
+        self.assertEqual(sec["deltas"]["with-without"], {})
+
+    def test_isolation_reports_denied_mcp_calls(self):
+        iso = collect.build_report(self.rows)["isolation"]
+        w, b = iso["with"], iso["mcp-only"]
+        self.assertEqual((w["runs"], w["isolation_ok"], w["mcp_calls"], w["mcp_denied"], w["skill_calls"],
+                          w["hook_lines"]), (2, 2, 6, 0, 4, 10))
+        self.assertEqual(w["capability"], "gerrit-stack (skill or hook) used in 2/2 runs, gerrit MCP in 2/2")
+        self.assertEqual((b["mcp_calls"], b["mcp_denied"]), (4, 2))
+        self.assertEqual(b["capability"], "gerrit MCP used in 1/1 runs; 2 MCP call(s) denied")
+        self.assertEqual(b["unexpected"], {})
+
+    def test_markdown(self):
+        md = collect.render_markdown(collect.build_report(self.rows), self.sources, generated="now")
+        self.assertIn("## Reviewer", md)
+        self.assertIn("### planted-defects", md)
+        self.assertIn("Runs / errors — C with: 2 / 0, B mcp-only: 1 / 0", md)
+        self.assertIn("| planted defects found | 83.3 % (5/6) | 33.3 % (1/3) | +50 % | – |", md)
+        self.assertIn("| comments labelled | 85.7 % (6/7) | 0 % (0/2) | +85.7 % | – |", md)
+        self.assertIn("| blocking defects marked blocking | 1 / 1 | 0 / 0 | +1 | – |", md)
+        self.assertIn("| Gerrit drafts created | 1.5 / 1.5 | 0 / 0 | +1.5 | – |", md)
+        self.assertIn("| comments published (must be 0) | 0 / 0 | 1 / 1 | -1 | – |", md)
+        self.assertIn("| votes posted (must be 0) | 0 / 0 | 1 / 1 | -1 | – |", md)
+        self.assertIn("Found per planted defect — C with: `design` 1/2, `nit` 2/2, `npe` 2/2; B mcp-only: `npe` 1/1", md)
+        self.assertIn("| C with | 2 | 0 | 2/2 | `%s` | %s | 6 / 0 | 4 | 10 | gerrit-stack (skill or hook) used in "
+                      "2/2 runs, gerrit MCP in 2/2 |" % (MODEL, VERSION), md)
+        self.assertIn("| B mcp-only | 1 | 0 | 1/1 | `%s` | %s | 4 / 2 | 1 | 0 | gerrit MCP used in 1/1 runs; "
+                      "2 MCP call(s) denied |" % (MODEL, VERSION), md)
+        self.assertIn("Unexpected items: none.", md)
+        self.assertNotIn("## Rework", md)
+
+
+# ------------------------------------------------------ everything ----
+class AllSuites(Base):
+    def setUp(self):
+        super().setUp()
+        self.dirs = [build_s1(self.tmp), build_s2(self.tmp), build_s3(self.tmp), build_s4(self.tmp)]
+
+    def test_section_order(self):
+        rows, sources = collect.collect(self.dirs)
+        self.assertEqual(len(rows), 7 + 4 + 4 + 3)
+        rep = collect.build_report(rows)
+        self.assertEqual(rep["kinds"], {"implement": 11, "rework": 4, "review": 3})
+        self.assertEqual(rep["arms"], ["with", "mcp-only", "without"])
+        self.assertEqual(rep["isolation"]["with"]["runs"], 3 + 2 + 2 + 2)
         md = collect.render_markdown(rep, sources, generated="now")
-        self.assertIn("### feature-3-concern", md)
-        self.assertIn("Runs — C with: 2, B mcp-only: 2, A without: 2", md)
-        self.assertIn("| chain length | 3 / 3 | 1.5 / 1.5 | 1 / 1 | +1.5 | +2 |", md)
-        self.assertIn("| within budget | 100 % / 100 % | 25 % / 25 % | 0 % / 0 % | +75 % | +100 % |", md)
-        self.assertIn("| cost | $0.600 / $0.600 | $0.500 / $0.500 | $0.250 / $0.250 | +$0.100 | +$0.350 |", md)
-        self.assertIn("| rule violations | == 0 | 0.3 | FAIL |", md)
-        self.assertIn("| budget compliance | >= 90 % | 100.0 % | PASS |", md)
-        self.assertIn("| cost overhead vs mcp-only | <= 30 % | 20.0 % | PASS |", md)
-        self.assertIn("claude 2.1.284", md)
-        self.assertIn("**A — `without`**", md)
-        self.assertIn("**C — `with`**", md)
-        self.assertNotIn("builds alone", md)        # no arm has the metric -> row omitted
+        headings = ["## Arms", "## Reading the numbers", "## Sources", "## Suite `bench-unprompted`",
+                    "## Suite `bench-split`", "## Split quality", "## Rework (seeded chain)", "## Reviewer",
+                    "## Conventions", "## Guardrails", "## Isolation", "## Reproduce"]
+        positions = [md.index(h) for h in headings]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(list(rep["conventions"]), ["bench-split", "bench-rework"])
 
     def test_main_writes_markdown_and_json(self):
         out_md = os.path.join(self.tmp, "bench.md")
         out_json = os.path.join(self.tmp, "bench.json")
-        rc = collect.main(["--results", self.results, "--out", out_md, "--json", out_json])
-        self.assertEqual(rc, 0)
+        self.assertEqual(collect.main(["--results"] + self.dirs + ["--out", out_md, "--json", out_json]), 0)
         with open(out_md) as fh:
-            self.assertIn("## Overall (all cases, 7 runs)", fh.read())
+            md = fh.read()
+        self.assertIn("Total: 18 run(s), 2 error(s).", md)
         with open(out_json) as fh:
             data = json.load(fh)
-        self.assertEqual(len(data["runs"]), 7)
-        self.assertEqual(data["overall"]["with"]["runs"], 3)
-        self.assertEqual(data["targets"][0]["key"], "within_budget_pct")
+        self.assertEqual(len(data["runs"]), 18)
+        self.assertEqual({r["kind"] for r in data["runs"]}, {"implement", "rework", "review"})
+        self.assertNotIn("usage", data["runs"][0])
+        for section in ("suites", "split_quality", "rework", "reviewer", "conventions", "guardrails", "isolation"):
+            self.assertIn(section, data)
+        self.assertEqual(sorted(data["suites"]), ["bench-split", "bench-unprompted"])
+        self.assertEqual(data["suites"]["bench-unprompted"]["counts"]["with"], {"runs": 2, "errors": 1})
+        self.assertEqual(data["split_quality"]["bench-split"]["maintenance-mode"]["arms"]["with"]["metrics"]
+                         ["purity_pct"]["mean"], 100)
+        self.assertEqual(data["rework"]["fix-mid-conflict@nudged"]["arms"]["without"]["metrics"]["fixups_left"]["mean"], 1)
+        self.assertEqual(data["reviewer"]["planted-defects"]["arms"]["with"]["metrics"]["planted"]["num"], 5)
+        self.assertEqual(data["isolation"]["mcp-only"]["unexpected"], {"plugins: rogue-plugin": 1})
+        self.assertEqual(data["isolation"]["mcp-only"]["mcp_denied"], 2)
+        self.assertEqual((data["runs_total"], data["errors_total"], data["include_errors"]), (18, 2, False))
+        self.assertEqual(len(data["sources"]), 4)
+
+    def test_main_include_errors(self):
+        out_md = os.path.join(self.tmp, "bench.md")
+        out_json = os.path.join(self.tmp, "bench.json")
+        self.assertEqual(collect.main(["--results", self.dirs[0], "--include-errors", "--out", out_md,
+                                       "--json", out_json]), 0)
+        with open(out_md) as fh:
+            md = fh.read()
+        self.assertIn("Runs / errors — C with: 3 / 1, B mcp-only: 2 / 1, A without: 2 / 0", md)
+        self.assertIn("included in the means (`--include-errors`)", md)
+        with open(out_json) as fh:
+            self.assertTrue(json.load(fh)["include_errors"])
 
     def test_main_rejects_missing_dir(self):
         rc = collect.main(["--results", os.path.join(self.tmp, "nope"), "--out", os.path.join(self.tmp, "x.md")])
         self.assertEqual(rc, 2)
-
-
-# ---------------------------------------------------------------------------
-# Rework pipelines (W3): <base>@<scenario>-<variant> entries with stage2/,
-# rework-metrics.json and guardrails; legacy entries must render unchanged.
-# ---------------------------------------------------------------------------
-def _rework(arm, scenario):
-    d = {
-        "target_change": 12, "target_change_id": "I" + "a" * 40,
-        "stage1_changes": [11, 12, 13], "stage2_changes": [11, 12, 13],
-        "fixup_on_target": True, "change_id_set_preserved": True, "new_changes_opened": 0,
-        "descendants_total": 1, "descendants_rebased": 1, "changes_needing_reread": 1,
-        "interdiff_lines": 12 if arm == "with" else 30, "landable_below": 1 if arm == "with" else 0,
-        "landable_below_lines": 40 if arm == "with" else 0, "split_count": None, "split_equivalent": None,
-        "reply_drafted": True, "reply_conventional": arm == "with", "reply_posted": False,
-        "vote_posted": arm == "without",
-    }
-    if scenario == "split":
-        d.update({"split_count": 3, "split_equivalent": True, "stage2_changes": [11, 12, 13, 14, 15, 16]})
-    return d
-
-
-def _guardrails(arm):
-    zero = {k: 0 for k in ("no_verify_used", "amend_m_used", "force_push_attempted", "topic_used_unasked",
-                           "refs_heads_push_attempted", "commit_without_change_id")}
-    zero.update({"refs_heads_moved": False, "gerrit_master_moved": False})
-    bad2 = dict(zero)
-    if arm == "without":
-        bad2.update({"amend_m_used": 1, "force_push_attempted": 1, "refs_heads_moved": True})
-    return {
-        "stage1": {"asks": 1, "denies": 0, "self_corrections": 0, "bad_outcomes": dict(zero)},
-        "stage2": {"asks": 1, "denies": 1 if arm == "with" else 0, "self_corrections": 1 if arm == "with" else 0,
-                   "bad_outcomes": bad2},
-    }
-
-
-BAD_STAGE2_CMD = "git commit --amend -m 'fix' && git push -f origin HEAD:refs/heads/master"
-
-
-class PipelineResults(unittest.TestCase):
-    """rate-limited-ping x {fix-natural, fix-nudged} x {with, without}, one run each."""
-
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="collect-pipe.")
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.results = os.path.join(self.tmp, "20260930-120000")
-        os.makedirs(self.results)
-        cases = []
-        for key in ("rate-limited-ping@fix-natural", "rate-limited-ping@fix-nudged"):
-            base, rest = key.split("@")
-            scenario, variant = rest.split("-")
-            arms = {}
-            for arm in ("with", "without"):
-                arms[arm] = [self.write_pipeline(key, arm, 1, scenario, variant)]
-            cases.append({"name": key, "baseCase": base, "scenario": scenario, "variant": variant,
-                          "aggregates": {"score": 1.0}, "arms": arms})
-        aggregate = {"schemaVersion": 1, "claudeVersion": "2.1.285", "costUsd": 4.8,
-                     "aggregates": {"overallScore": 1.0}, "cases": cases}
-        with open(os.path.join(self.results, "aggregate-result.json"), "w") as fh:
-            json.dump(aggregate, fh)
-
-    def write_pipeline(self, key, arm, n, scenario, variant):
-        d = os.path.join(self.results, "runs", key, arm, str(n))
-        s2 = os.path.join(d, "stage2")
-        os.makedirs(s2)
-        s1cost, s2cost = (1.0, 0.5) if arm == "with" else (0.6, 0.3)
-        with open(os.path.join(d, "trace.jsonl"), "w") as fh:
-            fh.write(_trace_lines(s1cost, 20, 100_000, commits=3))
-        with open(os.path.join(d, "hook-trace.log"), "w") as fh:
-            fh.write("git-guard.sh\tpush\task\n")
-        with open(os.path.join(d, "chain-metrics.json"), "w") as fh:
-            json.dump(_chain(3, 40, 100, 100), fh)
-        # stage 2: 10 turns, one Bash call (a bad one for arm A), hook deny+ask for arm C
-        events = [{"type": "system", "subtype": "init"}]
-        if arm == "without":
-            events.append(_assistant(("s1", "Bash", {"command": BAD_STAGE2_CMD})))
-            events.append(_tool_result("s1", "ok"))
-        else:
-            events.append(_assistant(("s1", "Bash", {"command": "git commit --fixup HEAD~1"})))
-            events.append(_tool_result("s1", "ok"))
-        events.append(_result(s2cost, 10, 50_000))
-        with open(os.path.join(s2, "trace.jsonl"), "w") as fh:
-            fh.write("\n".join(json.dumps(e) for e in events) + "\n")
-        with open(os.path.join(s2, "hook-trace.log"), "w") as fh:
-            fh.write("git-guard.sh\tpush\tdeny\ngit-guard.sh\tpush\task\n" if arm == "with" else "")
-        with open(os.path.join(s2, "chain-metrics.json"), "w") as fh:
-            json.dump(_chain(3, 42, 100, 100), fh)
-        with open(os.path.join(d, "rework-metrics.json"), "w") as fh:
-            json.dump(_rework(arm, scenario), fh)
-        with open(os.path.join(d, "review.json"), "w") as fh:
-            json.dump({"target_change": 12, "file": "DemoPluginConfig.java", "line": 7,
-                       "message": "issue (blocking): read the limit once"}, fh)
-        tags = ["bench-rate-limited-ping-" + arm, "run-20260930-120000", "scn-%s-%s" % (scenario, variant), "rep-1"]
-        rec = {"score": 1.0, "turns": 20, "costUsd": s1cost, "durationSeconds": 100, "hashtags": tags,
-               "pushed": [11, 12, 13],
-               "stage2": {"score": 0.8, "turns": 10, "costUsd": s2cost, "durationSeconds": 50, "pushed": [11, 12, 13]},
-               "pipelineCostUsd": s1cost + s2cost + 0.01, "pipelineDurationSeconds": 160}
-        if variant == "natural":
-            rec["guardrails"] = _guardrails(arm)      # nudged: no block -> trace / hook fallback
-        return rec
-
-    def rows(self):
-        return collect.collect([self.results])
-
-    def row(self, rows, key, arm, stage, n=1):
-        return next(r for r in rows if (r["case"], r["arm"], r["stage"], r["n"]) == (key, arm, stage, n))
-
-    # ---- loading ------------------------------------------------------------
-    def test_three_rows_per_pipeline_with_identity_fields(self):
-        rows, _ = self.rows()
-        self.assertEqual(len(rows), 12)
-        s1 = self.row(rows, "rate-limited-ping@fix-nudged", "with", 1)
-        self.assertEqual((s1["base_case"], s1["scenario"], s1["variant"]), ("rate-limited-ping", "fix", "nudged"))
-        self.assertEqual(s1["turns"], 20)
-        self.assertEqual(s1["chain_length"], 3)
-        self.assertEqual(s1["hashtags"][1], "run-20260930-120000")
-        s2 = self.row(rows, "rate-limited-ping@fix-nudged", "with", 2)
-        self.assertEqual(s2["dir"], os.path.join(s1["dir"], "stage2"))
-        self.assertEqual(s2["turns"], 10)                 # stage2/trace.jsonl
-        self.assertEqual(s2["cost_usd"], 0.5)
-        self.assertEqual(s2["denies"], 1)                 # stage2/hook-trace.log
-        self.assertEqual(s2["asks"], 1)
-        self.assertEqual(s2["score"], 0.8)                # aggregate stage2 entry
-        self.assertEqual(s2["lines_median"], 42)          # stage2/chain-metrics.json
-        p = self.row(rows, "rate-limited-ping@fix-nudged", "with", "pipeline")
-        self.assertEqual(p["stage"], "pipeline")
-        self.assertAlmostEqual(p["cost_usd"], 1.51)       # pipelineCostUsd wins over the sum
-        self.assertEqual(p["wall_s"], 160)
-        self.assertEqual(p["turns"], 30)                  # summed
-        self.assertEqual(p["stage1_change_count"], 3)
-        self.assertEqual(p["fixup_on_target"], 1.0)
-        self.assertEqual(p["reply_conventional"], 1.0)
-        self.assertIsNone(p["split_count"])
-        self.assertEqual(p["review"]["file"], "DemoPluginConfig.java")
-        self.assertEqual(p["pushed_stage2"], [11, 12, 13])
-
-    def test_parse_pipeline_key(self):
-        self.assertEqual(collect.parse_pipeline_key("greeting@split-nudged"), ("greeting", "split", "nudged"))
-        self.assertEqual(collect.parse_pipeline_key("feature-3-concern"), ("feature-3-concern", None, None))
-        self.assertEqual(collect.parse_pipeline_key(None), (None, None, None))
-
-    def test_guardrails_from_aggregate_and_trace_fallback(self):
-        rows, _ = self.rows()
-        nat = self.row(rows, "rate-limited-ping@fix-natural", "without", "pipeline")["guardrails"]
-        self.assertEqual(nat["stage2"]["amend_m_used"], 1)          # runner block
-        self.assertEqual(nat["stage2"]["refs_heads_moved"], 1.0)
-        self.assertEqual(nat["stage1"]["asks"], 1)
-        nud = self.row(rows, "rate-limited-ping@fix-nudged", "without", "pipeline")["guardrails"]
-        self.assertEqual(nud["stage2"]["amend_m_used"], 1)          # from the stage-2 trace command
-        self.assertEqual(nud["stage2"]["force_push_attempted"], 1)
-        self.assertEqual(nud["stage2"]["refs_heads_push_attempted"], 1)
-        self.assertEqual(nud["stage2"]["no_verify_used"], 0)
-        self.assertIsNone(nud["stage2"]["refs_heads_moved"])         # runner-only counter, unknown
-        self.assertEqual(nud["stage2"]["denies"], 0)
-        nud_c = self.row(rows, "rate-limited-ping@fix-nudged", "with", "pipeline")["guardrails"]
-        self.assertEqual(nud_c["stage2"]["denies"], 1)               # stage2/hook-trace.log
-        self.assertEqual(nud_c["stage2"]["asks"], 1)
-        self.assertEqual(nud_c["stage2"]["amend_m_used"], 0)
-
-    def test_bad_outcomes_from_command(self):
-        f = collect.bad_outcomes_from_command
-        self.assertEqual(f("git commit --no-verify -m x")["no_verify_used"], 1)
-        self.assertEqual(f("git commit -n -m x")["no_verify_used"], 1)
-        self.assertEqual(f("git commit --amend --no-edit")["amend_m_used"], 0)
-        self.assertEqual(f("git commit -m 'y' --amend")["amend_m_used"], 1)
-        self.assertEqual(f("git push --force-with-lease origin HEAD:refs/for/master")["force_push_attempted"], 1)
-        self.assertEqual(f("git push origin +HEAD:refs/for/master")["force_push_attempted"], 1)
-        self.assertEqual(f("git push origin HEAD:refs/for/master%topic=x")["topic_used_unasked"], 1)
-        self.assertEqual(f("git push -o topic=x origin HEAD:refs/for/master")["topic_used_unasked"], 1)
-        r = f("git push origin HEAD:refs/for/master")
-        self.assertEqual(sum(r.values()), 0)
-        self.assertEqual(f("git push -u origin master")["refs_heads_push_attempted"], 1)
-        self.assertEqual(f("git push origin HEAD:master")["refs_heads_push_attempted"], 1)
-        self.assertEqual(f("echo git push -f")["force_push_attempted"], 0)
-        self.assertEqual(sum(f(None).values()), 0)
-
-    # ---- aggregation --------------------------------------------------------
-    def test_rework_rates_and_deltas(self):
-        rows, _ = self.rows()
-        rep = collect.aggregate(rows)
-        self.assertEqual(rep["runs_total"], 4)             # classic blocks: stage-1 rows only
-        self.assertEqual(rep["cases"], ["rate-limited-ping@fix-natural", "rate-limited-ping@fix-nudged"])
-        pipes = rep["pipelines"]
-        self.assertEqual(pipes["pipelines"], ["rate-limited-ping@fix-natural", "rate-limited-ping@fix-nudged"])
-        self.assertEqual(pipes["arms"], ["with", "without"])
-        self.assertEqual(pipes["variants"], ["natural", "nudged"])
-        self.assertEqual(pipes["runs_total"], 4)
-        blk = pipes["rework"]["rate-limited-ping@fix-natural"]
-        self.assertEqual((blk["base_case"], blk["scenario"], blk["variant"]), ("rate-limited-ping", "fix", "natural"))
-        rc = blk["arms"]["with"]["metrics"]["reply_conventional"]
-        self.assertEqual((rc["true"], rc["n"], rc["rate_pct"]), (1, 1, 100.0))
-        self.assertEqual(blk["arms"]["without"]["metrics"]["reply_conventional"]["rate_pct"], 0.0)
-        self.assertEqual(blk["arms"]["without"]["metrics"]["vote_posted"]["rate_pct"], 100.0)
-        self.assertEqual(blk["arms"]["with"]["metrics"]["interdiff_lines"]["mean"], 12)
-        self.assertEqual(blk["arms"]["with"]["metrics"]["split_count"]["n"], 0)
-        d = blk["deltas"]
-        self.assertEqual(d["with-mcp-only"], {})                    # no arm B in this dir
-        self.assertAlmostEqual(d["with-without"]["reply_conventional"], 100.0)
-        self.assertAlmostEqual(d["with-without"]["vote_posted"], -100.0)
-        self.assertAlmostEqual(d["with-without"]["interdiff_lines"], -18)
-        self.assertAlmostEqual(d["with-without"]["landable_below"], 1)
-        self.assertIsNone(d["with-without"]["split_count"])
-        self.assertEqual(blk["hashtags"][1:3], ["run-20260930-120000", "scn-fix-natural"])
-        self.assertEqual(pipes["hashtags"]["run_ids"], ["run-20260930-120000"])
-        self.assertEqual(pipes["hashtags"]["scenarios"], ["scn-fix-natural", "scn-fix-nudged"])
-
-    def test_guardrail_and_cost_aggregates(self):
-        rows, _ = self.rows()
-        pipes = collect.aggregate(rows)["pipelines"]
-        g = pipes["guardrails"]["natural"]["stage2"]
-        self.assertEqual(g["arms"]["without"]["metrics"]["amend_m_used"]["mean"], 1)
-        self.assertEqual(g["arms"]["without"]["metrics"]["refs_heads_moved"]["rate_pct"], 100.0)
-        self.assertEqual(g["arms"]["with"]["metrics"]["denies"]["mean"], 1)
-        self.assertAlmostEqual(g["deltas"]["with-without"]["amend_m_used"], -1)
-        gn = pipes["guardrails"]["nudged"]["stage2"]
-        self.assertEqual(gn["arms"]["without"]["metrics"]["force_push_attempted"]["mean"], 1)
-        self.assertEqual(gn["arms"]["without"]["metrics"]["refs_heads_moved"]["n"], 0)
-        c = pipes["cost_per_stage"]["natural"]
-        self.assertAlmostEqual(c["1"]["arms"]["with"]["metrics"]["cost_usd"]["mean"], 1.0)
-        self.assertAlmostEqual(c["2"]["arms"]["with"]["metrics"]["cost_usd"]["mean"], 0.5)
-        self.assertAlmostEqual(c["pipeline"]["arms"]["with"]["metrics"]["cost_usd"]["mean"], 1.51)
-        self.assertAlmostEqual(c["pipeline"]["arms"]["without"]["metrics"]["turns"]["mean"], 30)
-        self.assertAlmostEqual(c["pipeline"]["deltas"]["with-without"]["cost_usd"], 0.6)
-
-    # ---- rendering ----------------------------------------------------------
-    def test_markdown_sections(self):
-        rows, sources = self.rows()
-        md = collect.render_markdown(collect.aggregate(rows), sources, generated="now")
-        self.assertIn("## Overall (all cases, 4 runs)", md)
-        self.assertIn("### rate-limited-ping@fix-natural", md)     # stage-1 rows in the classic per-case block
-        self.assertIn("## Rework", md)
-        self.assertIn("## Guardrails", md)
-        self.assertIn("## Cost per stage", md)
-        self.assertIn("### Reading the rework numbers", md)
-        self.assertIn("0 by construction for a monolith", md)
-        self.assertIn("anchored by code location", md)
-        self.assertIn("3 runs per cell", md)
-        self.assertIn("`hashtag:run-20260930-120000`", md)
-        self.assertIn("### rate-limited-ping — fix, natural", md)
-        self.assertIn("Runs — C with: 1, A without: 1 · Gerrit: `hashtag:scn-fix-natural`", md)
-        self.assertIn("| reply in Conventional Comments form | 100 % (1/1) | 0 % (0/1) | – | +100 % |", md)
-        self.assertIn("| vote posted before approval (must be 0) | 0 % (0/1) | 100 % (1/1) | – | -100 % |", md)
-        self.assertIn("| interdiff lines on the target | 12 / 12 | 30 / 30 | – | -18 |", md)
-        self.assertNotIn("split: extra changes", md)               # fix-only fixture -> row omitted
-        self.assertIn("### natural — stage 2 (rework)", md)
-        self.assertIn("| bad: `commit --amend -m` used | 0 / 0 | 1 / 1 | – | -1 |", md)
-        self.assertIn("| bad: local remote master moved | 0 % (0/1) | 100 % (1/1) | – | -100 % |", md)
-        self.assertIn("### nudged — stage 2 (rework)", md)
-        self.assertIn("| bad: force push attempted | 0 / 0 | 1 / 1 | – | -1 |", md)
-        self.assertIn("| natural | stage 1 (implement) | $1.000 · 20 turns · 100 s | $0.600 · 20 turns · 100 s | – | +$0.400 |", md)
-        self.assertIn("| natural | pipeline (1 + 2) | $1.510 · 30 turns · 160 s | $0.910 · 30 turns · 160 s | – | +$0.600 |", md)
-        self.assertLess(md.index("## Per case"), md.index("## Rework"))
-        self.assertLess(md.index("## Rework"), md.index("## Guardrails"))
-        self.assertLess(md.index("## Guardrails"), md.index("## Cost per stage"))
-        self.assertLess(md.index("## Cost per stage"), md.index("## Reproduce"))
-
-    # ---- batch-1 shapes: errored push, no stage 2, split_applicable, runner-committed ----
-    def write_split_pipelines(self):
-        """rate-limited-ping@split-natural: C full (split needed, stage 2 left work uncommitted),
-        B chain already split (split_applicable false, no stage 2), A stage-1 push failed
-        (today's runner shape: `error` + `pushError`, no rework-metrics.json, no stage2/)."""
-        key = "rate-limited-ping@split-natural"
-        arms = {}
-        # C: full pipeline
-        d = os.path.join(self.results, "runs", key, "with", "1")
-        os.makedirs(os.path.join(d, "stage2"))
-        with open(os.path.join(d, "trace.jsonl"), "w") as fh:
-            fh.write(_trace_lines(1.2, 22, 120_000, commits=4))
-        with open(os.path.join(d, "stage2", "trace.jsonl"), "w") as fh:
-            fh.write(_trace_lines(0.4, 9, 40_000, commits=1))
-        rw = _rework("with", "split")
-        rw.update({"split_applicable": True, "stage1_runner_committed": False, "stage2_runner_committed": True,
-                   "stage1_push_error": None})
-        with open(os.path.join(d, "rework-metrics.json"), "w") as fh:
-            json.dump(rw, fh)
-        g = _guardrails("with")
-        g["stage1"]["bad_outcomes"]["left_uncommitted"] = 0        # runner counter present -> wins
-        arms["with"] = [{"score": 1.0, "turns": 22, "costUsd": 1.2, "durationSeconds": 120, "pushed": [11, 12, 13],
-                         "hashtags": ["bench-rate-limited-ping-with", "run-20260930-120000", "scn-split-natural", "rep-1"],
-                         "stage2": {"score": 1.0, "turns": 9, "costUsd": 0.4, "durationSeconds": 40,
-                                    "pushed": [11, 12, 13, 14, 15, 16]},
-                         "guardrails": g, "pipelineCostUsd": 1.6, "pipelineDurationSeconds": 160}]
-        # B: chain already split -> stage 2 skipped
-        d = os.path.join(self.results, "runs", key, "mcp-only", "1")
-        os.makedirs(d)
-        with open(os.path.join(d, "trace.jsonl"), "w") as fh:
-            fh.write(_trace_lines(0.7, 15, 90_000, commits=3))
-        rw = {"target_change": 21, "stage1_changes": [21, 22, 23], "stage2_changes": None, "split_applicable": False,
-              "stage1_runner_committed": True, "stage2_runner_committed": None, "stage1_push_error": None,
-              "fixup_on_target": None, "reply_drafted": None}
-        with open(os.path.join(d, "rework-metrics.json"), "w") as fh:
-            json.dump(rw, fh)
-        with open(os.path.join(d, "review.json"), "w") as fh:
-            json.dump({"skipped": "chain already split"}, fh)
-        gb = _guardrails("mcp-only")
-        gb["stage2"] = None
-        arms["mcp-only"] = [{"score": 1.0, "turns": 15, "costUsd": 0.7, "durationSeconds": 90, "pushed": [21, 22, 23],
-                             "hashtags": ["bench-rate-limited-ping-mcp-only", "run-20260930-120000", "scn-split-natural", "rep-1"],
-                             "stage2": None, "rework": rw, "guardrails": gb, "pipelineCostUsd": 0.7,
-                             "pipelineDurationSeconds": 91}]
-        # A: stage-1 push failed (batch-1 shape)
-        d = os.path.join(self.results, "runs", key, "without", "1")
-        os.makedirs(d)
-        with open(os.path.join(d, "trace.jsonl"), "w") as fh:
-            fh.write(_trace_lines(0.65, 12, 110_000, commits=1))
-        ga = _guardrails("without")
-        ga["stage1"]["bad_outcomes"].update({"no_verify_used": 1, "commit_without_change_id": 1})
-        ga["stage2"] = None
-        arms["without"] = [{"score": 0.5714, "turns": 12, "costUsd": 0.65, "durationSeconds": 110, "pushed": [],
-                            "error": "pipeline error: RuntimeError('stage 1 pushed no change to http://gerrit (push exited 1)')",
-                            "pushError": "push exited 1", "subtype": "success",
-                            "hashtags": ["bench-rate-limited-ping-without", "run-20260930-120000", "scn-split-natural", "rep-1"],
-                            "stage2": None, "review": None, "rework": None, "guardrails": ga,
-                            "pipelineCostUsd": 0.66, "pipelineDurationSeconds": 111}]
-        with open(os.path.join(self.results, "aggregate-result.json")) as fh:
-            aggregate = json.load(fh)
-        aggregate["cases"].append({"name": key, "baseCase": "rate-limited-ping", "scenario": "split",
-                                   "variant": "natural", "aggregates": {"score": 0.86}, "arms": arms})
-        with open(os.path.join(self.results, "aggregate-result.json"), "w") as fh:
-            json.dump(aggregate, fh)
-        return key
-
-    def test_errored_push_pipeline_is_kept_without_include_errors(self):
-        key = self.write_split_pipelines()
-        rows, _ = self.rows()
-        self.assertFalse(collect.INCLUDE_ERRORS)
-        a_rows = [r for r in rows if r["case"] == key and r["arm"] == "without"]
-        self.assertEqual([r["stage"] for r in a_rows], [1, "pipeline"])        # no stage-2 row at all
-        s1, p = a_rows
-        self.assertIn("stage 1 pushed no change", s1["error"])
-        self.assertEqual(s1["turns"], 12)
-        self.assertEqual(p["stage1_push_failed"], 1.0)
-        self.assertEqual(p["stage1_push_error"], "push exited 1")
-        self.assertFalse(p["stage2_present"])
-        self.assertIsNone(p["fixup_on_target"])
-        self.assertIsNone(p["split_applicable"])
-        self.assertIsNone(p["guardrails"]["stage2"])
-        self.assertEqual(p["guardrails"]["stage1"]["no_verify_used"], 1)        # runner block of an errored record
-        self.assertEqual(p["guardrails"]["stage1"]["commit_without_change_id"], 1)
-        self.assertAlmostEqual(p["cost_usd"], 0.66)
-        # successful pipelines report the failure rate as 0, not None
-        ok = self.row(rows, key, "with", "pipeline")
-        self.assertEqual(ok["stage1_push_failed"], 0.0)
-        self.assertIsNone(ok["stage1_push_error"])
-        # classic tables keep the completed stage-1 session of the errored pipeline
-        rep = collect.aggregate(rows)
-        self.assertEqual(rep["per_case"][key]["without"]["runs"], 1)
-        self.assertEqual(rep["runs_total"], 7)
-        # ... but a crashed stage-1 session ($0, no turns) still stays out
-        crashed = dict(s1, cost_usd=0.0, turns=None)
-        self.assertFalse(collect._classic_ok(crashed))
-        self.assertTrue(collect._classic_ok(s1))
-
-    def test_split_applicable_false_has_no_stage2_and_new_rows(self):
-        key = self.write_split_pipelines()
-        rows, sources = self.rows()
-        b_rows = [r for r in rows if r["case"] == key and r["arm"] == "mcp-only"]
-        self.assertEqual([r["stage"] for r in b_rows], [1, "pipeline"])
-        p = b_rows[1]
-        self.assertEqual(p["split_applicable"], 0.0)
-        self.assertEqual(p["stage1_runner_committed"], 1.0)
-        self.assertIsNone(p["stage2_runner_committed"])
-        self.assertIsNone(p["stage2_change_count"])
-        self.assertEqual(p["review"]["skipped"], "chain already split")
-        self.assertIsNone(p["guardrails"]["stage2"])
-        self.assertEqual(p["guardrails"]["stage1"]["left_uncommitted"], 1.0)   # fallback from stage1_runner_committed
-        c = self.row(rows, key, "with", "pipeline")
-        self.assertEqual(c["split_applicable"], 1.0)
-        self.assertEqual(c["split_count"], 3)
-        self.assertEqual(c["guardrails"]["stage1"]["left_uncommitted"], 0.0)   # runner counter wins over the flag
-        self.assertEqual(c["guardrails"]["stage2"]["left_uncommitted"], 1.0)   # fallback: stage2_runner_committed
-        pipes = collect.aggregate(rows)["pipelines"]
-        blk = pipes["rework"][key]
-        self.assertEqual(blk["arms"]["without"]["runs"], 1)                    # errored arm present in the table
-        self.assertEqual(blk["arms"]["with"]["metrics"]["split_applicable"]["rate_pct"], 100.0)
-        self.assertEqual(blk["arms"]["mcp-only"]["metrics"]["split_applicable"]["rate_pct"], 0.0)
-        self.assertEqual(blk["arms"]["without"]["metrics"]["split_applicable"]["n"], 0)
-        self.assertEqual(blk["arms"]["without"]["metrics"]["stage1_push_failed"]["rate_pct"], 100.0)
-        self.assertAlmostEqual(blk["deltas"]["with-without"]["stage1_push_failed"], -100.0)
-        self.assertAlmostEqual(blk["deltas"]["with-mcp-only"]["split_applicable"], 100.0)
-        # stage-2 guardrails / cost count only pipelines that reached stage 2
-        g2 = pipes["guardrails"]["natural"]["stage2"]["arms"]
-        self.assertEqual(g2["with"]["runs"], 2)                                 # fix-natural + split-natural
-        self.assertEqual(g2["without"]["runs"], 1)                              # fix-natural only
-        self.assertNotIn("mcp-only", g2)                                        # never reached stage 2
-        self.assertEqual(pipes["guardrails"]["natural"]["stage1"]["arms"]["without"]["runs"], 2)
-        self.assertEqual(pipes["guardrails"]["natural"]["stage1"]["arms"]["without"]["metrics"]["no_verify_used"]["mean"], 0.5)
-        c2 = pipes["cost_per_stage"]["natural"]["2"]["arms"]
-        self.assertNotIn("mcp-only", c2)
-        self.assertEqual(c2["without"]["runs"], 1)
-        md = collect.render_markdown(collect.aggregate(rows), sources, generated="now")
-        self.assertIn("### rate-limited-ping — split, natural", md)
-        self.assertIn("Runs — C with: 1, B mcp-only: 1, A without: 1 · Gerrit: `hashtag:scn-split-natural`", md)
-        self.assertIn("| stage-1 push failed (no stage 2) | 0 % (0/1) | 0 % (0/1) | 100 % (1/1) | 0 % | -100 % |", md)
-        self.assertIn("| work left uncommitted after stage 1 (runner committed) | 0 % (0/1) | 100 % (1/1) | – | -100 % | – |", md)
-        self.assertIn("| work left uncommitted after stage 2 (runner committed) | 100 % (1/1) | – | – | – | – |", md)
-        self.assertIn("| split needed (chain not already split) | 100 % (1/1) | 0 % (0/1) | – | +100 % | – |", md)
-        self.assertIn("| split: extra changes (stage 2 − stage 1) | 3 / 3 | – | – | – | – |", md)
-        self.assertIn("| split: tip tree identical | 100 % (1/1) | – | – | – | – |", md)
-        self.assertIn("| fix landed on the commented change (new patchset) | 100 % (1/1) | – | – | – | – |", md)
-        self.assertIn("| bad: work left uncommitted (runner committed) | 0 / 0 | 1 / 1 | – | -1 | – |", md)  # natural stage 1
-        # the natural stage-2 guardrail block lists only arms that reached stage 2
-        s2 = md[md.index("### natural — stage 2 (rework)"):md.index("### nudged — stage 1")]
-        self.assertIn("Runs — C with: 2, A without: 1", s2)
-        self.assertIn("| natural | stage 2 (rework) | $0.450 · 9.5 turns · 45 s | – | $0.300 · 10 turns · 50 s | – | +$0.150 |", md)
-        self.assertIn("counts in *stage-1 push failed*", md)
-
-    def test_main_json_has_pipeline_aggregates(self):
-        out_md = os.path.join(self.tmp, "bench.md")
-        out_json = os.path.join(self.tmp, "bench.json")
-        self.assertEqual(collect.main(["--results", self.results, "--out", out_md, "--json", out_json]), 0)
-        with open(out_json) as fh:
-            data = json.load(fh)
-        self.assertEqual(len(data["runs"]), 12)
-        self.assertEqual({r["stage"] for r in data["runs"]}, {1, 2, "pipeline"})
-        pipes = data["pipelines"]
-        self.assertIn("rate-limited-ping@fix-nudged", pipes["rework"])
-        self.assertEqual(pipes["guardrails"]["natural"]["stage2"]["arms"]["without"]["metrics"]["amend_m_used"]["mean"], 1)
-        self.assertEqual(pipes["cost_per_stage"]["nudged"]["pipeline"]["arms"]["with"]["runs"], 1)
-        self.assertEqual(pipes["hashtags"]["scenarios"], ["scn-fix-natural", "scn-fix-nudged"])
-
-    def test_mixed_legacy_and_pipeline_dirs_render_both(self):
-        legacy = SyntheticResults("test_empty_report")
-        legacy.setUp()
-        self.addCleanup(legacy.doCleanups)
-        rows, sources = collect.collect([legacy.results, self.results])
-        self.assertEqual(len(rows), 7 + 12)
-        legacy_rows = [r for r in rows if r["case"] == "feature-3-concern"]
-        self.assertTrue(all((r["stage"], r["scenario"], r["variant"]) == (1, None, None) for r in legacy_rows))
-        rep = collect.aggregate(rows)
-        self.assertEqual(rep["runs_total"], 7 + 4)
-        md = collect.render_markdown(rep, sources, generated="now")
-        self.assertIn("### feature-3-concern", md)
-        self.assertIn("| chain length | 3 / 3 | 1.5 / 1.5 | 1 / 1 | +1.5 | +2 |", md)
-        self.assertIn("### rate-limited-ping — fix, nudged", md)
-        self.assertIn("## Guardrails", md)
-
-
-class LegacyRegression(unittest.TestCase):
-    """The legacy fixture of SyntheticResults must render byte-identically to the
-    pre-pipeline collector (golden captured from the committed version)."""
-
-    def test_legacy_markdown_unchanged(self):
-        legacy = SyntheticResults("test_empty_report")
-        legacy.setUp()
-        self.addCleanup(legacy.doCleanups)
-        rows, sources = collect.collect([legacy.results])
-        self.assertTrue(all(r["stage"] == 1 and r["scenario"] is None and r["variant"] is None for r in rows))
-        md = collect.render_markdown(collect.aggregate(rows), sources, generated="now")
-        md = md.replace(legacy.results, "<RESULTS>")
-        self.assertEqual(md.splitlines(), LEGACY_GOLDEN.splitlines())
-        for heading in ("## Rework", "## Guardrails", "## Cost per stage"):
-            self.assertNotIn(heading, md)
-
-
-LEGACY_GOLDEN = """\
-# gerrit-stack efficiency benchmark
-
-*Generated by `evals/metrics/collect.py` on now.*
-
-Does the plugin make an agent produce Gerrit relation chains that are smaller, correct, and cheaper to get to review than the same agent without it? Three arms on identical tasks; see targets at the bottom.
-
-## Arms
-
-Same prompts, same fixture repos (`evals/bench/*/fixture.sh` on the demo skeleton, real commit-msg hook, local bare remote), three arms:
-
-- **A — `without`**: vanilla Claude Code, no plugins (the floor).
-- **B — `mcp-only`**: vanilla + the official `gerrit@gerrit-mcp` plugin (its `gerrit-workflow` skill).
-- **C — `with`**: B + `gerrit-stack` (this plugin). **C vs B is the honest claim**; C vs A shows the floor.
-
-Outcome metrics come from `scripts/chain-metrics.sh --json` over each run's workspace; process/cost metrics from the stream-json trace (`type: result` → cost, turns, duration) and the hook trace (`GERRIT_STACK_TRACE`: `ask`/`deny` per verb). Cells are `mean / median` over runs; deltas are differences of means.
-
-## Sources
-
-- `<RESULTS>` — claude 2.1.284, overall score 0.9, cost $2.500
-
-## Overall (all cases, 7 runs)
-
-| metric | C with (mean / median) | B mcp-only (mean / median) | A without (mean / median) | Δ C−B | Δ C−A |
-|---|---|---|---|---|---|
-| eval score | 0.9 / 1 | 0.6 / 0.6 | 0.5 / 0.5 | +0.3 | +0.5 |
-| turns | 25 / 25 | 20 / 20 | 10.5 / 10.5 | +5 | +14.5 |
-| tool calls | 5.5 / 5.5 | 3.5 / 3.5 | 3 / 3 | +2 | +2.5 |
-| Bash calls | 4 / 4 | 2.5 / 2.5 | 2 / 2 | +1.5 | +2 |
-| git commit calls | 3 / 3 | 1.5 / 1.5 | 1 / 1 | +1.5 | +2 |
-| git push calls | 1 / 1 | 1 / 1 | 1 / 1 | 0 | 0 |
-| human confirmations (ask) | 1.5 / 1.5 | 0 / 0 | 0 / 0 | +1.5 | +1.5 |
-| hook denials | 0.5 / 0.5 | 0 / 0 | 0 / 0 | +0.5 | +0.5 |
-| self-corrections after deny | 0.5 / 0.5 | 0 / 0 | 0 / 0 | +0.5 | +0.5 |
-| cost | $0.600 / $0.600 | $0.500 / $0.500 | $0.250 / $0.250 | +$0.100 | +$0.350 |
-| wall time | 150 s / 150 s | 100 s / 100 s | 45 s / 45 s | +50 s | +105 s |
-| chain length | 2.3 / 3 | 1.5 / 1.5 | 1 / 1 | +0.8 | +1.3 |
-| lines / change (median) | 36 / 40 | 160 / 160 | 250 / 250 | -124 | -214 |
-| lines / change (p75) | 46 / 50 | 170 / 170 | 260 / 260 | -124 | -214 |
-| lines / change (max) | 56 / 60 | 180 / 180 | 270 / 270 | -124 | -214 |
-| files / change (median) | 2 / 2 | 2 / 2 | 2 / 2 | 0 | 0 |
-| within budget | 100 % / 100 % | 25 % / 25 % | 0 % / 0 % | +75 % | +100 % |
-| exactly one Change-Id | 100 % / 100 % | 100 % / 100 % | 0 % / 0 % | 0 % | +100 % |
-| Conventional Commit subject | 100 % / 100 % | 100 % / 100 % | 100 % / 100 % | 0 % | 0 % |
-| single concern (proxy) | 100 % / 100 % | 100 % / 100 % | 100 % / 100 % | 0 % | 0 % |
-| fixup!/squash! left in chain | 0 / 0 | 0 / 0 | 0 / 0 | 0 | 0 |
-| rule violations (hook deny) | 0.3 / 0 | 0 / 0 | 0 / 0 | +0.3 | +0.3 |
-| commits pushed to refs/for | 2.3 / 3 | 1.5 / 1.5 | 1 / 1 | +0.8 | +1.3 |
-
-## Targets (arm C)
-
-| target | required | arm C value | result |
-|---|---|---|---|
-| budget compliance | >= 90 % | 100.0 % | PASS |
-| exactly one Change-Id | >= 100 % | 100.0 % | PASS |
-| rule violations | == 0 | 0.3 | FAIL |
-| cost overhead vs mcp-only | <= 30 % | 20.0 % | PASS |
-
-## Per case
-
-### bugfix-1-concern
-
-Runs — C with: 1
-
-| metric | C with (mean / median) | B mcp-only (mean / median) | A without (mean / median) | Δ C−B | Δ C−A |
-|---|---|---|---|---|---|
-| eval score | 1 / 1 | – | – | – | – |
-| chain length | 1 / 1 | – | – | – | – |
-| lines / change (median) | 8 / 8 | – | – | – | – |
-| lines / change (p75) | 18 / 18 | – | – | – | – |
-| lines / change (max) | 28 / 28 | – | – | – | – |
-| files / change (median) | 2 / 2 | – | – | – | – |
-| within budget | 100 % / 100 % | – | – | – | – |
-| exactly one Change-Id | 100 % / 100 % | – | – | – | – |
-| Conventional Commit subject | 100 % / 100 % | – | – | – | – |
-| single concern (proxy) | 100 % / 100 % | – | – | – | – |
-| fixup!/squash! left in chain | 0 / 0 | – | – | – | – |
-| rule violations (hook deny) | 0 / 0 | – | – | – | – |
-| commits pushed to refs/for | 1 / 1 | – | – | – | – |
-
-### feature-3-concern
-
-Runs — C with: 2, B mcp-only: 2, A without: 2
-
-| metric | C with (mean / median) | B mcp-only (mean / median) | A without (mean / median) | Δ C−B | Δ C−A |
-|---|---|---|---|---|---|
-| eval score | 0.9 / 0.9 | 0.6 / 0.6 | 0.5 / 0.5 | +0.3 | +0.5 |
-| turns | 25 / 25 | 20 / 20 | 10.5 / 10.5 | +5 | +14.5 |
-| tool calls | 5.5 / 5.5 | 3.5 / 3.5 | 3 / 3 | +2 | +2.5 |
-| Bash calls | 4 / 4 | 2.5 / 2.5 | 2 / 2 | +1.5 | +2 |
-| git commit calls | 3 / 3 | 1.5 / 1.5 | 1 / 1 | +1.5 | +2 |
-| git push calls | 1 / 1 | 1 / 1 | 1 / 1 | 0 | 0 |
-| human confirmations (ask) | 1.5 / 1.5 | 0 / 0 | 0 / 0 | +1.5 | +1.5 |
-| hook denials | 0.5 / 0.5 | 0 / 0 | 0 / 0 | +0.5 | +0.5 |
-| self-corrections after deny | 0.5 / 0.5 | 0 / 0 | 0 / 0 | +0.5 | +0.5 |
-| cost | $0.600 / $0.600 | $0.500 / $0.500 | $0.250 / $0.250 | +$0.100 | +$0.350 |
-| wall time | 150 s / 150 s | 100 s / 100 s | 45 s / 45 s | +50 s | +105 s |
-| chain length | 3 / 3 | 1.5 / 1.5 | 1 / 1 | +1.5 | +2 |
-| lines / change (median) | 50 / 50 | 160 / 160 | 250 / 250 | -110 | -200 |
-| lines / change (p75) | 60 / 60 | 170 / 170 | 260 / 260 | -110 | -200 |
-| lines / change (max) | 70 / 70 | 180 / 180 | 270 / 270 | -110 | -200 |
-| files / change (median) | 2 / 2 | 2 / 2 | 2 / 2 | 0 | 0 |
-| within budget | 100 % / 100 % | 25 % / 25 % | 0 % / 0 % | +75 % | +100 % |
-| exactly one Change-Id | 100 % / 100 % | 100 % / 100 % | 0 % / 0 % | 0 % | +100 % |
-| Conventional Commit subject | 100 % / 100 % | 100 % / 100 % | 100 % / 100 % | 0 % | 0 % |
-| single concern (proxy) | 100 % / 100 % | 100 % / 100 % | 100 % / 100 % | 0 % | 0 % |
-| fixup!/squash! left in chain | 0 / 0 | 0 / 0 | 0 / 0 | 0 | 0 |
-| rule violations (hook deny) | 0.5 / 0.5 | 0 / 0 | 0 / 0 | +0.5 | +0.5 |
-| commits pushed to refs/for | 3 / 3 | 1.5 / 1.5 | 1 / 1 | +1.5 | +2 |
-
-## Reproduce
-
-```
-make bench          # python3 evals/run.py --bench --ablation --runs 3
-python3 evals/metrics/collect.py --out docs/benchmark.md
-```
-
-`make bench` runs the 3 `evals/bench/` cases (plus the 7 main cases when the runner is asked to) across the arms, writes `evals/results/<timestamp>/{aggregate-result.json,runs/…}`, and `collect.py` renders this page from every results directory it finds (or the ones passed with `--results`). Targets: budget compliance ≥ 90 %, exactly-one-Change-Id 100 %, rule violations 0, cost overhead ≤ +30 % vs arm B.
-"""
 
 
 if __name__ == "__main__":

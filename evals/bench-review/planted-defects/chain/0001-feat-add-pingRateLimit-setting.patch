@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Bench Fixture <bench@example.com>
+Date: Sat, 3 Oct 2026 19:31:41 +0200
+Subject: [PATCH] feat: add pingRateLimit setting
+
+Monitoring scripts hammer the ping endpoint. Add the setting that will
+bound them: the number of pings answered per project per minute, 0 (the
+default) or negative meaning unlimited. Nothing enforces it yet.
+---
+ .../example/demoplugin/DemoPluginConfig.java  | 11 ++++++++
+ src/main/resources/Documentation/config.md    |  5 ++++
+ .../demoplugin/DemoPluginConfigTest.java      | 27 +++++++++++++++++++
+ 3 files changed, 43 insertions(+)
+
+diff --git a/src/main/java/com/example/demoplugin/DemoPluginConfig.java b/src/main/java/com/example/demoplugin/DemoPluginConfig.java
+index 0397896..f622a15 100644
+--- a/src/main/java/com/example/demoplugin/DemoPluginConfig.java
++++ b/src/main/java/com/example/demoplugin/DemoPluginConfig.java
+@@ -27,6 +27,7 @@ import com.google.inject.Singleton;
+  * <pre>
+  * [plugin "demo-plugin"]
+  *   pingMessage = pong
++ *   pingRateLimit = 30
+  * </pre>
+  *
+  * <p>Each setting is one constant plus one getter; add new settings the same way.
+@@ -35,6 +36,8 @@ import com.google.inject.Singleton;
+ public class DemoPluginConfig {
+   static final String KEY_PING_MESSAGE = "pingMessage";
+   static final String DEFAULT_PING_MESSAGE = "pong";
++  static final String KEY_PING_RATE_LIMIT = "pingRateLimit";
++  static final int DEFAULT_PING_RATE_LIMIT = 0;
+ 
+   private final PluginConfig cfg;
+ 
+@@ -47,4 +50,12 @@ public class DemoPluginConfig {
+   public String pingMessage() {
+     return cfg.getString(KEY_PING_MESSAGE, DEFAULT_PING_MESSAGE);
+   }
++
++  /**
++   * Maximum number of pings answered per project per minute; {@code 0} (the default) or a negative
++   * value means unlimited.
++   */
++  public int pingRateLimit() {
++    return Math.max(0, cfg.getInt(KEY_PING_RATE_LIMIT, DEFAULT_PING_RATE_LIMIT));
++  }
+ }
+diff --git a/src/main/resources/Documentation/config.md b/src/main/resources/Documentation/config.md
+index 41dd28b..30a5b81 100644
+--- a/src/main/resources/Documentation/config.md
++++ b/src/main/resources/Documentation/config.md
+@@ -6,7 +6,12 @@ All settings live in the `[plugin "demo-plugin"]` section of `gerrit.config`:
+ ```
+ [plugin "demo-plugin"]
+   pingMessage = pong
++  pingRateLimit = 30
+ ```
+ 
+ `pingMessage`
+ :	Message returned by the `ping` REST view and SSH command. Default: `pong`.
++
++`pingRateLimit`
++:	Maximum number of pings answered per project per minute. `0` or a negative
++	value means unlimited. Default: `0`.
+diff --git a/src/test/java/com/example/demoplugin/DemoPluginConfigTest.java b/src/test/java/com/example/demoplugin/DemoPluginConfigTest.java
+index f1ee0d1..2b3909d 100644
+--- a/src/test/java/com/example/demoplugin/DemoPluginConfigTest.java
++++ b/src/test/java/com/example/demoplugin/DemoPluginConfigTest.java
+@@ -48,6 +48,33 @@ public class DemoPluginConfigTest {
+     assertThat(config.pingMessage()).isEqualTo("hello there");
+   }
+ 
++  @Test
++  public void pingRateLimitDefaultsToUnlimited() {
++    DemoPluginConfig config = configFrom(new Config());
++
++    assertThat(config.pingRateLimit()).isEqualTo(0);
++  }
++
++  @Test
++  public void pingRateLimitReadFromPluginSection() {
++    Config gerritConfig = new Config();
++    gerritConfig.setInt("plugin", PLUGIN, DemoPluginConfig.KEY_PING_RATE_LIMIT, 30);
++
++    DemoPluginConfig config = configFrom(gerritConfig);
++
++    assertThat(config.pingRateLimit()).isEqualTo(30);
++  }
++
++  @Test
++  public void negativePingRateLimitMeansUnlimited() {
++    Config gerritConfig = new Config();
++    gerritConfig.setInt("plugin", PLUGIN, DemoPluginConfig.KEY_PING_RATE_LIMIT, -5);
++
++    DemoPluginConfig config = configFrom(gerritConfig);
++
++    assertThat(config.pingRateLimit()).isEqualTo(0);
++  }
++
+   private DemoPluginConfig configFrom(Config gerritConfig) {
+     when(cfgFactory.getFromGerritConfig(PLUGIN))
+         .thenReturn(PluginConfig.createFromGerritConfig(PLUGIN, gerritConfig));

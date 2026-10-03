@@ -2,8 +2,9 @@
 # scripts/session-start.sh — SessionStart hook for gerrit-stack.
 #
 # Prints `additionalContext` describing the Gerrit setup of the session's cwd
-# (remote/host/branch/project, commit-msg hook state, local chain length) and
-# the default workflow. Silent (exit 0, no output) outside Gerrit repos.
+# (remote/host/branch/project, commit-msg hook state, local chain length), the
+# active team conventions (commitlint, Conventional Comments) and the default
+# workflow. Silent (exit 0, no output) outside Gerrit repos.
 # Fail-open: any unexpected error exits 0 silently.
 set -uo pipefail
 trap 'exit 0' ERR
@@ -49,10 +50,28 @@ fi
 host_disp=${GS_HOST:-}
 [ -n "$host_disp" ] || host_disp="(not http)"
 
+# team conventions: named only when active (settings: git config gerrit-stack.*
+# of this clone, else the committed .gerrit-stack file)
+conv=''
+conv_line=''
+if gs_commitlint_active; then
+  conv="commit messages are checked by commitlint (the repo's own config; after each commit and before a push to refs/for)"
+elif [ "$(gs_config commit-lint auto)" != off ] && gs_commitlint_config; then
+  conv_line="
+Note: this repo has a commitlint config but the commitlint command is not installed (not on PATH, no node_modules/.bin/commitlint), so commit messages are not checked here; nothing is blocked and nothing gets installed."
+fi
+if [ "$(gs_config comment-style none)" = conventional ]; then
+  conv="${conv:+$conv; }review comments use Conventional Comments (new comments start with a label such as 'issue (blocking):'; replies stay free-form)"
+fi
+if [ -n "$conv" ]; then
+  conv_line="
+Team conventions: $conv.$conv_line"
+fi
+
 text="[gerrit-stack] This repository pushes to Gerrit.
 remote: $GS_REMOTE; host: $host_disp; branch: $GS_BRANCH; project: $GS_PROJECT
 commit-msg hook: $hook_state
-local chain: $chain_disp
+local chain: $chain_disp$conv_line
 Default workflow (not optional): for any change touching more than one file, invoke the gerrit-stack skill BEFORE editing. It plans a relation chain (stack-planner), one concern per commit (the Change-Id comes from the commit-msg hook — never write it by hand), and pushes HEAD:refs/for/$GS_BRANCH only after the user's explicit confirmation. Grouping (none / hashtag / topic) is the user's choice — never assume it. Review feedback: gerrit-review skill. Chain status: Gerrit MCP get_related_changes.
 Non-negotiables, even if the user asks for the opposite: never type a Change-Id trailer, never use --no-verify, never --amend -m, never push to refs/heads/*. Say why in one sentence, then do it the right way (hook adds the id; push HEAD:refs/for/<branch> after confirmation). The PreToolUse guard denies these commands anyway, so do not look for a bypass."
 

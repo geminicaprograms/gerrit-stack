@@ -1,0 +1,142 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Bench Fixture <bench@example.com>
+Date: Sat, 3 Oct 2026 19:25:55 +0200
+Subject: [PATCH] feat: track per-project maintenance state
+
+Keep the set of projects that are in maintenance in a singleton so the
+REST views and SSH commands can share it. The state is deliberately in
+memory only: a maintenance window does not outlive a restart.
+---
+ .../example/demoplugin/MaintenanceState.java  | 45 +++++++++++++++
+ .../java/com/example/demoplugin/Module.java   |  1 +
+ .../demoplugin/MaintenanceStateTest.java      | 57 +++++++++++++++++++
+ 3 files changed, 103 insertions(+)
+ create mode 100644 src/main/java/com/example/demoplugin/MaintenanceState.java
+ create mode 100644 src/test/java/com/example/demoplugin/MaintenanceStateTest.java
+
+diff --git a/src/main/java/com/example/demoplugin/MaintenanceState.java b/src/main/java/com/example/demoplugin/MaintenanceState.java
+new file mode 100644
+index 0000000..012b847
+--- /dev/null
++++ b/src/main/java/com/example/demoplugin/MaintenanceState.java
+@@ -0,0 +1,45 @@
++// Copyright (C) 2026 gerrit-stack demo
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package com.example.demoplugin;
++
++import com.google.gerrit.entities.Project;
++import com.google.inject.Singleton;
++import java.util.Set;
++import java.util.concurrent.ConcurrentHashMap;
++
++/**
++ * Which projects are in maintenance right now.
++ *
++ * <p>The state lives in memory only: it is meant for short maintenance windows and is gone after a
++ * plugin reload or a Gerrit restart, which both end the window anyway.
++ */
++@Singleton
++public class MaintenanceState {
++  private final Set<Project.NameKey> projects = ConcurrentHashMap.newKeySet();
++
++  /** Whether {@code project} is in maintenance. */
++  public boolean isOn(Project.NameKey project) {
++    return projects.contains(project);
++  }
++
++  /**
++   * Switches maintenance for {@code project} on or off.
++   *
++   * @return {@code true} when the state changed, {@code false} when it already had that value
++   */
++  public boolean set(Project.NameKey project, boolean on) {
++    return on ? projects.add(project) : projects.remove(project);
++  }
++}
+diff --git a/src/main/java/com/example/demoplugin/Module.java b/src/main/java/com/example/demoplugin/Module.java
+index 988eaa2..346c887 100644
+--- a/src/main/java/com/example/demoplugin/Module.java
++++ b/src/main/java/com/example/demoplugin/Module.java
+@@ -32,6 +32,7 @@ public class Module extends AbstractModule {
+   @Override
+   protected void configure() {
+     bind(DemoPluginConfig.class);
++    bind(MaintenanceState.class);
+     bind(CapabilityDefinition.class)
+         .annotatedWith(Exports.named(MaintainCapability.ID))
+         .to(MaintainCapability.class);
+diff --git a/src/test/java/com/example/demoplugin/MaintenanceStateTest.java b/src/test/java/com/example/demoplugin/MaintenanceStateTest.java
+new file mode 100644
+index 0000000..35980b0
+--- /dev/null
++++ b/src/test/java/com/example/demoplugin/MaintenanceStateTest.java
+@@ -0,0 +1,57 @@
++// Copyright (C) 2026 gerrit-stack demo
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package com.example.demoplugin;
++
++import static com.google.common.truth.Truth.assertThat;
++
++import com.google.gerrit.entities.Project;
++import org.junit.Test;
++
++public class MaintenanceStateTest {
++  private static final Project.NameKey PROJECT = Project.nameKey("team/some-project");
++  private static final Project.NameKey OTHER = Project.nameKey("team/other-project");
++
++  private final MaintenanceState state = new MaintenanceState();
++
++  @Test
++  public void projectsAreNotInMaintenanceByDefault() {
++    assertThat(state.isOn(PROJECT)).isFalse();
++  }
++
++  @Test
++  public void switchingOnAffectsOnlyThatProject() {
++    assertThat(state.set(PROJECT, true)).isTrue();
++
++    assertThat(state.isOn(PROJECT)).isTrue();
++    assertThat(state.isOn(OTHER)).isFalse();
++  }
++
++  @Test
++  public void switchingOffEndsMaintenance() {
++    state.set(PROJECT, true);
++
++    assertThat(state.set(PROJECT, false)).isTrue();
++
++    assertThat(state.isOn(PROJECT)).isFalse();
++  }
++
++  @Test
++  public void settingTheSameValueTwiceReportsNoChange() {
++    state.set(PROJECT, true);
++
++    assertThat(state.set(PROJECT, true)).isFalse();
++    assertThat(state.set(OTHER, false)).isFalse();
++  }
++}

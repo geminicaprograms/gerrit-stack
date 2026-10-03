@@ -4,6 +4,13 @@ Source: https://conventionalcomments.org (labels and decorations quoted from the
 The format makes the *intent* of a review comment machine- and human-parseable, so an author
 can tell at a glance what is blocking, what is optional, and what needs no action at all.
 
+**When this applies to what you write:** only when the team chose it — `gerrit-stack.comment-style`
+is `conventional` (per-clone `git config`, else the committed `.gerrit-stack` file; default `none`).
+Then every **new top-level** comment or author note starts with a label (a guard denies unlabelled
+ones) and states `(blocking)` / `(non-blocking)` when the label alone leaves it open. **Replies are
+free-form in both modes.** With `none`, write plain concise sentences and use this file only to
+read reviewers' labels.
+
 ## Format
 
 ```
@@ -58,6 +65,8 @@ can tell at a glance what is blocking, what is optional, and what needs no actio
 ## Author replies — examples
 
 All replies are ≤ 3 sentences, threaded with `in_reply_to`, and use "we"/"could" over "you"/"should".
+Labels in replies are optional: the examples below show them, and the same sentences without the
+leading label are equally fine.
 
 **Fixed** (the only unlabelled reply; Gerrit's own convention)
 ```
@@ -89,7 +98,7 @@ note: agreed, but it touches the SSH command too; tracked in I7f3c2a91e4b5d6c7 (
 question: do we want the fallback to be "" or to skip the greeting entirely when the prefix is unset?
 ```
 
-**Author note on your own change** (Process C)
+**Author note on your own change** (Process C; a new top-level comment — labelled when `comment-style=conventional`)
 ```
 note (non-blocking): reviewer note: this change only moves code; behaviour is unchanged. The rename lands in the next change.
 ```
@@ -99,4 +108,5 @@ note (non-blocking): reviewer note: this change only moves code; behaviour is un
 - More than one round of disagreement in a thread — escalate to the human instead.
 - `Done.` before the patch set with the fix is on the server.
 - A reply that resolves a thread you declined — the reviewer closes those.
-- Unlabelled prose except `Done.`; a reader should know from the first word whether action is needed.
+- With `comment-style=conventional`: a new top-level comment without a label; a reader should know from the first word whether action is needed.
+- With `comment-style=none`: labels and decorations the team did not ask for.

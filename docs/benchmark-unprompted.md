@@ -7,8 +7,6 @@ Does the plugin make an agent produce Gerrit relation chains that are smaller, c
 
 > **Unprompted variant** (`evals/bench-unprompted/`): plain product requests, no repo rules (only the headless pre-approval sentence), `--setting-sources project,local`. 2026-09-30, one run per arm: `rate-limited-ping` → C 4-change chain, A/B one ~290-line commit. `maintenance-mode` run 1 → C 6-change chain (169/167/226/329/93/191, proposed landing #1–5 first), B one 951-line commit, A one 1253-line commit; run 2 → C 5-change chain (183/207/92/177/164), B one 1269-line commit, A one 1060-line commit. Run 2 is pushed to the demo Gerrit for side-by-side review: `hashtag:run-20260930-100850` (changes 5–9 = C, 10 = B, 11 = A). See `docs/benchmark.md` for the coached variant.
 
-See also [benchmark-rework.md](benchmark-rework.md) for what happens *after* the push: reviewer feedback → rework → re-push, plus guardrail behaviour under nudges.
-
 ## Arms
 
 Same prompts, same fixture repos (`evals/bench/*/fixture.sh` on the demo skeleton, real commit-msg hook, local bare remote), three arms:

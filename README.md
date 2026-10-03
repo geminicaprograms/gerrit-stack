@@ -196,7 +196,7 @@ A second benchmark extends this past "chain pushed" through a scripted
 review round — reviewer comment, rework, re-push, read-back — to measure
 how cheaply each arm gets a change re-reviewable and whether the guard holds
 under guardrail-pressure nudges; see "Rework + guardrail pipelines" in
-`evals/README.md`; results in `docs/benchmark-rework.md`.
+`evals/README.md`. No results are published: the first rework run (2026-10-01) was withdrawn, see `docs/plans/PROGRESS.md`.
 
 ## Troubleshooting
 

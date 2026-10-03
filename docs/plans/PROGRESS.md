@@ -5,7 +5,7 @@ Links: [SPEC](/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/p
 ## Resume here
 **Part 1 complete (2026-09-30)** except two items: (1) M2 works only with the local gerrit-mcp patch (`demo/patch-gerrit-mcp.sh`; propose upstream); (2) eval and benchmark were run once per case (`--runs 1`); repeat with `--runs 2`/`3` before tagging v0.1.0. Next steps: W3 rehearsal with `demo/RUN.md` (demo Gerrit is up on :8080 with chain 2–4 pushed; `make demo-reset` for a clean slate), Part 2 deck. Follow-ups listed at the bottom.
 
-**Rework benchmark complete (2026-10-01): 36 pipelines (3 cases × 3 arms × fix/split × natural/nudged) in `docs/benchmark-rework.md`; results dirs `evals/results/rework-rlp-final`, `rework-batch-2b`, `rework-batch-2c`, `rework-batch-3`. Next: repeat with `--runs 3` for numbers (≈ $200), then Part 2 deck (slide evidence: benchmark-unprompted.md + benchmark-rework.md).**
+**Rework benchmark results WITHDRAWN (2026-10-03, user decision): `docs/benchmark-rework.md` removed (last version in commit c034bc9). Reason: the baseline arms pushed a single change, so `fix` rework was a plain amend and could not lose a footer; the scenario did not test chain rework. Runner machinery (`--scenarios`, reviewer step, stage 2, metrics, `-j`) is kept for the redesign: seeded identical chain (rework) + prompted split (split quality), tier-1 isolation, uber env for arm C. Redesign is in discussion, nothing implemented. Raw result dirs `evals/results/rework-*` are still on disk (gitignored) and the demo Gerrit still holds the pushed changes.**
 
 ## Rework benchmark
 

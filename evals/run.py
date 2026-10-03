@@ -3064,10 +3064,19 @@ def require_change_id_off(opts: argparse.Namespace, env: Optional[dict] = None) 
     return restore
 
 
+def _raise_on_sigterm(signum, frame):  # so `finally` blocks run (restore requireChangeId) when the batch is killed
+    raise SystemExit(128 + signum)
+
+
 def main(argv=None) -> int:
     global VERBOSE
     opts = parse_args(argv)
     VERBOSE = opts.verbose
+    try:
+        signal.signal(signal.SIGTERM, _raise_on_sigterm)
+        signal.signal(signal.SIGHUP, _raise_on_sigterm)
+    except (ValueError, OSError):  # not the main thread (tests)
+        pass
     try:
         cases = discover_cases(opts.eval_dir, opts.case)
     except (ValueError, OSError) as exc:

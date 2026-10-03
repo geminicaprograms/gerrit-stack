@@ -26,6 +26,10 @@ bash demo/work/demo-plugin/tools/quick-check.sh   # < 1 s, exit 0
 - [ ] Dry-run once on the day: run the whole script below, then reset (last section). During that dry run answer
       "yes, don't ask again" to the permission prompts for `git …` and `bash tools/quick-check.sh`, so the show
       runs without prompts (settings land in `demo/work/demo-plugin/.claude/settings.local.json`; a reset wipes them).
+- [ ] The demo project carries the team files from the seed commit: `git -C demo/work/demo-plugin show --stat HEAD`
+      lists `.gerrit-stack` (`commit-lint = auto`, `comment-style = conventional`) and `commitlint.config.mjs`;
+      `commitlint --version` works in tab A (installed globally: `npm i -g @commitlint/cli @commitlint/config-conventional`).
+      The session-start line names both team conventions. Without commitlint the commit highlight below is silent.
 - [ ] Font size 18+, `Ctrl-L` in both tabs, notifications off, `demo/recording/` open in Finder as the fallback.
 
 ## 0:00 — the prompt
@@ -51,6 +55,17 @@ asserts exactly one `Change-Id:` and prints the diff size.
 Narrate on the first commit: *"The Change-Id trailer came from Gerrit's commit-msg hook, never typed by the agent —
 a hook rule denies any hand-written one. It is the identity that survives rebases and amends."*
 Point at the sizes: three commits around 60 / 80 / 50 lines.
+
+**Highlight — the team files.** Show the repo's `.gerrit-stack` and `commitlint.config.mjs` (committed in the demo
+project, so every clone has them) and then the chain subjects: `git log --oneline origin/master..HEAD` reads
+`feat: …` for the code changes and `test: …` where tests travel on their own — conforming without the prompt
+saying a word about commit style. Narrate: *"The plugin ships no commit rules of its own. It runs the repo's own
+commitlint config on every commit and before the push; the team decides, the agent follows."*
+
+If a subject slips (or you nudge one on purpose, e.g. a rehearsal commit `Added greeting`), the post-commit
+feedback shows commitlint's own rule lines (`subject-case`, `type-empty`) and the agent amends with
+`git commit --amend -F <file>`, keeping the Change-Id line. Narrate: *"That is commitlint talking, not the
+plugin — and the Change-Id survives the amend."* A push of a chain with a failing subject is denied, listing the shas.
 
 ## 3:00 — the grouping question → **none**
 
@@ -84,6 +99,9 @@ Prints the change URL. Reload tab 2: `Code-Review -1` from *Rena Reviewer* and a
 
 Narrate: *"Conventional Comments — the label says what kind of feedback this is and whether it blocks."*
 
+Tie-back, one sentence: *"This is the call to action from last year's talk — Conventional Comments — and with
+`comment-style = conventional` in the team file the plugin holds the agent to it."*
+
 ## 4:45 — address it (tab A)
 
 Type: **Check review comments on the chain and address them**
@@ -93,6 +111,12 @@ change 2. Then `gerrit-stack` phase 5: fix → `git commit --fixup=<sha of chang
 `git -c sequence.editor=true rebase -i --autosquash <base>` → `chain-status.sh --verify-ids` prints `ok`
 (all three Change-Ids unchanged) → *Push 3 changes to refs/for/master on origin?* → **yes** → reply drafted
 (`Done. …`, ≤ 3 sentences, `unresolved: false`) → *post 1 reply?* → **yes**.
+
+**Highlight — labelled review replies.** With `comment-style = conventional` any new top-level comment the agent
+drafts must carry a label (`issue (blocking):`, `suggestion (non-blocking):`, `praise:`); an unlabelled one is
+denied with the label list. Replies stay free-form (`Done. …` plus why), so the reply to rena goes through
+unlabelled. If you want the guard on screen, ask the agent to add a top-level note on change 3 and watch the
+label request.
 
 Narrate over the rebase: *"The fix is squashed into the middle change, not appended as a fourth. The Change-Ids
 are verified after the rebase, so Gerrit sees new patchsets, not new changes. The whole chain is re-pushed because

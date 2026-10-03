@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 SCRIPTS := $(wildcard scripts/*.sh) $(wildcard scripts/lib/*.sh) $(wildcard demo/*.sh) $(wildcard demo/skeleton/tools/*.sh)
 
-.PHONY: all validate lint test test-py check eval bench demo-up demo-seed demo-reset demo-warm demo-down
+.PHONY: all validate lint test test-py check eval bench bench-unprompted bench-split bench-rework bench-review demo-up demo-seed demo-reset demo-warm demo-down
 
 all: check
 
@@ -25,6 +25,20 @@ eval:
 
 bench:
 	python3 evals/run.py --bench --ablation --runs 3
+
+BENCH_ARGS := --arms with,mcp-only,without --push-to http://localhost:8080/a/demo-plugin -j 3
+
+bench-unprompted:
+	python3 evals/run.py --eval-dir evals/bench-unprompted $(BENCH_ARGS)
+
+bench-split:
+	python3 evals/run.py --eval-dir evals/bench-split $(BENCH_ARGS)
+
+bench-rework:
+	python3 evals/run.py --eval-dir evals/bench-rework --variants natural,nudged $(BENCH_ARGS)
+
+bench-review:
+	python3 evals/run.py --eval-dir evals/bench-review $(BENCH_ARGS)
 
 demo-up:
 	docker compose -f demo/docker-compose.yml up -d

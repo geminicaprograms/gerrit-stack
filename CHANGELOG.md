@@ -76,23 +76,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/test_collect.py` (Python `unittest`), and shared fixtures
   (`tests/helpers.bash`, `tests/fixtures/commit-msg`).
 - `Makefile` targets: `validate`, `lint`, `test`, `test-py`, `check`, `eval`,
-  `bench`, `demo-up`, `demo-seed`, `demo-reset`, `demo-warm`, `demo-down`.
+  `bench`, `bench-unprompted`, `bench-split`, `bench-rework`, `bench-review`,
+  `demo-up`, `demo-seed`, `demo-reset`, `demo-warm`, `demo-down`.
 - `.github/workflows/ci.yml`: `claude plugin validate ./ --strict`,
   `shellcheck`, `bats`, `python3 -m py_compile`, and `unittest discover`.
 - `README.md` (install, skills, hooks/scripts reference, configuration,
   demo, tests, troubleshooting, design principles) and
   `docs/jj-stretch.md` (deferred jj-mode design note).
-- Rework + guardrail benchmark (in progress, per
-  `.claude/plans/2026-09-30-rework-benchmark-plan.md`): extends
-  `evals/run.py` with `--scenarios fix,split`, `--variants natural,nudged`
-  and `-j/--jobs N` to drive a second stage — reviewer feedback (posted as
-  `rena`), rework, re-push, Gerrit read-back — after the existing
-  implement-and-push stage, plus `rework:`/`nudges:` blocks in
-  `case.yaml`, `graders-rework/`, rework-correctness and guardrail-counter
-  metrics, and a `## Rework`/`## Guardrails` section in
-  `evals/metrics/collect.py`'s output. Documented in `evals/README.md`
-  ("Rework + guardrail pipelines"); batch 1 is a 12-pipeline smoke on
-  `rate-limited-ping` alone before the full 3-case matrix.
+- Benchmark redesign (uber environment): four suites with `kind` cases in
+  `case.yaml` (`implement` | `rework` | `review`): `evals/bench-unprompted`
+  (does it split on its own), `evals/bench-split` (prompted split, concern
+  maps), `evals/bench-rework/fix-mid-conflict` (seeded six-change chain,
+  conflicting blocking fix, natural and nudged) and
+  `evals/bench-review/planted-defects` (reviewer with three planted defects).
+  `make bench-unprompted bench-split bench-rework bench-review`.
+- `evals/run.py` sandbox (tier 1): env allowlist, `ENABLE_CLAUDEAI_MCP_SERVERS=false`,
+  `--setting-sources project,local`, pinned `--model`, per-run `isolation.json`
+  (a failed startup check errors the run) and capability counters,
+  `conventions.json`, `--variants natural,nudged`, `--push-to` hashtags
+  `bench-<case>-<arm>`, `run-<id>`, `var-<variant>`, `rep-<n>`, `-j`.
+- `scripts/chain-metrics.sh --concerns <case.yaml>` (purity, completeness,
+  tests travel) and a reimplemented `--verify-cmd` (builds alone, per-commit
+  clean checkout, `--verify-timeout`).
+- `evals/metrics/collect.py` rewritten: Split quality, Rework (seeded chain),
+  Reviewer, Conventions, Guardrails and Isolation sections; renders
+  `docs/benchmark.md`, which is not committed until the first sandboxed pass.
 
 ### Changed
 

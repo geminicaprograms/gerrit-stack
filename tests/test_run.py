@@ -1494,6 +1494,11 @@ class ReviewMetricsTest(unittest.TestCase):
         lines = run.last_message_comments("### Config.java:3\n\nissue (blocking): boom\n| file | comment |\n|---|---|\n"
                                           "| D.java:1 | note: PS1 already does this |\nSee Config.java:9.\nkeynote: nothing\n")
         self.assertEqual([c["label"] for c in lines], ["issue", "note"])  # heading / bare locators are not comments
+        # unlabelled drafted comments count too (locator line + blockquote), prose mentions do not
+        plain = run.last_message_comments("**1. `src/main/java/A.java`, line 63** (bug)\n> Off-by-one in the limit check.\n\n"
+                                          "**2. `src/test/java/ATest.java`, line 4**\n> issue (blocking): result is not asserted\n\nSee A.java:9 for context.\n")
+        self.assertEqual([c["label"] for c in plain], [None, "issue"])
+        self.assertEqual([c["blocking"] for c in plain], [False, True])
 
 
 class ConventionsTest(unittest.TestCase):

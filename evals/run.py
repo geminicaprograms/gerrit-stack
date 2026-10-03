@@ -1901,24 +1901,75 @@ def _label_info(text: str) -> tuple[Optional[str], bool]:
     return label, blocking
 
 
+_LOCATOR_RE = re.compile(r"`?[\w./-]+\.[A-Za-z]{1,8}`?(?::\d+|#L?\d+|,? lines? \d+)")
+
+
 def last_message_comments(text: str) -> list[dict]:
-    """Lines of the final message that look like drafted review comments or replies: a Conventional
-    Comments label, or a `file.ext:line` reference followed by actual words (a bare locator such as a
-    heading `### Foo.java:12` is not a comment). -> [{source, text, label, blocking}]"""
-    out = []
-    for raw in (text or "").splitlines():
+    """Drafted review comments or replies in the final message. Two shapes are recognised:
+    (1) a locator line (`file.ext:12`, "`file.ext`, line 12") opens a comment whose text is the rest
+    of that line plus the blockquote / paragraph that follows it — counted whether or not it carries
+    a Conventional Comments label; (2) a line outside any such block that carries a label (table
+    rows, replies). A bare locator with no text (a heading) is not a comment.
+    -> [{source, text, label, blocking}]"""
+    lines = (text or "").splitlines()
+    out, used = [], set()
+    i = 0
+    while i < len(lines):
+        ln = lines[i].strip()
+        ref = _LOCATOR_RE.search(ln) if ln and not ln.startswith(">") else None
+        # a locator opens a comment only when it leads the line (after list/heading/table markup);
+        # "See Config.java:9." in running prose is a mention, not a drafted comment
+        if ref and not re.fullmatch(r"[\s#*\-|`(\[\d.]*", ln[:ref.start()]):
+            ref = None
+        if not ref:
+            i += 1
+            continue
+        same = (ln[:ref.start()] + " " + ln[ref.end():]).strip()
+        same_words = len(re.sub(r"[^\w\s]", " ", same).split())
+        body, j = [], i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        quoted = j < len(lines) and lines[j].lstrip().startswith(">")
+        while j < len(lines):
+            cur = lines[j].strip()
+            if not cur:
+                if not quoted:
+                    break
+                k = j + 1
+                while k < len(lines) and not lines[k].strip():
+                    k += 1
+                if k >= len(lines) or not lines[k].lstrip().startswith(">"):
+                    break
+                j = k
+                continue
+            if quoted and not cur.startswith(">"):
+                break
+            if not quoted and (cur.startswith("#") or _LOCATOR_RE.search(cur)):
+                break
+            body.append(cur.lstrip("> ").strip())
+            used.add(j)
+            j += 1
+        body_text = " ".join(b for b in body if b)
+        if same_words >= 3 and not body_text:
+            comment = same
+        elif body_text:
+            comment = body_text
+        else:
+            i += 1
+            continue
+        used.add(i)
+        label, blocking = _label_info(comment[:240] if not same_words >= 3 else same + " " + comment[:240])
+        out.append({"source": "last_message", "text": (ln + " " + comment).strip(), "label": label, "blocking": blocking})
+        i = max(j, i + 1)
+    for n, raw in enumerate(lines):
+        if n in used:
+            continue
         ln = raw.strip()
         if not ln or re.fullmatch(r"[|\s:=-]+", ln):
             continue
         label, blocking = _label_info(ln)
-        if label is None:
-            ref = _FILE_LINE_RE.search(ln)
-            if not ref:
-                continue
-            rest = re.sub(r"[^\w\s]", " ", ln[:ref.start()] + " " + ln[ref.end():])
-            if len(rest.split()) < 3:
-                continue
-        out.append({"source": "last_message", "text": ln, "label": label, "blocking": blocking})
+        if label is not None:
+            out.append({"source": "last_message", "text": ln, "label": label, "blocking": blocking})
     return out
 
 

@@ -20,6 +20,6 @@ kind: review
 review:
   target_subject: '^feat: rate limit the ping REST view$'
   planted:
-    - {id: off-by-one, kind: blocking, file: 'PingRateLimiter\.java$', keywords: ['off-by-one', 'off by one', '<=', 'one fewer', 'limit of 1', 'limit - 1']}
+    - {id: off-by-one, kind: blocking, file: 'PingRateLimiter\.java$', keywords: ['off-by-one', 'off by one', '<=', 'fewer', 'one less', 'limit of 1', 'limit - 1', 'limit − 1', 'n-1', 'n−1', '< limit', 'incrementandget']}
     - {id: magic-429, kind: nit, file: 'PingAction\.java$', keywords: ['magic', 'constant', 'literal', 'sc_too_many_requests', 'hard-coded', 'hardcoded']}
     - {id: static-map, kind: question, file: 'PingRateLimiter\.java$', keywords: ['static', 'instance field', 'shared state', 'shared across', 'global state', 'non-static']}

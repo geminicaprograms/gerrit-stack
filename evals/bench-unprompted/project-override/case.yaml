@@ -13,29 +13,26 @@ kind: implement
 # with at least one matching path. The regexes are mutually exclusive, so a
 # path belongs to at most one concern. Tests and docs map to the concern of
 # the code they cover. Shared wiring and build files (Module.java,
-# SshModule.java, BUILD, README.md, Documentation/about.md) are deliberately
+# SshModule.java, BUILD, README.md and every Documentation/*.md page) are deliberately
 # unmapped: every REST/SSH concern adds its own line there, so they say
 # nothing about which concern a change holds.
 # Mapping for this case:
 #   override  per-project pingMessage resolution with global fallback:
 #             DemoPluginConfig(Test).java, any class named *Project*(Config|Override|
-#             Message|Resolver|Settings)*, *Override*, *Resolver*, Documentation/config.md
-#   rest      REST view honours the override: PingAction(Test).java, Documentation/rest-api*.md
-#   ssh       SSH command honours the override: PingCommand(Test).java, Documentation/cmd-*.md
+#             Message|Resolver|Settings)*, *Override*, *Resolver*
+#   rest      REST view honours the override: PingAction(Test).java
+#   ssh       SSH command honours the override: PingCommand(Test).java
 concerns:
   - name: override
     paths:
       - '/DemoPluginConfig(Test|IT)?\.java$'
-      - 'Documentation/config\.md$'
       - '/[A-Za-z]*(Override|Resolver|Project(Ping)?(Config|Message|Settings))[A-Za-z]*\.java$'
   - name: rest
     paths:
       - '/PingAction(Test|IT)?\.java$'
-      - 'Documentation/rest-api[^/]*\.md$'
   - name: ssh
     paths:
       - '/PingCommand(Test|IT)?\.java$'
-      - 'Documentation/cmd-[^/]*\.md$'
 
 # Nudged variant (evals/run.py --variants natural,nudged): the prompt plus this line.
 nudges:

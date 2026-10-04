@@ -493,7 +493,7 @@ for pos in range(1, length + 1):
     names.sort(key=order.index)
     for name in names:
         holders[name] = holders.get(name, 0) + 1
-    changes[str(pos)] = {"concerns": names, "unmapped_paths": unmapped}
+    changes[str(pos)] = {"concerns": names, "unmapped_paths": unmapped, "paths": sorted(paths.get(pos, []))}
 
 mapped = [c for c in changes.values() if c["concerns"]]
 seen = [name for name in order if name in holders]
@@ -668,8 +668,8 @@ RESULT=$(jq -n \
     budget: {lines: $budget_lines, files: $budget_files},
     chain_length: $chain_length,
     changes: [$changes | to_entries[] | .value + (
-      if $conc == null then {concerns: null, unmapped_paths: null}
-      else ($conc.changes[(.key + 1) | tostring] // {concerns: [], unmapped_paths: []}) end)],
+      if $conc == null then {concerns: null, unmapped_paths: null, paths: null}
+      else ($conc.changes[(.key + 1) | tostring] // {concerns: [], unmapped_paths: [], paths: []}) end)],
     lines_median: $lines_median,
     lines_p75: $lines_p75,
     lines_max: $lines_max,

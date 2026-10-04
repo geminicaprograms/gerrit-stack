@@ -13,28 +13,25 @@ kind: implement
 # with at least one matching path. The regexes are mutually exclusive, so a
 # path belongs to at most one concern. Tests and docs map to the concern of
 # the code they cover. Shared wiring and build files (Module.java,
-# SshModule.java, BUILD, README.md, Documentation/about.md) are deliberately
+# SshModule.java, BUILD, README.md and every Documentation/*.md page) are deliberately
 # unmapped: every REST/SSH concern adds its own line there, so they say
 # nothing about which concern a change holds.
 # Mapping for this case:
-#   setting     maintenanceMessage: DemoPluginConfig(Test).java, Documentation/config.md
+#   setting     maintenanceMessage: DemoPluginConfig(Test).java
 #   state       per-project maintenance state holder: Maintenance.java,
 #               (Project|Plugin|DemoPlugin|InMemory)Maintenance(State|Store|Registry|Mode|...)(Test).java
 #   capability  demo-plugin-maintain: any class named *Capabilit* (MaintainCapability, ...)
 #   rest        GET/PUT/DELETE demo-plugin~maintenance: (Get|Put|Delete|Set|...)Maint*.java,
 #               *Maint*(Action|View|Rest|Endpoint|Resource|Info|Input)(Test).java,
-#               Documentation/rest-api*.md
 #   ping        ping answers 503 / the message on REST and SSH: PingAction(Test).java,
-#               PingCommand(Test).java, Documentation/cmd-*ping*.md
+#               PingCommand(Test).java
 #   ssh         demo-plugin maintenance command: *Maint*Command(Test).java,
-#               Documentation/cmd-*maint*.md
 # Known limit: a verb-prefixed command class (e.g. SetMaintenanceCommand) would
 # match both rest and ssh; the names below cover what agents have produced.
 concerns:
   - name: setting
     paths:
       - '/DemoPluginConfig(Test|IT)?\.java$'
-      - 'Documentation/config\.md$'
   - name: state
     paths:
       - '/(Project|Plugin|DemoPlugin|InMemory)?Maint[a-z]*(State|Store|Registry|Mode|Status|Manager|Tracker|Service|Holder|Cache|Repository|Switch|Flags?|Projects)?(Test|IT)?\.java$'
@@ -45,12 +42,9 @@ concerns:
     paths:
       - '/(Get|Put|Delete|Set|Enable|Disable|Read|Toggle)[A-Za-z]*Maint[A-Za-z]*\.java$'
       - '/[A-Za-z]*Maint[a-z]*(Action|View|Rest|RestView|Endpoint|Resource|Info|Input)s?(Test|IT)?\.java$'
-      - 'Documentation/rest-api[^/]*\.md$'
   - name: ping
     paths:
       - '/Ping(Action|Command)(Test|IT)?\.java$'
-      - 'Documentation/cmd-[^/]*ping[^/]*\.md$'
   - name: ssh
     paths:
       - '/[A-Za-z]*Maint[a-z]*(Ssh)?Command(Test|IT)?\.java$'
-      - 'Documentation/cmd-[^/]*maint[^/]*\.md$'

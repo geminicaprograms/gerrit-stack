@@ -3088,6 +3088,7 @@ def main(argv=None) -> int:
     started = _dt.datetime.now(_dt.timezone.utc)
     out_dir = opts.out_dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "results",
                                            started.strftime("%Y%m%d-%H%M%S"))
+    out_dir = os.path.abspath(out_dir)  # hooks run inside the workspace: GERRIT_STACK_TRACE must be absolute
     try:
         pipelines = build_pipelines(cases, opts)
     except ValueError as exc:

@@ -13,26 +13,22 @@ kind: implement
 # with at least one matching path. The regexes are mutually exclusive, so a
 # path belongs to at most one concern. Tests and docs map to the concern of
 # the code they cover. Shared wiring and build files (Module.java,
-# SshModule.java, BUILD, README.md, Documentation/about.md) are deliberately
+# SshModule.java, BUILD, README.md and every Documentation/*.md page) are deliberately
 # unmapped: every REST/SSH concern adds its own line there, so they say
 # nothing about which concern a change holds.
 # Mapping for this case:
-#   setting  greetingPrefix: DemoPluginConfig(Test).java, Documentation/config.md
+#   setting  greetingPrefix: DemoPluginConfig(Test).java
 #   rest     GET demo-plugin~greeting: Greeting.java, GreetingAction/View/...(Test).java,
-#            GetGreeting(Test).java, Documentation/rest-api*.md
+#            GetGreeting(Test).java
 #   ssh      demo-plugin greet: GreetCommand/GreetingCommand/GreetSshCommand(Test).java,
-#            Documentation/cmd-*.md
 concerns:
   - name: setting
     paths:
       - '/DemoPluginConfig(Test|IT)?\.java$'
-      - 'Documentation/config\.md$'
   - name: rest
     paths:
       - '/(Get)?Greet(ing)?(s|Action|View|Rest|RestView|Endpoint|Resource|Info|Response|Output|Formatter|Service|Builder)?(Test|IT)?\.java$'
-      - 'Documentation/rest-api[^/]*\.md$'
   - name: ssh
     paths:
       - '/Greet(ing)?(Ssh)?Command(Test|IT)?\.java$'
       - '/SshGreet(ing)?[A-Za-z]*\.java$'
-      - 'Documentation/cmd-[^/]*\.md$'

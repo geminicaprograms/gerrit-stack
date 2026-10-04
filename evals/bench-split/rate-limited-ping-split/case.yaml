@@ -13,28 +13,25 @@ kind: implement
 # with at least one matching path. The regexes are mutually exclusive, so a
 # path belongs to at most one concern. Tests and docs map to the concern of
 # the code they cover. Shared wiring and build files (Module.java,
-# SshModule.java, BUILD, README.md, Documentation/about.md) are deliberately
+# SshModule.java, BUILD, README.md and every Documentation/*.md page) are deliberately
 # unmapped: every REST/SSH concern adds its own line there, so they say
 # nothing about which concern a change holds.
 # Mapping for this case:
-#   setting  pingRateLimit: DemoPluginConfig(Test).java, Documentation/config.md
+#   setting  pingRateLimit: DemoPluginConfig(Test).java
 #   limiter  per-project limiter: any class named *RateLimit*, *Limiter*,
 #            *Throttl* (PingRateLimiter, RateLimiterTest, RateLimitExceededException, ...)
-#   rest     HTTP 429 from the REST view: PingAction(Test).java, Documentation/rest-api*.md
-#   ssh      `rate limited` from the SSH command: PingCommand(Test).java, Documentation/cmd-*.md
+#   rest     HTTP 429 from the REST view: PingAction(Test).java
+#   ssh      `rate limited` from the SSH command: PingCommand(Test).java
 concerns:
   - name: setting
     paths:
       - '/DemoPluginConfig(Test|IT)?\.java$'
-      - 'Documentation/config\.md$'
   - name: limiter
     paths:
       - '/[A-Za-z]*(RateLimit|Limiter|Throttl)[A-Za-z]*\.java$'
   - name: rest
     paths:
       - '/PingAction(Test|IT)?\.java$'
-      - 'Documentation/rest-api[^/]*\.md$'
   - name: ssh
     paths:
       - '/PingCommand(Test|IT)?\.java$'
-      - 'Documentation/cmd-[^/]*\.md$'

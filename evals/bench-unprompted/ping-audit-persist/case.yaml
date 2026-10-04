@@ -13,28 +13,26 @@ kind: implement
 # with at least one matching path. The regexes are mutually exclusive, so a
 # path belongs to at most one concern. Tests and docs map to the concern of
 # the code they cover. Shared wiring and build files (Module.java,
-# SshModule.java, BUILD, README.md, Documentation/about.md) are deliberately
+# SshModule.java, BUILD, README.md and every Documentation/*.md page) are deliberately
 # unmapped: every REST/SSH concern adds its own line there, so they say
 # nothing about which concern a change holds.
 # Mapping for this case:
 # The six concerns are the ones listed in graders/one-concern-per-change.md.
-#   setting      pingAuditSize: DemoPluginConfig(Test).java, Documentation/config.md
+#   setting      pingAuditSize: DemoPluginConfig(Test).java
 #   buffer       in-memory per-project audit buffer: PingAuditLog/PingLog/PingAudit/AuditLog
 #                (+Entry|Record|Buffer|Service|Registry)(Test).java
 #   persistence  file under @PluginData, reload on start: any class ending in
 #                Store|Storage|Persist*|Repository|File|Writer|Reader|Loader|Serializer|Codec
 #   record       REST and SSH ping record entries: PingAction(Test).java, PingCommand(Test).java
 #   rest         GET ping-log and the owner-only DELETE: (Get|List|Delete|Clear)Ping*.java,
-#                Ping(Audit)Log(Action|View|...)(Test).java, Documentation/rest-api*.md
+#                Ping(Audit)Log(Action|View|...)(Test).java
 #   ssh          demo-plugin ping-log command: Ping(Audit)LogCommand(Test).java,
-#                Documentation/cmd-*.md
 # Known limit: when persistence is written into the buffer class itself the two
 # concerns share one file and the map reports only `buffer`.
 concerns:
   - name: setting
     paths:
       - '/DemoPluginConfig(Test|IT)?\.java$'
-      - 'Documentation/config\.md$'
   - name: buffer
     paths:
       - '/(InMemory)?Ping(Audit)?(Log|Audit)(Entry|Record|Buffer|Service|Registry)?(Test|IT)?\.java$'
@@ -49,11 +47,9 @@ concerns:
     paths:
       - '/(Get|List|Delete|Clear)Ping[A-Za-z]*\.java$'
       - '/Ping(Audit)?Log(Action|View|Rest|RestView|Endpoint|Resource|Info)s?(Test|IT)?\.java$'
-      - 'Documentation/rest-api[^/]*\.md$'
   - name: ssh
     paths:
       - '/Ping(Audit)?Log(Ssh)?Command(Test|IT)?\.java$'
-      - 'Documentation/cmd-[^/]*\.md$'
 
 # Nudged variant (evals/run.py --variants natural,nudged): the prompt plus this line.
 nudges:

@@ -13,22 +13,21 @@ kind: implement
 # with at least one matching path. The regexes are mutually exclusive, so a
 # path belongs to at most one concern. Tests and docs map to the concern of
 # the code they cover. Shared wiring and build files (Module.java,
-# SshModule.java, BUILD, README.md, Documentation/about.md) are deliberately
+# SshModule.java, BUILD, README.md and every Documentation/*.md page) are deliberately
 # unmapped: every REST/SSH concern adds its own line there, so they say
 # nothing about which concern a change holds.
 # Mapping for this case:
-#   setting  pingAuditLog: DemoPluginConfig(Test).java, Documentation/config.md
+#   setting  pingAuditLog: DemoPluginConfig(Test).java
 #   log      the audit log itself: PingAuditLog/PingLog/PingAudit/AuditLog
 #            (+Entry|Store|Record|Recorder|Buffer|Service|...)(Test).java
 #   record   REST view and SSH command record their calls: PingAction(Test).java,
 #            PingCommand(Test).java
 #   view     GET demo-plugin~ping-log: (Get|List)Ping*.java,
-#            Ping(Audit)Log(Action|View|...)(Test).java, Documentation/rest-api*.md
+#            Ping(Audit)Log(Action|View|...)(Test).java
 concerns:
   - name: setting
     paths:
       - '/DemoPluginConfig(Test|IT)?\.java$'
-      - 'Documentation/config\.md$'
   - name: log
     paths:
       - '/(InMemory)?Ping(Audit)?(Log|Audit)(Entry|Store|Record|Recorder|Buffer|Service|Repository|Registry)?(Test|IT)?\.java$'
@@ -40,7 +39,6 @@ concerns:
     paths:
       - '/(Get|List)Ping[A-Za-z]*\.java$'
       - '/Ping(Audit)?Log(Action|View|Rest|RestView|Endpoint|Resource|Info)s?(Test|IT)?\.java$'
-      - 'Documentation/rest-api[^/]*\.md$'
 
 # Nudged variant (evals/run.py --variants natural,nudged): the prompt plus this line.
 nudges:

@@ -2194,3 +2194,9 @@ class DryRunTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TracePathTest(unittest.TestCase):
+    def test_relative_out_dir_becomes_absolute(self):
+        src = open(RUN_PY, encoding="utf-8").read()
+        self.assertIn("out_dir = os.path.abspath(out_dir)", src)

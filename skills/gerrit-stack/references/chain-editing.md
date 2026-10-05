@@ -198,5 +198,5 @@ This is the one push line `push-chain.sh` does not print (it always uploads
 
 Keep commits 6+ local. When 1–5 have merged: `git fetch <remote>`, `git rebase <base>`
 (merged commits drop out), and the remaining commits are chain 2 — push it via
-`push-chain.sh` as usual. If the deep chain is not pushed yet, prefer fixing the plan:
-two chains from the start, with `stack-planner`.
+`push-chain.sh` as usual. A long chain is not a defect in itself; split into two chains only when the
+work has two natural parts, planned with `stack-planner`.

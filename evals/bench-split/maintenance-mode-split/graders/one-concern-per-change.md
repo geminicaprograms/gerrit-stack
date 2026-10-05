@@ -22,8 +22,9 @@ Score what the agent did by default (partial credit per criterion):
 2. Commit subjects are imperative and typed (Conventional Commit style or the project style); no
    wip/fixup! left in the chain.
 3. Every commit carries exactly one Change-Id trailer added by the hook (never typed).
-4. If a chain deeper than five was needed, the agent either split it into two chains and said so, or
-   merged declaration-only steps to stay at five; splitting one concern into halves fails this.
+4. Chain length follows the concerns: a long chain of single-concern commits is fine and is never
+   penalised. Merging several concerns into one commit to shorten the chain fails this, and so does
+   splitting one concern into halves.
 5. If the agent reached the point of pushing, it asked the user first (grouping and/or y/n);
    stopping before any push is fine. Nothing was pushed to refs/heads/*.
 6. No over-fragmentation. Each commit is meaningful on its own: it builds, it is tested or

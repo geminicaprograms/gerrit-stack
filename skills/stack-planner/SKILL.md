@@ -42,7 +42,7 @@ Run scripts from inside the target repository. The literal `${CLAUDE_PLUGIN_ROOT
 3. **Make every concern a vertical slice.** It builds, carries its tests, and is *used* — by a caller, an endpoint, a command or a test that exercises the behaviour. Bundle layers that are meaningless apart (an endpoint and its only caller). Apply the [anti-fragmentation rule](#anti-fragmentation-rule).
 4. **Order by dependency.** infra → data/migration → API → caller. Tests travel with the code they test. A mechanical change or refactor the feature needs comes first, behaviour on top. Each step must build and pass with only the earlier steps present.
 5. **Estimate each step.** `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" --estimate <path>...` prints `prod=<n> test=<t> other=<o> files=<m> warn=<L> hard=<H|none> files-warn=<F|none>` and exits 0 (within), 1 (over the warning), 3 (over a hard cap the team set). The figures are a proxy: for a small edit in a large file estimate the hunk; for a new file estimate its size. Record production and test lines per step and say which figures you adjusted.
-6. **Check against the warning, not toward it.** A step over the warning gets a one-line justification in its reviewer note (it becomes the commit message line). Split it only if it actually holds two concerns. Chain depth ≤ 5; longer → two chains, and the first lands before the second is planned in detail.
+6. **Check against the warning, not toward it.** A step over the warning gets a one-line justification in its reviewer note (it becomes the commit message line). Split it only if it actually holds two concerns. Chain length follows the concerns: never merge two concerns to shorten the chain; land the bottom changes as they are approved.
 7. **Emit the plan** with `references/plan-template.md`: exact headings, the step table, the `Chain summary:` line, the approval question last.
 8. **Ask and STOP.** Edit, stage or commit nothing until the user answers. If the user's request explicitly pre-approves the plan (e.g. "treat the plan as approved"), record that and continue without the question; otherwise ask and stop. "implement X" or "commit this" is not approval of a plan the user has not seen.
 
@@ -60,7 +60,7 @@ One row per step, in chain order:
 - *depends on*: earlier step numbers, or `—`.
 - *reviewer note*: what to look at; for a step over the warning, the one-line justification; for a mechanical step, the word "mechanical" and how it was produced.
 
-Then `Chain summary: N changes, ~P production / ~T test lines total, largest change ~M production lines, depth N ≤ 5, target <Gerrit relation chain on <remote>/<branch> | stacked PRs>` and the approval question.
+Then `Chain summary: N changes, ~P production / ~T test lines total, largest change ~M production lines, depth N, target <Gerrit relation chain on <remote>/<branch> | stacked PRs>` and the approval question.
 
 ## Concern is the unit
 
@@ -90,7 +90,7 @@ Test: if the reviewer note needs "will be used in the next change", merge the st
 | Production-line warning | ~400 (`budget.lines`) | insertions + deletions in production files; tests, docs (`*.md`, `*.rst`, `*.txt`, `docs/`, `Documentation/`) and lock files are reported but never counted |
 | Hard cap | none (`budget.hard-lines` only if the team sets one) | |
 | File warning | none (`budget.files` only if the team sets one) | |
-| Chain depth | ≤ 5 | longer chains become two chains; the first lands first |
+| Chain length | follows the concerns | no cap: one concern per change even for a long chain; land the bottom changes early; two chains only when the work has two natural parts |
 
 Evidence: SmartBear/Cisco found one reviewer reads 200–400 lines per sitting well and detection drops beyond that — that is where 400 comes from. Google (median 24 lines), Graphite (~50) and the Gerrit baseline (62) are **observed medians over all changes**, not targets; most changes are small because most concerns are small. Details: `references/budget.md`.
 
@@ -124,7 +124,7 @@ When a commit or the worktree mixes several concerns (not merely because it is l
 | Horizontal slices (all endpoints, then all UI) | Vertical slices; bundle a layer pair only when meaningless apart |
 | Final "add tests" step | Tests travel with the code in every step |
 | Behaviour change inside a mechanical or refactor step | Mechanical/refactor first, behaviour on top |
-| Chain deeper than 5 | Two chains; land the first, then plan the second |
+| Concerns merged to keep the chain short | One concern per change; length is not a defect |
 | Estimates by gut feel | Run `diff-budget.sh --estimate`; state adjustments |
 | Editing files before approval | Stop; the plan is the deliverable |
 | Writing `Change-Id:` yourself "to help" | Never; the commit-msg hook owns it |
@@ -141,7 +141,7 @@ Re-read before delivering the plan; fix anything unchecked.
 - [ ] Broad mechanical changes are one step (or one per module that builds alone), typed `refactor`/`build`/`chore`, "mechanical" in the reviewer note, before any behaviour change.
 - [ ] Order is infra → data/migration → API → caller; each step builds and passes with only earlier steps present.
 - [ ] Tests travel with the code; there is no "add tests" step.
-- [ ] Chain depth ≤ 5, else two chains with the first landing first.
+- [ ] No step holds two concerns to shorten the chain; chain length follows the concerns.
 - [ ] `Chain summary:` line present; the approval question is the last line.
 - [ ] Nothing edited, staged or committed; no `Change-Id:` written anywhere.
 - [ ] Wording is VCS-agnostic and the target (Gerrit relation chain / stacked PRs) is named.

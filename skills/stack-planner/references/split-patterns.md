@@ -55,7 +55,7 @@ When both halves are meaningful alone — the API has its own tests and other co
 
 ### Feature flag for partial landings
 
-When the chain would exceed depth 5, or steps must land over days, put the new behaviour behind a flag or config key that defaults to off. Each step lands dark but complete (built, tested, reachable with the flag on); the flag flip is the last, tiny step; removing the flag is a follow-up chain. This keeps every intermediate state shippable without fragments.
+When steps must land over days, or a long chain should land in stages, put the new behaviour behind a flag or config key that defaults to off. Each step lands dark but complete (built, tested, reachable with the flag on); the flag flip is the last, tiny step; removing the flag is a follow-up chain. This keeps every intermediate state shippable without fragments.
 
 ## Split signals
 
@@ -91,6 +91,6 @@ Concerns by behaviour: "greeting is served over REST" · "greeting is served ove
 | Step 1 — feat: serve a configurable greeting over REST | `src/main/java/…/GreetingConfig.java` (new), `src/main/java/…/Module.java`, `src/main/java/…/GetGreeting.java` (new), `src/main/java/…/HttpModule.java`, `src/test/java/…/GreetingConfigTest.java` (new), `src/test/java/…/GetGreetingTest.java` (new) | ~90 / ~50 | `bash tools/quick-check.sh` | — | Prefix from plugin config with default `"Hello"`, served as `{"greeting": "<prefix> <project>"}`; check the missing-key path and 404 for an unknown project |
 | Step 2 — feat: serve the greeting over SSH | `src/main/java/…/GreetCommand.java` (new), `src/main/java/…/SshModule.java`, `src/test/java/…/GreetCommandTest.java` (new) | ~35 / ~15 | `bash tools/quick-check.sh` | Step 1 | Same `GreetingConfig`; check argument parsing and output format |
 
-Chain summary: 2 changes, ~125 production / ~65 test lines total, largest change ~90 production lines, depth 2 ≤ 5, target Gerrit relation chain on origin/master.
+Chain summary: 2 changes, ~125 production / ~65 test lines total, largest change ~90 production lines, depth 2, target Gerrit relation chain on origin/master.
 
 Why not one change: it bundles two behaviours; a reviewer who objects to the SSH argument format would block the REST work too. Why not three (config, REST, SSH): the config step would be a class with no caller, approved on faith (merge signal).

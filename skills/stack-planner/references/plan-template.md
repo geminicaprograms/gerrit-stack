@@ -12,7 +12,7 @@ Emit exactly this structure. Replace every `<…>`; keep the headings, the colum
 | Step 1 — <type>: <subject> | `<path>` (new), `<path>` | ~<p> / ~<t> | `<cmd>` | — | <what to look at; one-line size justification if over the warning; "mechanical: <how>" for a mechanical step> |
 | Step 2 — <type>: <subject> | `<path>` | ~<p> / ~<t> | `<cmd>` | Step 1 | <…> |
 
-Chain summary: <N> changes, ~<P> production / ~<T> test lines total, largest change ~<M> production lines, depth <N> ≤ 5, target <Gerrit relation chain on <remote>/<branch> | stacked PRs>.
+Chain summary: <N> changes, ~<P> production / ~<T> test lines total, largest change ~<M> production lines, depth <N>, target <Gerrit relation chain on <remote>/<branch> | stacked PRs>.
 
 Estimates: <from `diff-budget.sh --estimate`; list any adjusted figures and why, or "none adjusted">
 
@@ -43,7 +43,7 @@ Rules for filling it in:
 | Step 1 — feat: serve a configurable greeting over REST | `src/main/java/com/example/demo/GreetingConfig.java` (new), `src/main/java/com/example/demo/Module.java`, `src/main/java/com/example/demo/GetGreeting.java` (new), `src/main/java/com/example/demo/HttpModule.java`, `src/test/java/com/example/demo/GreetingConfigTest.java` (new), `src/test/java/com/example/demo/GetGreetingTest.java` (new) | ~90 / ~50 | `bash tools/quick-check.sh` | — | Prefix from plugin config, default `"Hello"`; `GET /projects/{name}/demo-plugin~greeting` returns `{"greeting": "<prefix> <project>"}`. Check the missing-key path and the 404. |
 | Step 2 — feat: serve the greeting over SSH | `src/main/java/com/example/demo/GreetCommand.java` (new), `src/main/java/com/example/demo/SshModule.java`, `src/test/java/com/example/demo/GreetCommandTest.java` (new) | ~35 / ~15 | `bash tools/quick-check.sh` | Step 1 | `demo-plugin greet <project>`; same config as REST; check argument parsing. |
 
-Chain summary: 2 changes, ~125 production / ~65 test lines total, largest change ~90 production lines, depth 2 ≤ 5, target Gerrit relation chain on origin/master.
+Chain summary: 2 changes, ~125 production / ~65 test lines total, largest change ~90 production lines, depth 2, target Gerrit relation chain on origin/master.
 
 Estimates: `--estimate` on the three existing module files gave prod=58; new files estimated by hand (config ~35, REST ~45, SSH ~30, tests ~15–30 each).
 

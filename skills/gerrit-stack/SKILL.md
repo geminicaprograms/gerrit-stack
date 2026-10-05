@@ -37,7 +37,7 @@ Violating the letter of these rules is violating their spirit. No exceptions for
 | Add `%topic=` unless the user chose `topic` | With `submitWholeTopic` a topic submits atomically; surprises reviewers | Ask the grouping question once; `none` is the default |
 | Re-push a subset after editing a middle commit | Descendants were rewritten too | Always re-push the whole chain |
 | Mix two concerns in one commit | Reviewers review concerns, not diffs | `stack-planner`; retro-split if it already happened |
-| Build a chain deeper than 5 | Rebases multiply, reviewers lose the thread | Two chains; land the first, then push the second |
+| Bundle concerns to keep the chain short | A change with several concerns is the thing reviewers cannot review | One concern per change; a long chain is fine — land the bottom changes as they get approved |
 | Create a branch unless asked | The chain lives on the tracking branch | Commit on the current branch |
 | Add `%wip` unprompted | Hides the chain from reviewers | Only on a `wip` answer or `gerrit-stack.default-wip=true` |
 | `cd <dir> && git …` | Claude Code's permission layer refuses it | `git -C <dir> …`, or run from the repo root |
@@ -98,7 +98,7 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
    single-file fix still gets a one-step plan (one line is enough). If the user's
    request explicitly pre-approves the plan (e.g. "treat the plan as approved"),
    record that and continue without the question; otherwise ask and stop.
-3. More than 5 steps: split into two chains in the plan; only chain 1 is built now.
+3. Many steps: keep one concern per step whatever the count. Split into two chains only when the work has two natural parts that land independently (e.g. a mechanical migration, then the feature).
 
 ## Phase 2 — Build the chain (repeat per step)
 
@@ -132,7 +132,7 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
 
 ## Phase 3 — Pre-push review
 
-1. `bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh"` — N ≤ 5, every row has one
+1. `bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh"` — every row has one
    Change-Id, no `fixup!`/`squash!` rows, subjects read as a story oldest → newest.
 2. Optional, recommended for chains ≥ 3: prove each commit builds alone
    `git -c sequence.editor=true rebase -i --exec '<verify-cmd>' <base>`

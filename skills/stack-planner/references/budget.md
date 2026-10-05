@@ -9,7 +9,7 @@ The unit of a chain is the concern (SKILL.md, "Concern is the unit"). Size is a 
 | Production-line warning (`budget.lines`) | 400 | insertions + deletions in production files; above it, the change carries a one-line justification |
 | Hard cap (`budget.hard-lines`) | unset = none | only when a team sets it; `diff-budget.sh` then exits 3 above it |
 | File warning (`budget.files`) | unset = none | only when a team sets it; `diff-budget.sh` then exits 1 above it |
-| Chain depth | 5 | longer chains become two chains; the first lands before the second is planned in detail |
+| Chain length | none | follows the concerns; land the bottom changes early; two chains only when the work has two natural parts |
 
 What counts as production: every changed path that is not a test, not docs and not a lock file.
 

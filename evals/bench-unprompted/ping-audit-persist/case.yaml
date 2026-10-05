@@ -31,6 +31,7 @@ kind: implement
 # concerns share one file and the map reports only `buffer`.
 concerns:
   - name: setting
+    joins: first-consumer   # a setting may ship with the first change that uses it
     paths:
       - '/DemoPluginConfig(Test|IT)?\.java$'
   - name: buffer

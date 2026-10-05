@@ -50,7 +50,11 @@ characters, reads as the change's title in a list of five.
 - Wrap at 72 characters. `*` or `-` bullets for several points.
 - For a chain step, one sentence on where it sits: "Second of three: the REST endpoint
   that exposes the prefix read in the previous change."
-- Over the soft diff budget? Say why in one line ("generated fixture, 90 lines").
+- Over the production-line warning (`diff-budget.sh`, default 400)? Say why in one line
+  ("one parser; splitting it would leave half a grammar").
+- A broad mechanical change (library migration, rename, API move, formatter, codemod):
+  type `refactor`/`build`/`chore` and say "mechanical" in the body, with how it was
+  produced ("Mechanical: `npx jscodeshift -t v5.js src/`"). It stays one change.
 
 ```
 # good
@@ -101,10 +105,11 @@ message after the fact, see `chain-editing.md` section 4.
 
 A commit belongs in the chain when a reviewer can say "yes" or "no" to it on its own:
 
-- one layer or one behaviour (config, then endpoint, then command), tests included;
+- one behaviour or one mechanical transformation (an endpoint with the config it reads; a rename), tests included;
 - builds and passes alone (the `--exec` rebase in the skill proves it);
 - revertable without touching its neighbours;
-- within the diff budget (`diff-budget.sh HEAD`), or justified.
+- used on its own: no class without a caller, no scaffolding only the next commit explains, no "part 1/2";
+- within the production-line warning (`diff-budget.sh HEAD`, default 400), or justified in one line.
 
 Signs it should be two commits: "and" in the subject, two types fit, a refactor
 mixed with a behaviour change, unrelated files.
@@ -117,7 +122,7 @@ mixed with a behaviour change, unrelated files.
 - [ ] Body says why, and where the step sits in the chain
 - [ ] Only the footers `gerrit-stack.footers` requires, in order
 - [ ] No `Change-Id` typed; one present after commit (`chain-status.sh`)
-- [ ] One concern; over-budget explained
+- [ ] One concern; over the production-line warning explained in one line (or "mechanical" for a refactor/build/chore)
 
 ## Common mistakes
 

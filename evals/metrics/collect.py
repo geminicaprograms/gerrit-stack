@@ -82,7 +82,9 @@ CHAIN_METRICS = [
     ("lines_p75", "lines / change (p75)", "", True),
     ("lines_max", "lines / change (max)", "", True),
     ("files_median", "files / change (median)", "", True),
-    ("within_budget_pct", "within budget", "%", False),
+    ("prod_lines_median", "production lines / change (median, info)", "", None),
+    ("prod_lines_max", "production lines, largest change (info)", "", None),
+    ("test_lines_total", "test lines, whole chain (info)", "", None),
     ("one_change_id_pct", "exactly one Change-Id", "%", False),
     ("conventional_pct", "Conventional Commit subject", "%", False),
     ("single_concern_pct", "single concern (proxy)", "%", False),
@@ -93,6 +95,9 @@ CHAIN_METRICS = [
 ]
 ALL_METRICS = PROCESS_METRICS + CHAIN_METRICS
 METRIC_KEYS = [m[0] for m in ALL_METRICS]
+# Size is information, never a target or a score: these rows are always shown
+# (``–`` for result dirs written before chain-metrics.sh counted them).
+SIZE_INFO_KEYS = ("prod_lines_median", "prod_lines_max", "test_lines_total")
 # chain-metrics keys read into a row beyond the classic table
 EXTRA_CHAIN_KEYS = ["purity_pct", "completeness_pct", "tests_travel_pct"]
 
@@ -105,8 +110,10 @@ SPLIT_METRICS = [
     ("completeness_pct", "completeness (concerns living in one change)", "pct"),
     ("builds_alone_pct", "builds alone", "pct"),
     ("tests_travel_pct", "tests travel with the code", "pct"),
-    ("within_budget_pct", "within budget", "pct"),
     ("one_change_id_pct", "exactly one Change-Id", "pct"),
+    ("prod_lines_median", "production lines / change (median, info)", "count"),
+    ("prod_lines_max", "production lines, largest change (info)", "count"),
+    ("test_lines_total", "test lines, whole chain (info)", "count"),
 ]
 SPLIT_SIGNAL_KEYS = ["purity_pct", "completeness_pct", "builds_alone_pct", "tests_travel_pct"]
 SESSION_METRICS = [
@@ -165,9 +172,9 @@ GUARDRAIL_KNOWN = {m[0] for m in GUARDRAIL_METRICS}
 ISOLATION_GROUPS = ["plugins", "mcp_servers", "skills", "agents"]
 CAPABILITY_KEYS = ["mcp_calls", "mcp_denied", "skill_calls", "hook_lines"]
 
-# Targets (execution plan, "Proposal: measuring the efficiency of gerrit-stack")
+# Targets (execution plan, "Proposal: measuring the efficiency of gerrit-stack").
+# Change size is not a target (size policy 2026-10-05): it is reported as information.
 TARGETS = [
-    ("budget compliance", "within_budget_pct", ">=", 90.0, "%"),
     ("exactly one Change-Id", "one_change_id_pct", ">=", 100.0, "%"),
     ("rule violations", "violations", "==", 0.0, ""),
     ("cost overhead vs mcp-only", "cost_overhead_pct", "<=", 30.0, "%"),
@@ -1014,7 +1021,7 @@ def _metric_table(block, arms, deltas):
                 cells.append("%s / %s" % (fmt(st["mean"], unit), fmt(st["median"], unit)))
             else:
                 cells.append("–")
-        if not any_value:
+        if not any_value and key not in SIZE_INFO_KEYS:
             continue
         d1 = fmt_delta((deltas.get("with-mcp-only") or {}).get(key), unit)
         d2 = fmt_delta((deltas.get("with-without") or {}).get(key), unit)
@@ -1056,7 +1063,7 @@ def _kind_table(section, spec, first_col="metric"):
             else:
                 any_value = True
                 cells.append(cell)
-        if not any_value:
+        if not any_value and key not in SIZE_INFO_KEYS:
             continue
         unit = KIND_UNIT[kind]
         d1 = fmt_delta((deltas.get("with-mcp-only") or {}).get(key), unit)
@@ -1106,6 +1113,9 @@ def _reading_section(report):
         "- **Errored runs** (session crashed, or the sandbox startup check found something unexpected) are %s; they are "
         "always counted under Isolation and in each section's `Runs / errors` line." % mode,
         "- Paths that belong to no concern of a case's concern map do not count for purity or completeness.",
+        "- **Size is information, not a target.** *Production lines* are insertions + deletions outside tests, docs "
+        "and lock/generated files; the tables show their median and the largest change, plus the chain's test lines. "
+        "No row passes or fails on size; `–` means the run predates these counts.",
         "",
     ]
 
@@ -1142,7 +1152,8 @@ def _split_section(split):
         "Deterministic measures of how well a chain is cut, per suite and case (natural variant). *Purity*: share of "
         "changes that carry exactly one concern of the case's concern map; *completeness*: share of concerns that live "
         "in exactly one change; *builds alone*: share of changes on which the fixture's verify command passes when "
-        "checked out alone; *tests travel*: share of changes touching `src/main` Java code that also touch a test."
+        "checked out alone; *tests travel*: share of changes touching `src/main` Java code that also touch a test. "
+        "Production and test lines are shown for information only (no pass/fail)."
     )
     lines.append("")
     for suite, cases in split.items():
@@ -1280,8 +1291,8 @@ def _footer():
         "",
         "Each runner call writes `evals/results/<timestamp>/{aggregate-result.json,runs/<case>[@<variant>]/<arm>/<n>/…}`; "
         "`collect.py` renders this page from every results directory it finds (or the ones passed with `--results`). "
-        "Use `--runs 3` for numbers. Targets: budget compliance ≥ 90 %, exactly-one-Change-Id 100 %, rule violations 0, "
-        "cost overhead ≤ +30 % vs arm B.",
+        "Use `--runs 3` for numbers. Targets: exactly-one-Change-Id 100 %, rule violations 0, "
+        "cost overhead ≤ +30 % vs arm B. Change size is reported, never a target.",
         "",
     ]
 
@@ -1292,8 +1303,8 @@ def render_markdown(report, sources, generated=None):
     lines.append("*Generated by `evals/metrics/collect.py` on %s.*" % generated)
     lines.append("")
     lines.append(
-        "Does the plugin make an agent produce Gerrit relation chains that are smaller, correct, and cheaper to get "
-        "to review than the same agent without it, and does it keep a chain intact through rework and review? "
+        "Does the plugin make an agent produce Gerrit relation chains that are cut by concern, correct, and cheaper "
+        "to get to review than the same agent without it, and does it keep a chain intact through rework and review? "
         "Three arms on identical tasks."
     )
     lines.append("")

@@ -70,11 +70,13 @@ needs to be installed and configured as above.
   the right commit, re-verifying Change-Ids after rebase, and re-pushing the
   whole chain.
 - **`/gerrit-stack:stack-planner`** — VCS-agnostic planning: splits a
-  feature, refactor, or bugfix into an ordered chain of small,
-  single-concern steps, each independently buildable, reviewable, and
-  revertable within a diff budget (default 50–150 lines / 2–8 files per
-  step, hard cap 200 lines single-layer). Used before writing code, or to
-  retro-split an existing oversized diff.
+  feature, refactor, or bugfix into an ordered chain of single-concern
+  steps, each a vertical slice that builds, is tested and makes sense on
+  its own (no class without a caller, no "part 1/2"). Size is a
+  reviewer-load warning — about 400 production lines, tests and docs not
+  counted — never a reason to split a concern; broad mechanical changes
+  (migration, rename, formatter) stay one change. Used before writing
+  code, or to retro-split a diff that mixes concerns.
 - **`/gerrit-stack:gerrit-review`** — reads unresolved review threads on a
   change or chain via `gerrit@gerrit-mcp` (falling back to `gerrit-rest.py`),
   drafts replies and comments in Conventional Comments format, and posts
@@ -89,7 +91,7 @@ needs to be installed and configured as above.
 |---|---|---|
 | `SessionStart` | `session-start.sh` | Emits `additionalContext` beginning `[gerrit-stack] …` (remote/host/branch/project, commit-msg hook status, chain length vs base) only when the repo is Gerrit-backed; silent (no output) otherwise. |
 | `PreToolUse` (matcher `Bash`, `if: Bash(git *)`) | `git-guard.sh` | **deny** = stderr message + exit 2; **ask** = stdout JSON `permissionDecision: "ask"`; else exit 0 silently. Dispatches on `git commit`/`git push`; see the guard table below for every row. |
-| `PostToolUse` (matcher `Bash`, `if: Bash(git *)`, fires only when the `Bash` call succeeded) | `git-post.sh` | Feedback only — stderr + exit 2, never blocks. After `commit`: checks exactly one Change-Id, diff budget, required footers, refreshes the chain snapshot. After `rebase`: reports `lost:`/`new:` Change-Ids against the snapshot. After `push`: parses the pushed change numbers or explains `no new changes`. |
+| `PostToolUse` (matcher `Bash`, `if: Bash(git *)`, fires only when the `Bash` call succeeded) | `git-post.sh` | Feedback only — stderr + exit 2, never blocks. After `commit`: checks exactly one Change-Id, size (over the production-line warning: asks for a one-line justification in the message; silent for a `refactor`/`build`/`chore` commit whose body says "mechanical"), required footers, refreshes the chain snapshot. After `rebase`: reports `lost:`/`new:` Change-Ids against the snapshot. After `push`: parses the pushed change numbers or explains `no new changes`. |
 | `PreToolUse` (matcher `Bash`, `if: Bash(*gerrit-rest.py*)`) | `git-guard.sh` → `comment-guard.sh` | Only with `comment-style = conventional`: **deny** a `gerrit-rest.py review` whose new comment has no Conventional Comments label. |
 | `PreToolUse` (matcher `mcp__plugin_gerrit_gerrit__(post_review_comment\|post_draft_comment)`) | `comment-guard.sh` | Only with `comment-style = conventional`: **deny** an unlabelled top-level comment (stderr lists the labels and an example); replies with `in_reply_to` pass. Silent otherwise. |
 | `Stop` | `stop-check.sh` | `{"decision":"block","reason":"…"}` only when this session committed (session marker set) and a non-fixup commit in the chain still lacks a Change-Id; exit 0 otherwise, and always when `stop_hook_active` is true. |
@@ -117,7 +119,7 @@ needs to be installed and configured as above.
 |---|---|---|
 | `chain-status.sh` | Table of the local chain: `sha7 \| Change-Id(short) \| +/- \| files \| subject`, header `chain: N change(s) on <remote>/<branch> (base <sha7>)`. | `[--preflight] [--json] [--snapshot] [--verify-ids]` — `--preflight` prints detection + hook + MCP status and exits 1 if the hook is missing; `--snapshot` records the Change-Id set; `--verify-ids` compares against it and exits 1 on drift. |
 | `push-chain.sh` | Validates the chain (non-empty, exactly one Change-Id per commit, no fixup/squash, grouping+name consistent) and **prints** the single `git push` command; never runs it. Exit 3 with reasons on stderr if validation fails. | `[--wip] [--grouping none\|hashtag\|topic] [--name <x>] [--branch <b>] [--remote <r>]` — flags override config for this print only; the script never writes config. |
-| `diff-budget.sh` | Reports `lines=<n> files=<m> budget=<L>/<F> hard=<H>` against `gerrit-stack.budget.*`. | `[<rev>\|--worktree\|--estimate <path>...]` — exit 0 within budget, 1 over the soft budget, 3 over the hard cap. |
+| `diff-budget.sh` | Reports `prod=<n> test=<t> other=<o> files=<m> warn=<L> hard=<H\|none> files-warn=<F\|none>`: production lines (insertions + deletions outside tests, docs and lock files), test lines, docs/lock lines, files touched, against `gerrit-stack.budget.*`. | `[--json] [<rev>\|--cached\|--worktree\|--estimate <path>...]` — exit 0 within, 1 over the warning (production lines > `budget.lines`, or files > `budget.files` when set), 3 over `budget.hard-lines` (only when set). |
 | `install-commit-msg-hook.sh` | Installs the real Gerrit `commit-msg` hook into the repo's hooks directory, `chmod +x`, self-tests it (Change-Id added; none added for `fixup!`), prints the installed path. | `[--host <url>] [--from <file>]` — source is `--from <file>` or `curl -fsSL <host>/tools/hooks/commit-msg` (`<host>` may be `file:///…`). |
 | `gerrit-rest.py` | MCP fallback: talks to the Gerrit REST API directly (`~/.netrc` auth when present, anonymous otherwise; strips the XSSI prefix). | `[--host URL] <cmd> …` — `related <change>`, `comments <change> [--unresolved]`, `review <change> --message M [--comment FILE:LINE:MSG]... [--in-reply-to ID] [--resolved]` (never sets labels), `rebase-chain <change>`, `topic <change> <topic>`, `hashtags <change> --add T...`, `submitted-together <change>`, `detail <change>`, `query <q>`. |
 
@@ -148,9 +150,9 @@ in this table are read from it, anything else in the file is ignored.
 | `grouping` | `none` | `none` \| `hashtag` \| `topic` — see below. |
 | `group-name` | unset | The hashtag or topic slug, once chosen. |
 | `default-wip` | `false` | Push new chains as work-in-progress (`%wip`) by default. |
-| `budget.lines` | `150` | Soft per-commit line budget. |
-| `budget.files` | `8` | Soft per-commit file-count budget. |
-| `budget.hard-lines` | `200` | Hard per-commit line cap (`diff-budget.sh` exits 3 past this). |
+| `budget.lines` | `400` | Production-line warning per commit (tests, docs and lock files not counted). Above it the post-commit hook asks for a one-line justification in the message; it never asks to split mechanically. |
+| `budget.hard-lines` | unset (none) | Optional hard cap on production lines per commit (`diff-budget.sh` exits 3 past it). |
+| `budget.files` | unset (none) | Optional warning on files touched per commit. |
 | `commit-style` | `conventional` | Expected commit subject style (guidance for the skill; used when the repo has no commitlint config). |
 | `commit-lint` | `auto` | `auto` \| `off`. `auto` checks commit messages with the repo's own commitlint config when one exists and the `commitlint` command resolves; see [Team conventions](#team-conventions). |
 | `comment-style` | `none` | `conventional` \| `none`. `conventional` makes Conventional Comments labels mandatory for new review comments; see [Team conventions](#team-conventions). |

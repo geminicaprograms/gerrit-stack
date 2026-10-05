@@ -833,13 +833,16 @@ EOF
 
 @test "gs_config: verify-cmd and allow-direct-push are never read from the committed .gerrit-stack" {
   make_gerrit_repo
-  printf '[gerrit-stack]\n\tverify-cmd = touch /tmp/pwned\n\tallow-direct-push = true\n\tcomment-style = conventional\n' > .gerrit-stack
-  run bash -c "source '$BATS_TEST_DIRNAME/../scripts/lib/gerrit-detect.sh'; gs_config verify-cmd none; gs_config allow-direct-push false; gs_config comment-style none"
+  repo="$BATS_TEST_TMPDIR/work"
+  printf '[gerrit-stack]\n\tverify-cmd = touch /tmp/pwned\n\tallow-direct-push = true\n\tcomment-style = conventional\n' > "$repo/.gerrit-stack"
+  run bash -c "source '$BATS_TEST_DIRNAME/../scripts/lib/gerrit-detect.sh'; cd '$repo' && gs_config verify-cmd none; gs_config allow-direct-push false; gs_config comment-style none"
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = "none" ]
   [ "${lines[1]}" = "false" ]
   [ "${lines[2]}" = "conventional" ]
-  git config gerrit-stack.verify-cmd 'bash tools/quick-check.sh'
-  run bash -c "source '$BATS_TEST_DIRNAME/../scripts/lib/gerrit-detect.sh'; gs_config verify-cmd none"
+  git -C "$repo" config gerrit-stack.verify-cmd 'bash tools/quick-check.sh'
+  run bash -c "source '$BATS_TEST_DIRNAME/../scripts/lib/gerrit-detect.sh'; cd '$repo' && gs_config verify-cmd none"
   [ "${lines[0]}" = "bash tools/quick-check.sh" ]
+  # the test must never touch the checkout it runs from
+  [ ! -e "$BATS_TEST_DIRNAME/../.gerrit-stack" ]
 }

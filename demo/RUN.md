@@ -44,7 +44,7 @@ Narrate: *"No mention of Gerrit specifics. The plugin's skill triggers on the re
 The `stack-planner` skill prints a 3-step plan (`Step 1 — feat: greetingPrefix …`, `Step 2 — feat: REST …`,
 `Step 3 — feat: SSH …`, each with files, ±lines, verify command). Nothing has been edited yet.
 
-Answer **yes**. Narrate: *"One concern per commit, each ≤ ~150 lines, each buildable alone — that is what makes a
+Answer **yes**. Narrate: *"One concern per commit, each a slice that makes sense alone and builds alone — that is what makes a
 relation chain reviewable. The plan is the contract; code comes after."*
 
 ## 1:00 — three commits

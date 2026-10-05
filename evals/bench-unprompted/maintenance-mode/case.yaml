@@ -30,6 +30,7 @@ kind: implement
 # match both rest and ssh; the names below cover what agents have produced.
 concerns:
   - name: setting
+    joins: first-consumer   # a setting may ship with the first change that uses it
     paths:
       - '/DemoPluginConfig(Test|IT)?\.java$'
   - name: state

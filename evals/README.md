@@ -62,7 +62,7 @@ Each suite is one eval dir; run one with `--eval-dir` (or `make bench-<suite>`).
 | suite | eval dir | kind | what it measures |
 |---|---|---|---|
 | S1 unprompted | `evals/bench-unprompted/` | `implement` | does the agent split on its own? A plain product request, no repo rules in the prompt; six cases (`rate-limited-ping`, `maintenance-mode`, `ping-audit-log`, `project-override`, `ping-audit-persist`, `health-checks`). Chain metrics plus the share of commit subjects that pass the repo's commitlint config |
-| S2 prompted split | `evals/bench-split/` | `implement` | split quality: the same prompts plus "keep each concern in its own change" (`greeting`, `rate-limited-ping-split`, `maintenance-mode-split`). Builds alone, tests travel with code, purity and completeness against the case's `concerns:` map, budget, Change-Ids, subjects |
+| S2 prompted split | `evals/bench-split/` | `implement` | split quality: the same prompts plus "keep each concern in its own change" (`greeting`, `rate-limited-ping-split`, `maintenance-mode-split`). Builds alone, tests travel with code, purity and completeness against the case's `concerns:` map, Change-Ids, subjects; production and test lines as information |
 | S3 seeded rework | `evals/bench-rework/fix-mid-conflict/` | `rework` | every arm reworks the same hand-written six-change `maintenance-mode` chain after a blocking comment on change 3 whose fix collides with change 5, natural and nudged. Change-Ids and order kept, untouched changes patch-identical, nothing left over, reply drafted, nothing posted |
 | S4 reviewer | `evals/bench-review/planted-defects/` | `review` | a seeded change with three planted defects (blocking off-by-one, a nit, a design question); "review this change, draft comments, do not post". Findings recall, labelled share, blocking marked, nothing posted, no vote |
 
@@ -219,7 +219,10 @@ Open one run in the demo Gerrit with `hashtag:run-<id>`; narrow with `hashtag:va
 
 | key | meaning |
 |---|---|
-| `commits` / per-change `lines` | commits in the chain (`origin/master..HEAD`) and their diff sizes |
+| `chain_length` / per-change `lines` | commits in the chain (`origin/master..HEAD`) and their gross diff sizes (insertions + deletions, binary files 0; kept for compatibility) |
+| per-change `prod_lines`, `test_lines`, `other_lines` | the same lines split by path. **test**: under `src/test/`, `test/` or `tests/`, or named `*Test.*`, `*_test.*`, `test_*.*`, `*.spec.*`. **other**: docs (`*.md`, `*.rst`, `*.txt`, under `Documentation/` or `docs/`) and lock/generated files (`*.lock`, `package-lock.json`, `go.sum`). **prod**: everything else |
+| `prod_lines_median`, `prod_lines_max`, `test_lines_total` | median production lines per change, the largest change's production lines, test lines over the whole chain (`null` for an empty chain). Information only: no target, no score, no rubric criterion |
+| `budget`, `within_budget`, `within_budget_pct` | `budget.lines` = the production-line warning threshold (`gerrit-stack.budget.lines` from git config, else the team file `.gerrit-stack`; default 400), `budget.files` (default `null` = none); per change `prod_lines` <= `budget.lines` / share. Information only (the plugin's soft warning), not scored |
 | `builds_alone`, `builds_alone_pct` | per change / share of changes whose `--verify-cmd` passes on a clean detached checkout of that commit alone (a timeout counts as failing) |
 | `concerns`, `unmapped_paths` | per change: concern names from the case's map; changed paths no concern claims (reported, never counted) |
 | `purity_pct` | changes with exactly one concern / changes with at least one mapped path |
@@ -369,8 +372,8 @@ isolation check are out of the means unless `--include-errors`). Sections, omitt
 | section | content |
 |---|---|
 | Arms, Reading the numbers, Sources | what each arm is, how to read the tables, which result dirs were read |
-| `## Suite …` (Overall / Targets / Per case) | one per implement suite (S1, S2) by eval dir name; process and chain metrics per arm; nudged runs appear as `<case>@nudged` under Per case |
-| `## Split quality` | purity, completeness, tests travel, builds alone, budget |
+| `## Suite …` (Overall / Targets / Per case) | one per implement suite (S1, S2) by eval dir name; process and chain metrics per arm (production lines median / max and test lines as information); nudged runs appear as `<case>@nudged` under Per case. Targets for arm C: exactly one Change-Id 100 %, rule violations 0, cost overhead <= +30 % vs arm B |
+| `## Split quality` | purity, completeness, tests travel, builds alone, exactly one Change-Id; production lines median / max and test lines as information (no pass/fail) |
 | `## Rework (seeded chain)` | the S3 metrics above |
 | `## Reviewer` | the S4 metrics above |
 | `## Conventions` | commitlint-conforming subjects and labelled comments, with the regex-fallback note |
@@ -379,6 +382,14 @@ isolation check are out of the means unless `--include-errors`). Sections, omitt
 | `## Reproduce` | the commands below |
 
 `docs/benchmark.md` is generated by `collect.py` and is not committed until the first sandboxed pass.
+
+**Size policy (2026-10-05).** Change size is reported, never scored. There is no "within budget" target,
+score or rubric criterion; the S1/S2 `one-concern-per-change` rubrics instead penalise
+**over-fragmentation** (a commit that only makes sense with the next one: a class with no caller,
+scaffolding, "part 1") exactly like a mixed commit, and treat a broad mechanical change (migration,
+rename) as one commit whatever its size; the S3 `rework-landed` rubric counts a fix split off from
+the commented change as fragmentation. Result directories written before `chain-metrics.sh` counted
+production lines render `–` in the size rows.
 
 ## Cost estimate (1 run per cell)
 

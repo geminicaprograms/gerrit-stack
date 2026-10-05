@@ -200,11 +200,11 @@ _gen_lines() {
 
 # make_dirty_diff <lines> — an uncommitted change of about <lines> lines spread
 # over four independent concerns (logging, config parsing, config tests, docs), each
-# under the 150-line soft budget, plus a
+# small enough to review alone, plus a
 # one-line wiring edit in greet.sh. Nothing is staged.
 make_dirty_diff() {
   local total=${1:-600} third
-  # each concern stays within the soft budget (<=150 lines) so a by-concern split is possible
+  # each concern is small enough on its own, so a by-concern split is possible
   third=$((total / 4))
   mkdir -p lib docs tests
   printf '#!/usr/bin/env bash\n# lib/logging.sh — structured logging helpers (concern: logging)\n' > lib/logging.sh

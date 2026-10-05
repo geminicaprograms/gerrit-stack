@@ -24,7 +24,8 @@ setup() {
 
 # make_chain_repo — bare remote + work repo with a pushed initial commit and a
 # 3-commit chain on top: feat (1 file, +2), fix (2 files, +3), and a mixed
-# "refactor ... and ..." commit that is over a 5-line test budget.
+# "refactor ... and ..." commit (+6). Every file is *.txt, so all of it counts
+# as other_lines (docs), none as production lines.
 make_chain_repo() {
   git init -q --bare "$REMOTE"
   git init -q -b master "$WORK"
@@ -55,12 +56,14 @@ make_chain_repo() {
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.chain_length == 3' >/dev/null
   echo "$output" | jq -e '.base_ref == "refs/remotes/origin/master"' >/dev/null
-  echo "$output" | jq -e '.budget == {lines: 150, files: 8}' >/dev/null
+  echo "$output" | jq -e '.budget == {lines: 400, files: null}' >/dev/null
   echo "$output" | jq -e '.changes | length == 3' >/dev/null
   echo "$output" | jq -e '.changes[0] | .subject == "feat: add a" and .lines == 2 and .files == 1 and .change_ids == 1 and .conventional_type == "feat" and .is_fixup == false and .single_concern == true' >/dev/null
   echo "$output" | jq -e '.changes[1] | .lines == 3 and .files == 2 and .conventional_type == "fix"' >/dev/null
   echo "$output" | jq -e '.changes[2] | .conventional_type == "refactor" and .single_concern == false' >/dev/null
   echo "$output" | jq -e '.lines_median == 3 and .lines_p75 == 6 and .lines_max == 6 and .files_median == 1' >/dev/null
+  echo "$output" | jq -e '[.changes[] | [.prod_lines, .test_lines, .other_lines]] == [[0, 0, 2], [0, 0, 3], [0, 0, 6]]' >/dev/null
+  echo "$output" | jq -e '.prod_lines_median == 0 and .prod_lines_max == 0 and .test_lines_total == 0' >/dev/null
   echo "$output" | jq -e '.within_budget_pct == 100 and .one_change_id_pct == 100 and .conventional_pct == 100' >/dev/null
   echo "$output" | jq -e '.single_concern_pct == 66.7 and .fixups_present == false' >/dev/null
   echo "$output" | jq -e '.builds_alone_pct == null and .violations == null and .refs_for_pushed == null' >/dev/null
@@ -69,15 +72,34 @@ make_chain_repo() {
 
 @test "budget override via git config and fixup detection" {
   git -C "$WORK" config gerrit-stack.budget.lines 5
-  echo x > "$WORK/x.txt"
+  mkdir -p "$WORK/src"
+  printf '1\n2\n3\n4\n5\n6\n' > "$WORK/src/x.sh"
   git -C "$WORK" add -A
   git -C "$WORK" commit -q -m "fixup! feat: add a"
   run bash "$SCRIPT" --json "$WORK"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.budget.lines == 5 and .chain_length == 4' >/dev/null
-  echo "$output" | jq -e '.within_budget_pct == 75' >/dev/null
+  # only the 6 production lines of src/x.sh exceed the warning; the 6-line big.txt does not
+  echo "$output" | jq -e '.within_budget_pct == 75 and [.changes[].within_budget] == [true, true, true, false]' >/dev/null
+  echo "$output" | jq -e '.changes[3].prod_lines == 6 and .prod_lines_max == 6' >/dev/null
   echo "$output" | jq -e '.fixups_present == true and .changes[3].is_fixup == true and .changes[3].change_ids == 0 and .changes[3].conventional_type == null' >/dev/null
   echo "$output" | jq -e '.one_change_id_pct == 75' >/dev/null
+}
+
+@test "budget.lines from the team file .gerrit-stack; git config wins" {
+  git config -f "$WORK/.gerrit-stack" gerrit-stack.budget.lines 12
+  git config -f "$WORK/.gerrit-stack" gerrit-stack.budget.files 3
+  run bash "$SCRIPT" --json "$WORK"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.budget == {lines: 12, files: 3}' >/dev/null
+  git -C "$WORK" config gerrit-stack.budget.lines 30
+  run bash "$SCRIPT" --json "$WORK"
+  echo "$output" | jq -e '.budget == {lines: 30, files: 3}' >/dev/null
+  git config -f "$WORK/.gerrit-stack" gerrit-stack.budget.lines lots
+  git config -f "$WORK/.gerrit-stack" --unset gerrit-stack.budget.files
+  git -C "$WORK" config --unset gerrit-stack.budget.lines
+  run bash "$SCRIPT" --json "$WORK"
+  echo "$output" | jq -e '.budget == {lines: 400, files: null}' >/dev/null
 }
 
 @test "human table by default" {
@@ -85,7 +107,9 @@ make_chain_repo() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"chain: 3 change(s)"* ]]
   [[ "$output" == *"feat: add a"* ]]
-  [[ "$output" == *"within budget 100%"* ]]
+  [[ "$output" == *"lines prod  test  files"* ]]
+  [[ "$output" == *"prod lines: median 0  max 0  |  test lines: total 0  |  prod <= 400: 100% (info)"* ]]
+  [[ "$output" != *"within budget"* ]]
 }
 
 @test "--hook-trace counts deny/ask per verb" {
@@ -353,4 +377,105 @@ YAML
   [ "$status" -eq 2 ]
   run bash "$SCRIPT" --verify-timeout soon --verify-cmd true "$WORK"
   [ "$status" -eq 2 ]
+}
+
+# ---------------------------------------------------------------------------
+# Size: production / test / other lines (information only, never a gate).
+# ---------------------------------------------------------------------------
+
+# nlines <path> <n> — write <n> fresh lines to $J/<path>.
+nlines() {
+  mkdir -p "$J/$(dirname "$1")"
+  seq 1 "$2" | sed "s/^/line /" > "$J/$1"
+}
+
+# size_chain — three commits on java_repo: a mixed first change, a 2-line edit
+# of production code (+2 -2), a docs-only change.
+size_chain() {
+  java_repo
+  nlines "$M/A.java" 10                                        # prod
+  nlines "$M/Latest.java" 2                                    # prod (lower-case "test." is not *Test.*)
+  nlines BUILD 3                                               # prod
+  nlines "$T/ATest.java" 7                                     # test: src/test/ and *Test.*
+  nlines tests/run.bats 3                                      # test: tests/
+  nlines web/app.spec.ts 2                                     # test: *.spec.*
+  nlines pkg/app_test.go 2                                     # test: *_test.*
+  nlines scripts/test_x.py 2                                   # test: test_*.*
+  nlines notes.rst 1                                           # other: *.rst
+  nlines docs/guide.html 5                                     # other: docs/
+  nlines src/main/resources/Documentation/config.md 1          # other: Documentation/, *.md
+  nlines package-lock.json 6                                   # other: lock
+  nlines go.sum 2                                              # other: lock
+  nlines Cargo.lock 1                                          # other: *.lock
+  printf '\000\001\002' > "$J/logo.bin"                         # binary: counts 0
+  git -C "$J" add -A
+  git -C "$J" commit -q -m "feat: mixed first change"
+  sed -i.bak 's/^line 1$/LINE 1/; s/^line 2$/LINE 2/' "$J/$M/A.java"
+  rm -f "$J/$M/A.java.bak"
+  git -C "$J" commit -q -am "fix: tweak A"
+  echo more >> "$J/README.md"
+  git -C "$J" commit -q -am "docs: readme"
+}
+
+@test "size: prod / test / other lines per change and the top-level fields" {
+  size_chain
+  run bash "$SCRIPT" --json "$J"
+  [ "$status" -eq 0 ]
+  # first change: prod 10+2+3, test 7+3+2+2+2, other 1+5+1+6+2+1, binary 0 (counted as a file)
+  echo "$output" | jq -e '.changes[0] | .prod_lines == 15 and .test_lines == 16 and .other_lines == 16 and .lines == 47 and .files == 15' >/dev/null
+  echo "$output" | jq -e '.changes[1] | .prod_lines == 4 and .test_lines == 0 and .other_lines == 0 and .lines == 4' >/dev/null
+  echo "$output" | jq -e '.changes[2] | .prod_lines == 0 and .test_lines == 0 and .other_lines == 1' >/dev/null
+  echo "$output" | jq -e '.prod_lines_median == 4 and .prod_lines_max == 15 and .test_lines_total == 16' >/dev/null
+  # gross lines stay for compatibility
+  echo "$output" | jq -e '.lines_max == 47 and .lines_median == 4' >/dev/null
+  echo "$output" | jq -e '.budget == {lines: 400, files: null} and .within_budget_pct == 100' >/dev/null
+}
+
+@test "size: within_budget compares production lines with budget.lines, not gross lines" {
+  size_chain
+  git -C "$J" config gerrit-stack.budget.lines 20
+  run bash "$SCRIPT" --json "$J"
+  [ "$status" -eq 0 ]
+  # 47 gross lines, 15 production lines: within a 20-line warning
+  echo "$output" | jq -e '[.changes[].within_budget] == [true, true, true] and .within_budget_pct == 100' >/dev/null
+  git -C "$J" config gerrit-stack.budget.lines 10
+  run bash "$SCRIPT" --json "$J"
+  echo "$output" | jq -e '[.changes[].within_budget] == [false, true, true] and .within_budget_pct == 66.7' >/dev/null
+}
+
+@test "size: human table shows prod / test columns and the size summary" {
+  size_chain
+  run bash "$SCRIPT" "$J"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"prod-line warning=400"* ]]
+  [[ "$output" == *"lines prod  test  files type"* ]]
+  [[ "$output" == *"47    15    16    15    feat"* ]]
+  [[ "$output" == *"prod lines: median 4  max 15  |  test lines: total 16  |  prod <= 400: 100% (info)"* ]]
+}
+
+@test "size: empty chain gives null size aggregates" {
+  run bash "$SCRIPT" --json --base HEAD "$WORK"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.chain_length == 0 and .prod_lines_median == null and .prod_lines_max == null and .test_lines_total == null' >/dev/null
+}
+
+@test "--concerns: a setting marked joins: first-consumer may travel with its first consumer" {
+  java_repo
+  # mark the map's setting concern as joining its first consumer
+  python3 - "$MAP" <<'PYJ'
+import sys
+p = sys.argv[1]; s = open(p).read()
+s = s.replace("  - name: setting\n", "  - name: setting\n    joins: first-consumer   # ships with its first consumer\n", 1)
+open(p, "w").write(s)
+PYJ
+  jcommit "feat: setting with its rest view" "$M/DemoPluginConfig.java" "$M/GetMaintenanceView.java"
+  jcommit "feat: ssh command" "$M/MaintenanceCommand.java" "$T/MaintenanceCommandTest.java"
+  run bash "$SCRIPT" --json --concerns "$MAP" "$J"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '[.changes[].concerns] == [["setting", "rest"], ["ssh"]]' >/dev/null
+  echo "$output" | jq -e '.purity_pct == 100 and .completeness_pct == 100' >/dev/null
+  # without the marker the same chain is mixed
+  sed -i '' '/joins: first-consumer/d' "$MAP"
+  run bash "$SCRIPT" --json --concerns "$MAP" "$J"
+  echo "$output" | jq -e '.purity_pct == 50' >/dev/null
 }

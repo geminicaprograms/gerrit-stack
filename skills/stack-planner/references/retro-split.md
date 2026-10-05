@@ -1,12 +1,12 @@
 # Retro-split: turning existing code into a chain
 
-Use after the split plan is approved (see SKILL.md, "Retro-split"). The input is either an uncommitted worktree or one oversized commit; the output is one commit per concern whose combined tree is byte-for-byte the original. Every command starts with `git`; the commit-msg hook adds each `Change-Id` — you never write one.
+Use after the split plan is approved (see SKILL.md, "Retro-split"). The input is either an uncommitted worktree or one commit that mixes several concerns; the output is one commit per concern whose combined tree is byte-for-byte the original. Every command starts with `git`; the commit-msg hook adds each `Change-Id` — you never write one.
 
 Ground rules: never `--amend -m` (it replaces the message and the hook then mints a new Change-Id), never `--no-verify` (skips the hook), never `--hard` except the recovery step below.
 
 ## Step 0: snapshot the original
 
-**Uncommitted worktree** — snapshot it with `git stash create`, which writes a commit object holding the worktree state without touching HEAD, the index or the files. No wip commit: `git add -A && git commit -m "wip…"` conflicts with gerrit-stack's rules and gets a real Change-Id plus budget feedback from the post-commit hook.
+**Uncommitted worktree** — snapshot it with `git stash create`, which writes a commit object holding the worktree state without touching HEAD, the index or the files. No wip commit: `git add -A && git commit -m "wip…"` conflicts with gerrit-stack's rules and gets a real Change-Id plus size feedback from the post-commit hook.
 
 ```
 git status --porcelain                          # everything listed is part of the split
@@ -19,9 +19,9 @@ git rev-parse HEAD                              # <base>: the split commits go o
 
 The snapshot's parent is `HEAD`, so `git diff retro-split/orig..HEAD` in Step 4 and the `git reset --hard retro-split/orig` recovery work unchanged. Skip Step 1: HEAD is already `<base>` and the changes are already unstaged in the worktree.
 
-(Fallback only if `git stash create` prints nothing: commit everything as `git commit -m "wip: <goal> (to be split)"` and treat it as an oversized commit below. That commit is never pushed and disappears in Step 1; its Change-Id and any post-commit budget feedback are expected noise.)
+(Fallback only if `git stash create` prints nothing: commit everything as `git commit -m "wip: <goal> (to be split)"` and treat it as a mixed commit below. That commit is never pushed and disappears in Step 1; its Change-Id and any post-commit size feedback are expected noise.)
 
-**Oversized commit** — it is already the snapshot. Bookmark it and note the base (the parent of the first commit being split, usually `HEAD~1`):
+**A commit that mixes concerns** — it is already the snapshot. Bookmark it and note the base (the parent of the first commit being split, usually `HEAD~1`):
 
 ```
 git log -1 --format='%H %s'                     # <orig>
@@ -89,7 +89,7 @@ git diff retro-split/orig..HEAD --stat          # must print nothing: same tree 
 git log --oneline <base>..HEAD                  # the new chain, oldest at the bottom
 ```
 
-An empty `git diff` output is the proof; paste it (or state "empty") in the hand-off. Then check sizes and clean up:
+An empty `git diff` output is the proof; paste it (or state "empty") in the hand-off. Then check each commit (one concern, builds alone; sizes are information) and clean up:
 
 ```
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh"   # sha | Change-Id | +/- | files | subject per commit

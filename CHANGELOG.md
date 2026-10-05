@@ -104,6 +104,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Size policy: the concern is the unit; size is a reviewer-load warning.
+  The 50–150-line target and the 200-line hard cap are withdrawn (they
+  misread SmartBear's 200–400 lines per sitting and treated the Google /
+  Graphite / Gerrit medians as targets, and counted tests and docs).
+  - `diff-budget.sh` counts production lines only (tests, docs and
+    lock/generated files are reported separately) and prints
+    `prod=<n> test=<t> other=<o> files=<m> warn=<L> hard=<H|none> files-warn=<F|none>`
+    (replaces `lines=… files=… budget=…/… hard=…`; `--json` now has
+    `prod`/`test`/`other`/`total`, `null` for unset limits, status
+    `over-warn` instead of `over-soft`). Defaults: `budget.lines` 400
+    (production-line warning), `budget.hard-lines` and `budget.files`
+    unset = none. Exit 3 only when a hard cap is set. Clones that set the
+    old values keep them.
+  - `git-post.sh`: after a commit over the warning (exit 1 or 3) the
+    feedback asks for a one-line justification in the commit message,
+    says broad mechanical changes stay one change and never asks to split
+    mechanically. Silent for a `refactor`/`build`/`chore` commit whose
+    body says "mechanical", and for a message-only `--amend`.
+  - `stack-planner` skill rewritten around vertical slices that build, are
+    tested and make sense alone; an anti-fragmentation rule (no class
+    without a caller, no scaffolding only the next change explains, no
+    "part 1/2"); a section on broad mechanical changes (one change,
+    mechanical first, split by module only when each part stands alone);
+    `budget.md` evidence table corrected (SmartBear is the load limit; the
+    medians are observations, not targets). Plans list production and test
+    lines per step.
+  - `gerrit-stack` skill, its commit-message / troubleshooting references
+    and the README configuration table use the new keys and wording.
 - `gerrit-review` skill: Conventional Comments labels are used only when
   `comment-style` is `conventional`; replies are free-form in both modes.
 - `gerrit-stack` skill and `references/commit-message.md`: a commitlint

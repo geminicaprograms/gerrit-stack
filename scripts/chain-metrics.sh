@@ -7,11 +7,13 @@
 #                    [--hook-trace <file>] [--remote <name>] [<repo-dir>]
 #
 # Measures the chain `base..HEAD` of <repo-dir> (default: current directory):
-#   per change : lines (+/- via numstat, binary files count 0), files, subject,
-#                change_ids (number of Change-Id trailers), conventional_type,
-#                is_fixup, within_budget, single_concern, builds_alone,
-#                tests_travel, concerns, unmapped_paths
+#   per change : lines (gross +/- via numstat, binary files count 0), files,
+#                prod_lines / test_lines / other_lines (see "Size" below),
+#                subject, change_ids (number of Change-Id trailers),
+#                conventional_type, is_fixup, within_budget, single_concern,
+#                builds_alone, tests_travel, concerns, unmapped_paths
 #   aggregates : lines_median / lines_p75 (nearest rank) / lines_max,
+#                prod_lines_median / prod_lines_max, test_lines_total,
 #                files_median, within_budget_pct, one_change_id_pct,
 #                conventional_pct, single_concern_pct, fixups_present,
 #                tests_travel_pct, builds_alone_pct (only with --verify-cmd),
@@ -36,7 +38,15 @@
 #
 # Base: --base, else refs/remotes/origin/master, else @{upstream}, else the
 # root commit (the chain is then every commit after the root).
-# Budget: git config gerrit-stack.budget.lines (150) / .files (8).
+# Size (information, never a gate): every changed file's +/- lines go to one
+# bucket. test_lines: a path under src/test/, test/ or tests/, or a file named
+# *Test.*, *_test.*, test_*.* or *.spec.*. other_lines: docs (*.md, *.rst,
+# *.txt, anything under Documentation/ or docs/) and lock/generated files
+# (*.lock, package-lock.json, go.sum). prod_lines: everything else.
+# within_budget = prod_lines <= the production-line warning threshold
+# gerrit-stack.budget.lines (git config, else the team file .gerrit-stack at
+# the top level; default 400); kept for information only. budget.files is
+# reported when set (default: none).
 # --verify-cmd checks out every change of the chain, one after another, in a
 # temporary detached worktree (cleaned with `git clean -fdx` between changes so
 # nothing built for one change helps the next) and runs <cmd> there with
@@ -166,8 +176,18 @@ num_or_default() { # <value> <default>
     *) printf '%s\n' "$1" ;;
   esac
 }
-BUDGET_LINES=$(num_or_default "$(git config --get gerrit-stack.budget.lines 2>/dev/null || true)" 150)
-BUDGET_FILES=$(num_or_default "$(git config --get gerrit-stack.budget.files 2>/dev/null || true)" 8)
+# setting <key>: gerrit-stack.<key> from git config, else from the team file
+# (same lookup order as gs_config in scripts/lib, kept local on purpose)
+setting() {
+  local v
+  v=$(git config --get "gerrit-stack.$1" 2>/dev/null || true)
+  if [ -z "$v" ] && [ -f "$TOPLEVEL/.gerrit-stack" ]; then
+    v=$(git config -f "$TOPLEVEL/.gerrit-stack" --get "gerrit-stack.$1" 2>/dev/null || true)
+  fi
+  printf '%s\n' "$v"
+}
+BUDGET_LINES=$(num_or_default "$(setting budget.lines)" 400)
+BUDGET_FILES=$(num_or_default "$(setting budget.files)" null)
 
 # ------------------------------------------------------------------ base ----
 HEAD_SHA=$(git rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null || true)
@@ -207,8 +227,8 @@ commit_message() { # <sha> -> message body on stdout (everything after the heade
 # Per-change rows, TAB-separated: sha, lines, files, cids, type ("-" when the
 # subject is not a Conventional Commit: `read` with IFS=TAB collapses empty
 # fields, so a placeholder keeps the columns aligned), fixup, within, single,
-# tests_travel (true | false | null), subject (last field, may contain
-# TABs/spaces). PATHS holds `position<TAB>path` for every path a change touches.
+# tests_travel (true | false | null), prod, test, other (line counts), subject
+# (last field, may contain TABs/spaces). PATHS holds `position<TAB>path` for every path a change touches.
 ROWS=$TMP/rows
 : > "$ROWS"
 PATHS=$TMP/paths
@@ -240,16 +260,31 @@ while IFS= read -r sha; do
   else
     cids=0
   fi
-  stat=$(git diff-tree -r --root --numstat --no-commit-id "$sha" \
-    | awk '{ if ($1 != "-") a += $1; if ($2 != "-") a += $2; f++ } END { printf "%d %d\n", a + 0, f + 0 }')
-  lines=${stat% *}
-  files=${stat#* }
+  # NUL-separated numstat so odd file names stay unquoted; records are
+  # `added<TAB>deleted<TAB>path`, "-" for binary files (counted as 0)
+  stat=$(git diff-tree -r --root --numstat -z --no-commit-id "$sha" | tr '\0' '\n' | awk -F'\t' '
+    NF < 3 { next }
+    {
+      n = 0
+      if ($1 != "-") n += $1
+      if ($2 != "-") n += $2
+      path = $0; sub(/^[^\t]*\t[^\t]*\t/, "", path)
+      base = path; sub(/.*\//, "", base)
+      if (path ~ /(^|\/)(src\/test|test|tests)\// || base ~ /Test\./ || base ~ /_test\./ \
+          || base ~ /^test_.*\./ || base ~ /\.spec\./) t += n
+      else if (base ~ /\.(md|rst|txt|lock)$/ || path ~ /(^|\/)(Documentation|docs)\// \
+          || base == "package-lock.json" || base == "go.sum") o += n
+      else p += n
+      a += n; f++
+    }
+    END { printf "%d %d %d %d %d\n", a + 0, f + 0, p + 0, t + 0, o + 0 }')
+  read -r lines files prod tlines other <<< "$stat"
   ctype="-"
   if [[ $subject =~ $CONV_RE ]]; then ctype=${BASH_REMATCH[1]}; fi
   fixup=false
   if [[ $subject =~ $FIXUP_RE ]]; then fixup=true; fi
   within=false
-  if [ "$lines" -le "$BUDGET_LINES" ] && [ "$files" -le "$BUDGET_FILES" ]; then within=true; fi
+  if [ "$prod" -le "$BUDGET_LINES" ]; then within=true; fi
   # single concern: a type, no " and ", at most one type token in the subject
   single=false
   if [ "$ctype" != "-" ]; then
@@ -263,8 +298,9 @@ while IFS= read -r sha; do
       *) [ "$tokens" -le 1 ] && single=true ;;
     esac
   fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$sha" "$lines" "$files" "$cids" "$ctype" "$fixup" "$within" "$single" "$travel" "$subject" >> "$ROWS"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$sha" "$lines" "$files" "$cids" "$ctype" "$fixup" "$within" "$single" "$travel" \
+    "$prod" "$tlines" "$other" "$subject" >> "$ROWS"
 done < "$COMMITS"
 
 # ------------------------------------------------------------- verify-cmd ----
@@ -433,17 +469,20 @@ def parse(path):
                     cur["indent"] = indent
                     items.append(cur)
                     continue
-                cur = {"name": "", "paths": [], "indent": indent}
+                cur = {"name": "", "paths": [], "indent": indent, "joins": False}
                 items.append(cur)
                 text = body
             if cur is None:
                 continue
-            m = re.match(r"(name|paths)\s*:(.*)$", text)
+            m = re.match(r"(name|paths|joins)\s*:(.*)$", text)
             if not m:
                 continue
             key, value = m.group(1), m.group(2).strip()
             if key == "name":
                 cur["name"] = one(value)
+                in_paths = False
+            elif key == "joins":
+                cur["joins"] = one(value) not in ("", "false", "no", "none")
                 in_paths = False
             elif value.startswith("["):
                 end = value.rfind("]")
@@ -471,6 +510,9 @@ for item in parse(sys.argv[1]):
             invalid.append(pattern)
     concerns.append((item["name"], compiled))
 order = [name for name, _ in concerns]
+# A concern marked `joins: first-consumer` (a config setting) may travel with the first change
+# that uses it: setting + one consumer in one change still counts as a single concern.
+joining = {item["name"] for item in parse(sys.argv[1]) if item.get("joins")}
 
 length = int(sys.argv[3])
 paths = {}
@@ -495,6 +537,13 @@ for pos in range(1, length + 1):
         holders[name] = holders.get(name, 0) + 1
     changes[str(pos)] = {"concerns": names, "unmapped_paths": unmapped, "paths": sorted(paths.get(pos, []))}
 
+def effective(names):
+    rest = [n for n in names if n not in joining]
+    return rest if rest else names
+
+
+for c in changes.values():
+    c["effective_concerns"] = effective(c["concerns"])
 mapped = [c for c in changes.values() if c["concerns"]]
 seen = [name for name in order if name in holders]
 print(json.dumps({
@@ -503,7 +552,7 @@ print(json.dumps({
     "invalid_patterns": invalid,
     "changes": changes,
     "concerns_seen": seen,
-    "purity_pct": pct(sum(1 for c in mapped if len(c["concerns"]) == 1), len(mapped)),
+    "purity_pct": pct(sum(1 for c in mapped if len(c["effective_concerns"]) == 1), len(mapped)),
     "completeness_pct": pct(sum(1 for name in seen if holders[name] == 1), len(seen)),
 }))
 PY
@@ -606,6 +655,9 @@ LINES_MEDIAN=$(sorted_stat 2 median)
 LINES_P75=$(sorted_stat 2 p75)
 LINES_MAX=$(sorted_stat 2 max)
 FILES_MEDIAN=$(sorted_stat 3 median)
+PROD_MEDIAN=$(sorted_stat 10 median)
+PROD_MAX=$(sorted_stat 10 max)
+TEST_TOTAL=$(awk -F'\t' '{ t += $11 } END { if (NR == 0) print "null"; else print t + 0 }' "$ROWS")
 WITHIN_PCT=$(pct_of "$(count_col_eq 7 true)")
 ONE_CID_PCT=$(pct_of "$(count_col_eq 4 1)")
 CONV_COUNT=$(awk -F'\t' '$5 != "-" { c++ } END { print c + 0 }' "$ROWS")
@@ -627,7 +679,7 @@ fi
 CHANGES=$TMP/changes.json
 : > "$CHANGES"
 pos=0
-while IFS=$'\t' read -r sha lines files cids ctype fixup within single travel subject; do
+while IFS=$'\t' read -r sha lines files cids ctype fixup within single travel prod tlines other subject; do
   pos=$((pos + 1))
   builds=null
   if [ -s "$BUILDS" ] && [ -z "$VERIFY_ERROR" ]; then
@@ -640,8 +692,9 @@ while IFS=$'\t' read -r sha lines files cids ctype fixup within single travel su
   jq -cn --arg sha "$sha" --arg subject "$subject" --argjson lines "$lines" --argjson files "$files" \
     --argjson cids "$cids" --argjson ctype "$ctype_json" --argjson fixup "$fixup" \
     --argjson within "$within" --argjson single "$single" --argjson builds "$builds" \
-    --argjson travel "$travel" '
-    {sha: $sha, subject: $subject, lines: $lines, files: $files, change_ids: $cids,
+    --argjson travel "$travel" --argjson prod "$prod" --argjson tlines "$tlines" --argjson other "$other" '
+    {sha: $sha, subject: $subject, lines: $lines, files: $files,
+     prod_lines: $prod, test_lines: $tlines, other_lines: $other, change_ids: $cids,
      conventional_type: $ctype, is_fixup: $fixup, within_budget: $within,
      single_concern: $single, builds_alone: $builds, tests_travel: $travel}' >> "$CHANGES"
 done < "$ROWS"
@@ -654,6 +707,7 @@ RESULT=$(jq -n \
   --argjson budget_lines "$BUDGET_LINES" --argjson budget_files "$BUDGET_FILES" \
   --argjson chain_length "$CHAIN_LENGTH" --slurpfile changes "$CHANGES" \
   --argjson lines_median "$LINES_MEDIAN" --argjson lines_p75 "$LINES_P75" --argjson lines_max "$LINES_MAX" \
+  --argjson prod_median "$PROD_MEDIAN" --argjson prod_max "$PROD_MAX" --argjson test_total "$TEST_TOTAL" \
   --argjson files_median "$FILES_MEDIAN" --argjson within "$WITHIN_PCT" --argjson one_cid "$ONE_CID_PCT" \
   --argjson conv "$CONV_PCT" --argjson single "$SINGLE_PCT" --argjson fixups "$FIXUPS_PRESENT" \
   --arg verify_cmd "$VERIFY_CMD" --argjson builds "$BUILDS_PCT" --argjson verify_error "$VERIFY_ERROR_JSON" \
@@ -673,6 +727,9 @@ RESULT=$(jq -n \
     lines_median: $lines_median,
     lines_p75: $lines_p75,
     lines_max: $lines_max,
+    prod_lines_median: $prod_median,
+    prod_lines_max: $prod_max,
+    test_lines_total: $test_total,
     files_median: $files_median,
     within_budget_pct: $within,
     one_change_id_pct: $one_cid,
@@ -710,11 +767,13 @@ printf '%s\n' "$RESULT" | jq -r '
   def s(x): if x == null then "-" else (x | tostring) end;
   def yn(x): if x == null then "-" elif x then "yes" else "no" end;
   def pct(x): if x == null then "-" else ((x | tostring) + "%") end;
-  "chain: \(.chain_length) change(s)  base=\(s(.base_ref)) (\(s(.base) | .[0:7]))  head=\(s(.head) | .[0:7])  budget=\(.budget.lines)/\(.budget.files)",
-  "sha      cid  lines files type      concern budget build tests  concerns  subject",
-  (.changes[] | "\(.sha[0:7])  \(.change_ids)    \(.lines | tostring | .[0:5] | . + " " * (5 - length))  \(.files | tostring | . + " " * (5 - length)) \(s(.conventional_type) | . + " " * (9 - length)) \(yn(.single_concern) | . + " " * (7 - length)) \(yn(.within_budget) | . + " " * (6 - length)) \(yn(.builds_alone) | . + " " * (5 - length)) \(yn(.tests_travel) | . + " " * (5 - length))  \(if .concerns == null then "-" elif (.concerns | length) == 0 then "(none)" else (.concerns | join(",")) end)  \(.subject)"),
+  def pad(n): tostring | . + " " * (n - length);
+  "chain: \(.chain_length) change(s)  base=\(s(.base_ref)) (\(s(.base) | .[0:7]))  head=\(s(.head) | .[0:7])  prod-line warning=\(.budget.lines)",
+  "sha      cid  lines prod  test  files type      concern build tests  concerns  subject",
+  (.changes[] | "\(.sha[0:7])  \(.change_ids)    \(.lines | pad(5)) \(.prod_lines | pad(5)) \(.test_lines | pad(5)) \(.files | pad(5)) \(s(.conventional_type) | pad(9)) \(yn(.single_concern) | pad(7)) \(yn(.builds_alone) | pad(5)) \(yn(.tests_travel) | pad(5))  \(if .concerns == null then "-" elif (.concerns | length) == 0 then "(none)" else (.concerns | join(",")) end)  \(.subject)"),
   "lines: median \(s(.lines_median))  p75 \(s(.lines_p75))  max \(s(.lines_max))  |  files: median \(s(.files_median))",
-  "within budget \(pct(.within_budget_pct))  |  one Change-Id \(pct(.one_change_id_pct))  |  conventional \(pct(.conventional_pct))  |  single concern \(pct(.single_concern_pct))  |  fixups \(yn(.fixups_present))",
+  "prod lines: median \(s(.prod_lines_median))  max \(s(.prod_lines_max))  |  test lines: total \(s(.test_lines_total))  |  prod <= \(.budget.lines): \(pct(.within_budget_pct)) (info)",
+  "one Change-Id \(pct(.one_change_id_pct))  |  conventional \(pct(.conventional_pct))  |  single concern \(pct(.single_concern_pct))  |  fixups \(yn(.fixups_present))",
   "tests travel \(pct(.tests_travel_pct))\(if .concerns_seen != null then "  |  purity \(pct(.purity_pct))  |  completeness \(pct(.completeness_pct))  |  concerns seen \(.concerns_seen | length)/\(.concerns_defined | length)  |  unmapped paths \([.changes[].unmapped_paths | length] | add // 0)" else "" end)",
   (if .verify_cmd != null then "builds alone: \(pct(.builds_alone_pct))  (\(.verify_cmd))\(if .verify_timeouts > 0 then "  timeouts: \(.verify_timeouts)" else "" end)\(if .verify_error != null then "  error: " + .verify_error else "" end)" else empty end),
   (if .hook_trace != null then "hook trace: \(.hook_trace.violations) deny \(.hook_trace.violations_by_verb | tojson)  \(.hook_trace.asks) ask \(.hook_trace.asks_by_verb | tojson)  (\(.hook_trace.lines) lines\(if .hook_trace.missing then ", file missing" else "" end))" else empty end),

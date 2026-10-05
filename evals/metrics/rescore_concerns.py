@@ -48,18 +48,20 @@ def load_concerns(case_yaml: str) -> list:
     out = []
     for item in cfg.get("concerns") or []:
         if isinstance(item, dict) and item.get("name"):
-            out.append((str(item["name"]), [re.compile(str(p)) for p in item.get("paths") or []]))
+            joins = str(item.get("joins") or "").lower() not in ("", "false", "no", "none")
+            out.append((str(item["name"]), [re.compile(str(p)) for p in item.get("paths") or []], joins))
     return out
 
 
 def score(chain_paths: list, concerns: list) -> dict:
     """Same definitions as scripts/chain-metrics.sh --concerns."""
-    order = [n for n, _ in concerns]
+    order = [n for n, _, _ in concerns]
+    joining = {n for n, _, j in concerns if j}
     per_change, holders = [], {}
     for paths in chain_paths:
         names, unmapped = [], []
         for path in paths:
-            hit = [n for n, rxs in concerns if any(r.search(path) for r in rxs)]
+            hit = [n for n, rxs, _ in concerns if any(r.search(path) for r in rxs)]
             if not hit:
                 unmapped.append(path)
             for n in hit:
@@ -68,7 +70,8 @@ def score(chain_paths: list, concerns: list) -> dict:
         names.sort(key=order.index)
         for n in names:
             holders[n] = holders.get(n, 0) + 1
-        per_change.append({"concerns": names, "unmapped_paths": unmapped, "paths": sorted(paths)})
+        eff = [n for n in names if n not in joining] or names
+        per_change.append({"concerns": names, "effective_concerns": eff, "unmapped_paths": unmapped, "paths": sorted(paths)})
     mapped = [c for c in per_change if c["concerns"]]
     seen = [n for n in order if n in holders]
 
@@ -77,7 +80,7 @@ def score(chain_paths: list, concerns: list) -> dict:
 
     return {
         "changes": per_change,
-        "purity_pct": pct(sum(1 for c in mapped if len(c["concerns"]) == 1), len(mapped)),
+        "purity_pct": pct(sum(1 for c in mapped if len(c["effective_concerns"]) == 1), len(mapped)),
         "completeness_pct": pct(sum(1 for n in seen if holders[n] == 1), len(seen)),
         "concerns_seen": seen,
         "concerns_defined": order,

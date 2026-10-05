@@ -55,8 +55,7 @@ branch is already grouped by parent-child; `none` is the recommended answer.
 | Preflight (detection, hook, MCP hint) | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh" --preflight` |
 | Chain table (`sha7 \| Change-Id \| +/- \| files \| subject`) | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh"` |
 | Snapshot / verify Change-Id set | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh" --snapshot` / `--verify-ids` |
-| Size of the last commit | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" HEAD` |
-   Over budget for a single cohesive concern? Keep it one change and justify it in the message; never split a concern into mechanical halves (see stack-planner).
+| Size of the last commit (production / test / docs lines) | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" HEAD` — over the warning with one concern: keep it, justify in one line; never split a concern into fragments (see stack-planner) |
 | Install the commit-msg hook | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-commit-msg-hook.sh"` |
 | Compose the push command | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/push-chain.sh" [--wip]` |
 | REST fallback when MCP is unavailable | `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/gerrit-rest.py" <cmd> …` |
@@ -116,11 +115,20 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
    every chain commit passes.
 5. `bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh"` — the new row must show
    exactly one Change-Id. Missing → hook problem, see troubleshooting; do not continue.
-6. Before committing: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" --cached` — over budget (exit 1) means put the one-line justification into this commit message now (a later `--amend -F` is allowed only when the file keeps the Change-Id line). After committing: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" HEAD`
-   - exit 0: within budget
-   - exit 1: over the soft budget — justify in one line or split
-   - exit 3: over the hard cap — retro-split now via `/gerrit-stack:stack-planner`
-     (its `retro-split.md` recipe), then re-check every resulting commit
+6. Before committing: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" --cached` — it counts
+   production lines only (tests, docs, lock files reported but not counted). Over the
+   warning (exit 1, default 400 production lines) means put a one-line justification
+   into this commit message now (a later `--amend -F` is allowed only when the file
+   keeps the Change-Id line). A broad mechanical change (library migration, rename,
+   API move, formatter, codemod) stays one change: type `refactor`/`build`/`chore` and
+   the word "mechanical" in the body, with how it was produced.
+   After committing the hook runs `diff-budget.sh HEAD` and gives feedback only on exit 1 or 3:
+   - exit 0: within the warning
+   - exit 1: one concern → keep it, one-line justification; several concerns → split
+     by concern via `/gerrit-stack:stack-planner`. Never split mechanically
+   - exit 3: only when the team set `budget.hard-lines` — cut along concern boundaries
+     (each part builds, is tested, makes sense alone; `retro-split.md`), or justify
+     and raise the cap with the team
 
 ## Phase 3 — Pre-push review
 
@@ -224,7 +232,8 @@ in the plugin README.
 | `remote`, `branch`, `host` | Target of `refs/for/<branch>`; REST host for the fallback |
 | `grouping`, `group-name` | Persisted grouping answer (Phase 3); read by `push-chain.sh` |
 | `default-wip` | Adds `%wip` without the `wip` answer |
-| `budget.lines`, `budget.files`, `budget.hard-lines` | `diff-budget.sh` thresholds (150 / 8 / 200) |
+| `budget.lines` | Production-line warning for `diff-budget.sh` (default 400; tests and docs not counted) |
+| `budget.hard-lines`, `budget.files` | Optional hard cap / file warning (unset = none) |
 | `commit-style`, `footers` | `conventional` (default) or `gerrit`; required trailers such as `Release-Notes` |
 | `commit-lint` | `auto` (default): when the repo has a commitlint config and the `commitlint` command exists, **that config is the commit convention** — it is checked after every commit and before a push to `refs/for`. `off` disables the check |
 | `comment-style` | `conventional` or `none` (default); used by the `gerrit-review` skill |
@@ -272,7 +281,7 @@ References: [push-options](references/push-options.md) ·
 - [ ] `commit-msg` hook installed (`chain-status.sh --preflight` exit 0)
 - [ ] Exactly one Change-Id per commit (`chain-status.sh` table)
 - [ ] No `fixup!`/`squash!` commits left (autosquash done)
-- [ ] Each commit within budget, or the excess justified in its message
+- [ ] Each commit is one concern that builds and is used on its own; one over the production-line warning carries a one-line justification (or is a `refactor`/`build`/`chore` marked "mechanical")
 - [ ] Grouping choice confirmed by the user (none / hashtag / topic) and reflected in the push options
 - [ ] Refspec is `HEAD:refs/for/<branch>` as printed by `push-chain.sh`
 - [ ] The user answered `y` (or `wip`) to the push question **in this turn**

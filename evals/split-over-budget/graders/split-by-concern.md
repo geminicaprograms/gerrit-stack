@@ -2,7 +2,7 @@
 type: llm
 weight: 2
 ---
-The worktree held ~500 uncommitted lines across four concerns, each under the 150-line budget:
+The worktree held ~500 uncommitted lines across four concerns, each small enough to review on its own:
 logging helpers (`lib/logging.sh`), config parsing (`lib/config.sh`), config tests
 (`tests/test_config.sh`) and docs (`docs/USAGE.md`), plus a small wiring edit in `greet.sh`. PASS only if the run created
 at least 2 commits, each covering one concern (staging by path or `git add -p`), rather than one

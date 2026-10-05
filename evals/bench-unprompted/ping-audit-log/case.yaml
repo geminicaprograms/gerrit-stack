@@ -26,6 +26,7 @@ kind: implement
 #            Ping(Audit)Log(Action|View|...)(Test).java
 concerns:
   - name: setting
+    joins: first-consumer   # a setting may ship with the first change that uses it
     paths:
       - '/DemoPluginConfig(Test|IT)?\.java$'
   - name: log

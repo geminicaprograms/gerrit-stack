@@ -1,13 +1,15 @@
 ---
 name: stack-planner
-description: Split a feature, refactor, or bugfix into an ordered chain of small single-concern steps, each independently buildable, reviewable, and revertable, within a diff budget (default 50–150 lines, 2–8 files per step; hard cap 200 single-layer, 500 cross-layer). Use before writing code for any multi-file change (anything likely to touch more than one file), when asked to "plan", "break this down", "split this", "stack this", "make it reviewable", "plan the chain", or when a diff exceeds the budget, a commit is oversized, or a dirty worktree must be split into reviewable commits (retro-split). VCS-agnostic (Gerrit relation chains, GitHub stacked PRs).
+description: Split a feature, refactor, or bugfix into an ordered chain of single-concern changes, each a vertical slice that builds, is tested and makes sense on its own — never fragments that only the next change explains. Size is a reviewer-load warning on production lines (tests and docs not counted), not a quota; broad mechanical changes (library migration, rename, formatter, codemod) stay one change. Use before writing code for any multi-file change (anything likely to touch more than one file), when asked to "plan", "break this down", "split this", "stack this", "make it reviewable", "plan the chain", or when a commit or dirty worktree mixes several concerns and must be split into reviewable commits (retro-split). VCS-agnostic (Gerrit relation chains, GitHub stacked PRs).
 ---
 
 # Stack Planner
 
 ## Overview
 
-One step = one change = one concern a reviewer can build, understand, approve and revert on its own. This skill turns a request into an ordered chain of such steps, sized against a diff budget, and **stops at the approved plan**. It writes no code and runs no `git add` / `git commit`.
+**The concern is the unit.** One step = one change = one concern a reviewer can state in one sentence, build, verify, approve and revert on its own. This skill turns a request into an ordered chain of such steps and **stops at the approved plan**. It writes no code and runs no `git add` / `git commit`.
+
+Size is information, not a target: `diff-budget.sh` counts **production lines** (tests, docs and lock files excluded) and warns above ~400, the amount one reviewer reads well in one sitting. A concern over that line stays one change with a one-line justification; a concern under it is not split further.
 
 Vocabulary is VCS-agnostic: a *step* in the plan becomes a *change* (one commit) in the chain. On Gerrit the chain is a relation chain pushed with `git push <remote> HEAD:refs/for/<branch>` (the `gerrit-stack` skill owns commit and push); on GitHub it is a set of stacked PRs. The planning rules are identical.
 
@@ -15,12 +17,10 @@ Vocabulary is VCS-agnostic: a *step* in the plan becomes a *change* (one commit)
 
 - Before writing code for anything likely to touch more than one file (the `gerrit-stack` skill invokes this in its Plan phase).
 - The user says "plan", "break this down", "split this", "stack this", "make it reviewable", "plan the chain".
-- `diff-budget.sh` reports over budget (exit 1) or over the hard cap (exit 3) on `HEAD` or `--worktree` → [Retro-split](#retro-split-code-already-exists).
-- A plan someone else wrote contains a step like "implement the feature".
+- A commit or dirty worktree mixes several concerns (feature + refactor, two behaviours) → [Retro-split](#retro-split-code-already-exists). A size warning alone is not a reason to split.
+- A plan someone else wrote contains a step like "implement the feature" — or the opposite, steps like "part 1/2".
 
-**Never split one cohesive concern into mechanical halves** ("first half / second half" of a file) to satisfy the budget. A single concern that legitimately exceeds the budget stays one change with a one-line justification in the commit message; the budget is a signal, not a law.
-
-**Do not use** for a single-file, single-concern edit that fits the budget (just make it), or for a purely mechanical change produced by a tool (formatter, codemod) that is one change by design. Never use it to skip the approval: the plan is the deliverable.
+**Do not use** for a single-concern edit (just make it, whatever its size), or for a broad mechanical change (see [Broad mechanical changes](#broad-mechanical-changes)) — that is one change by design. Never use it to skip the approval: the plan is the deliverable.
 
 ## Inputs (collect before planning; ask for what is missing)
 
@@ -29,8 +29,8 @@ Vocabulary is VCS-agnostic: a *step* in the plan becomes a *change* (one commit)
 | Goal + acceptance criteria | the request: one sentence plus what a user or caller can observe |
 | Layers in play | repo layout: infra/build, config, data/migration, API, caller/UI, docs; where tests live |
 | Verify command | `git config gerrit-stack.verify-cmd`; else the project's build/test command (Makefile target, `npm test`, `bazel test …`); ask if unknown |
-| Budget | `git config gerrit-stack.budget.lines` / `.files` / `.hard-lines` (defaults 150 / 8 / 200) — `references/budget.md` |
-| Existing code? | uncommitted diff or oversized commit → Retro-split |
+| Size warning | `git config gerrit-stack.budget.lines` (production-line warning, default 400); `.hard-lines` / `.files` only if the team set them (default none) — `references/budget.md` |
+| Existing code? | uncommitted diff or a commit mixing concerns → Retro-split |
 | Target | Gerrit remote/branch, or stacked PRs |
 
 ## Process
@@ -38,61 +38,92 @@ Vocabulary is VCS-agnostic: a *step* in the plan becomes a *change* (one commit)
 Run scripts from inside the target repository. The literal `${CLAUDE_PLUGIN_ROOT}` is substituted when this skill is loaded from the plugin; if it ever reaches Bash unexpanded, the skill was not plugin-loaded — say so and stop.
 
 1. **Map.** List every file you expect to create or modify and tag each with its layer. Find callers with `git grep <symbol>`; list neighbours with `git ls-files <dir>`. Output: a file → layer table (it feeds the plan's *files* column).
-2. **Slice vertically by user-visible behaviour.** Each slice is one behaviour a reviewer can verify end to end (one config key read, one endpoint, one command). Bundle two layers only when they are meaningless apart (an endpoint and its only caller). Pure infrastructure (build wiring, module registration, test harness) is a legitimate horizontal slice — keep it small. Patterns: `references/split-patterns.md`.
-3. **Order by dependency.** infra → data/migration → API → caller. Tests travel with the code they test. A refactor the feature needs is its own step at the bottom of the chain. Each step must build and pass with only the earlier steps present.
-4. **Estimate each step.** `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" --estimate <path>...` prints `lines=<n> files=<m> budget=<L>/<F> hard=<H>` and exits 0 (within), 1 (over soft), 3 (over hard). The number is a proxy: for a small edit in a large file estimate the hunk instead; for a new file estimate its size. Record `est ±lines` per step and say which figures you adjusted.
-5. **Apply split / merge signals** (below) until every step is within budget or its reviewer note justifies the overage. Chain depth ≤ 5; longer → two chains, and the first lands before the second is planned in detail.
-6. **Emit the plan** with `references/plan-template.md`: exact headings, the step table, the `Chain summary:` line, the approval question last.
-7. **Ask and STOP.** Edit, stage or commit nothing until the user answers. If the user's request explicitly pre-approves the plan (e.g. "treat the plan as approved"), record that and continue without the question; otherwise ask and stop. "implement X" or "commit this" is not approval of a plan the user has not seen.
+2. **Find the concerns.** Each concern is one behaviour or one mechanical transformation a reviewer can state in one sentence ("prefix is read from config with a default"; "all callers move to the v5 client"). Pure infrastructure (build wiring, a new dependency, a test harness) counts as a concern only when it builds and is verifiable alone. Patterns: `references/split-patterns.md`.
+3. **Make every concern a vertical slice.** It builds, carries its tests, and is *used* — by a caller, an endpoint, a command or a test that exercises the behaviour. Bundle layers that are meaningless apart (an endpoint and its only caller). Apply the [anti-fragmentation rule](#anti-fragmentation-rule).
+4. **Order by dependency.** infra → data/migration → API → caller. Tests travel with the code they test. A mechanical change or refactor the feature needs comes first, behaviour on top. Each step must build and pass with only the earlier steps present.
+5. **Estimate each step.** `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" --estimate <path>...` prints `prod=<n> test=<t> other=<o> files=<m> warn=<L> hard=<H|none> files-warn=<F|none>` and exits 0 (within), 1 (over the warning), 3 (over a hard cap the team set). The figures are a proxy: for a small edit in a large file estimate the hunk; for a new file estimate its size. Record production and test lines per step and say which figures you adjusted.
+6. **Check against the warning, not toward it.** A step over the warning gets a one-line justification in its reviewer note (it becomes the commit message line). Split it only if it actually holds two concerns. Chain depth ≤ 5; longer → two chains, and the first lands before the second is planned in detail.
+7. **Emit the plan** with `references/plan-template.md`: exact headings, the step table, the `Chain summary:` line, the approval question last.
+8. **Ask and STOP.** Edit, stage or commit nothing until the user answers. If the user's request explicitly pre-approves the plan (e.g. "treat the plan as approved"), record that and continue without the question; otherwise ask and stop. "implement X" or "commit this" is not approval of a plan the user has not seen.
 
 ## Output format
 
 One row per step, in chain order:
 
-| Step N — `<type>`: `<subject>` | files | est ±lines | verify cmd | depends on | reviewer note |
+| Step N — `<type>`: `<subject>` | files | est prod / test lines | verify cmd | depends on | reviewer note |
 |---|---|---|---|---|---|
 
 - `<type>`: Conventional Commit type (`feat`, `fix`, `refactor`, `build`, `test`, `docs`, `chore`); one type per step; no "and" in the subject.
 - *files*: every path the step touches, `(new)` marked.
-- *est ±lines*: insertions + deletions, tests included, from step 4.
+- *est prod / test lines*: insertions + deletions in production files / in test files, from step 5 (docs and lock files are not listed).
 - *verify cmd*: the command that must pass with only this and earlier steps present.
 - *depends on*: earlier step numbers, or `—`.
-- *reviewer note*: what to look at, plus any budget justification.
+- *reviewer note*: what to look at; for a step over the warning, the one-line justification; for a mechanical step, the word "mechanical" and how it was produced.
 
-Then `Chain summary: N changes, ~T lines total, max step ~M lines / F files, depth N ≤ 5, target <Gerrit relation chain on <remote>/<branch> | stacked PRs>` and the approval question.
+Then `Chain summary: N changes, ~P production / ~T test lines total, largest change ~M production lines, depth N ≤ 5, target <Gerrit relation chain on <remote>/<branch> | stacked PRs>` and the approval question.
 
-## Budget defaults and signals
+## Concern is the unit
 
-| | Target | Hard cap |
+A change belongs in the chain when a reviewer can say "yes" or "no" to it without reading the next one:
+
+- **one concern**: statable in one sentence without "and";
+- **builds and passes alone** with only earlier steps present;
+- **tested**: the tests for what it adds travel with it;
+- **used**: the new code has a caller, an entry point or a test that exercises the behaviour — it leads somewhere on its own;
+- **revertable** without breaking its neighbours.
+
+### Anti-fragmentation rule
+
+Over-fragmentation counts against a chain exactly like a mixed change. Never plan:
+
+- a class, function or endpoint with **no caller** in the same change (other than its tests);
+- **scaffolding that only the next change explains** (an interface with no implementation, a config key nothing reads, an empty module);
+- **"part 1 / part 2"** of one concern, or "first half / second half" of a file;
+- a step under ~10 lines with no standalone meaning (an import, a constant) — merge it into the step that uses it.
+
+Test: if the reviewer note needs "will be used in the next change", merge the step into that change.
+
+## Size: a reviewer-load warning, not a quota
+
+| | Value | Meaning |
 |---|---|---|
-| Lines per step (ins + del, tests included) | 50–150 | 200 single-layer; 500 cross-layer, justified in the reviewer note |
-| Files per step | 2–8 | 15 cross-layer |
-| Chain depth | ≤ 5 | split into two chains; land the first |
+| Production-line warning | ~400 (`budget.lines`) | insertions + deletions in production files; tests, docs (`*.md`, `*.rst`, `*.txt`, `docs/`, `Documentation/`) and lock files are reported but never counted |
+| Hard cap | none (`budget.hard-lines` only if the team sets one) | |
+| File warning | none (`budget.files` only if the team sets one) | |
+| Chain depth | ≤ 5 | longer chains become two chains; the first lands first |
 
-- **Split** when a step has several "and"s, mixes feature + migration + cleanup, tests different behaviours, exceeds a cap, or could not be reverted alone.
-- **Merge** when a step cannot be verified on its own (an import, a constant), is under 10 lines with no standalone meaning, or would make a reviewer ask "why is this separate?".
+Evidence: SmartBear/Cisco found one reviewer reads 200–400 lines per sitting well and detection drops beyond that — that is where 400 comes from. Google (median 24 lines), Graphite (~50) and the Gerrit baseline (62) are **observed medians over all changes**, not targets; most changes are small because most concerns are small. Details: `references/budget.md`.
 
-Evidence, configuration and script exit codes: `references/budget.md`.
+Over the warning: keep the change if it is one concern, and put a one-line justification in the reviewer note and later in the commit message ("one parser; splitting it leaves half a grammar"). Never split to get under the number.
+
+## Broad mechanical changes
+
+A library migration, rename, API move, formatter run or codemod is **one concern by design**:
+
+- **One change**, even when it is large or touches many files. Reviewers check the recipe and spot-check the result; splitting it multiplies that work and leaves the tree half-migrated.
+- **Mechanical first, behaviour on top.** Never mix a behaviour change into the mechanical change; the behaviour change is its own step after it.
+- **Split by module only** when each part builds and is meaningful alone (each module migrates completely and the build stays green between parts). Otherwise keep it whole.
+- **Mark it**: a `refactor`, `build` or `chore` type, and the word "mechanical" in the body with how it was produced (tool + command, or the rename rule). `diff-budget.sh` still reports the numbers, but the post-commit size note stays silent: the marker is the justification.
 
 ## Retro-split: code already exists
 
-When the user asks to commit an oversized diff, or `diff-budget.sh HEAD` / `--worktree` exits 3:
+When a commit or the worktree mixes several concerns (not merely because it is large):
 
-1. Measure: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" --worktree` (uncommitted) or `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" HEAD` (last commit).
-2. Plan the split with the same process: the *files* column lists paths (or hunks) per concern, ordered so each commit builds on its own. Ask for approval.
+1. Measure: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" --worktree` (uncommitted) or `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" HEAD` (last commit), and list the concerns you find.
+2. Plan the split with the same process: the *files* column lists paths (or hunks) per concern, ordered so each commit builds on its own. One concern found → no split; keep it and justify the size. Ask for approval.
 3. After approval follow `references/retro-split.md`: `git reset --soft <base>`, stage per concern (`git add <paths>`, `git add -p`, or a curated patch via `git apply --cached`), one `git commit` per concern (the commit-msg hook supplies the Change-Id — never write it), then prove equivalence with an empty `git diff <orig>..HEAD --stat`. A commit that was already pushed is covered there too.
 
 ## Anti-patterns
 
 | Anti-pattern | Fix |
 |---|---|
-| "Step N: implement the feature" | Slice by user-visible behaviour |
+| "Step N: implement the feature" | Slice by concern / user-visible behaviour |
+| "Part 1 / part 2", a class with no caller, scaffolding for the next step | Merge into the step that uses it ([anti-fragmentation](#anti-fragmentation-rule)) |
+| Splitting one concern to get under ~400 lines | Keep it one change; justify the size in one line |
+| Splitting a migration/rename/formatter run into arbitrary batches | One mechanical change; by module only when each part builds and means something alone |
 | Horizontal slices (all endpoints, then all UI) | Vertical slices; bundle a layer pair only when meaningless apart |
-| Endpoint in one step, its only caller in another | One cross-layer step (justify if over 200 lines) |
 | Final "add tests" step | Tests travel with the code in every step |
-| Infrastructure step that also adds a feature | Two steps: scaffolding, then the first slice |
-| Migration + feature in one step | Migration is its own step, before the feature |
-| Refactor smuggled into a feature step | Refactor first, own step at the bottom |
+| Behaviour change inside a mechanical or refactor step | Mechanical/refactor first, behaviour on top |
 | Chain deeper than 5 | Two chains; land the first, then plan the second |
 | Estimates by gut feel | Run `diff-budget.sh --estimate`; state adjustments |
 | Editing files before approval | Stop; the plan is the deliverable |
@@ -103,12 +134,13 @@ When the user asks to commit an oversized diff, or `diff-budget.sh HEAD` / `--wo
 Re-read before delivering the plan; fix anything unchecked.
 
 - [ ] Every step has one concern, one Conventional Commit type, no "and" in the subject.
-- [ ] Every row has files (`(new)` marked), est ±lines, verify cmd, depends on, reviewer note — no blank cells.
+- [ ] Every step builds, is tested and is used on its own: no class without a caller, no scaffolding only the next step explains, no "part 1/2".
+- [ ] Every row has files (`(new)` marked), est prod / test lines, verify cmd, depends on, reviewer note — no blank cells.
 - [ ] Estimates come from `diff-budget.sh --estimate`; adjusted figures say so.
-- [ ] Each step is within 150 lines / 8 files, or the reviewer note justifies it; nothing over 200 (single-layer) or 500 (cross-layer).
+- [ ] A step over the production-line warning (default 400) carries a one-line justification; no step was split only to get under it.
+- [ ] Broad mechanical changes are one step (or one per module that builds alone), typed `refactor`/`build`/`chore`, "mechanical" in the reviewer note, before any behaviour change.
 - [ ] Order is infra → data/migration → API → caller; each step builds and passes with only earlier steps present.
 - [ ] Tests travel with the code; there is no "add tests" step.
-- [ ] Refactors and migrations are their own steps at the bottom.
 - [ ] Chain depth ≤ 5, else two chains with the first landing first.
 - [ ] `Chain summary:` line present; the approval question is the last line.
 - [ ] Nothing edited, staged or committed; no `Change-Id:` written anywhere.

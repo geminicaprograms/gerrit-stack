@@ -418,7 +418,82 @@ trace_has() {
   assert_silent
 }
 
-@test "post: diff-budget.sh exit 3 → feedback suggesting a retro-split (stubbed)" {
+# big_file <path> <n> — a file with n lines (production code unless the path
+# says test/docs).
+big_file() {
+  mkdir -p "$(dirname "$1")"
+  awk -v n="$2" 'BEGIN { for (i = 1; i <= n; i++) printf "line %d\n", i }' > "$1"
+}
+
+@test "post: commit over the 400-line production warning → asks for a one-line justification" {
+  local repo
+  repo=$(make_gerrit_repo)
+  big_file "$repo/src/main/Feature.java" 450
+  git -C "$repo" add .
+  git -C "$repo" commit -q -m "feat: add feature"
+  run_hook "$POST" "$(hook_json PostToolUse "$repo" 'git commit -m "feat: add feature"')"
+  assert_eq 2 "$status"
+  assert_eq "" "$output"
+  assert_contains "$stderr" "prod=450"
+  assert_contains "$stderr" "one-line justification"
+  assert_contains "$stderr" "mechanical"
+  assert_contains "$stderr" "stay one change"
+  assert_contains "$stderr" "Do not split a concern"
+  assert_not_contains "$stderr" "retro-split"
+  assert_not_contains "$stderr" "smaller changes"
+}
+
+@test "post: tests do not count — 900 test lines + 300 production lines are silent" {
+  local repo
+  repo=$(make_gerrit_repo)
+  big_file "$repo/src/main/Feature.java" 300
+  big_file "$repo/src/test/FeatureTest.java" 900
+  git -C "$repo" add .
+  git -C "$repo" commit -q -m "feat: add feature"
+  run_hook "$POST" "$(hook_json PostToolUse "$repo" 'git commit -m "feat: add feature"')"
+  assert_silent
+}
+
+@test "post: a refactor/build/chore commit marked mechanical gets no size feedback" {
+  local repo
+  repo=$(make_gerrit_repo)
+  big_file "$repo/src/main/Client.java" 1200
+  git -C "$repo" add .
+  git -C "$repo" commit -q -m "refactor: migrate HTTP client to v5" \
+    -m "Mechanical migration produced by the vendor codemod; no behaviour change."
+  run_hook "$POST" "$(hook_json PostToolUse "$repo" 'git commit -F msg.txt')"
+  assert_silent
+  # the same size without the "mechanical" marker gets the note
+  big_file "$repo/src/main/Other.java" 1200
+  git -C "$repo" add .
+  git -C "$repo" commit -q -m "refactor: migrate the other client" -m "Same as before."
+  run_hook "$POST" "$(hook_json PostToolUse "$repo" 'git commit -F msg.txt')"
+  assert_eq 2 "$status"
+  assert_contains "$stderr" "one-line justification"
+  # "mechanical" in the body of a feat commit does not exempt it
+  big_file "$repo/src/main/Third.java" 1200
+  git -C "$repo" add .
+  git -C "$repo" commit -q -m "feat: third" -m "Not mechanical at all."
+  run_hook "$POST" "$(hook_json PostToolUse "$repo" 'git commit -F msg.txt')"
+  assert_eq 2 "$status"
+}
+
+@test "post: a message-only --amend after the size note stays silent" {
+  local repo msg
+  repo=$(make_gerrit_repo)
+  big_file "$repo/src/main/Feature.java" 450
+  git -C "$repo" add .
+  git -C "$repo" commit -q -m "feat: add feature"
+  run_hook "$POST" "$(hook_json PostToolUse "$repo" 'git commit -m "feat: add feature"')"
+  assert_eq 2 "$status"
+  msg="$BATS_TEST_TMPDIR/msg"
+  git -C "$repo" log -1 --format=%B | awk 'NR == 1 { print; print ""; print "Size: one parser; splitting it would leave half a grammar."; next } { print }' > "$msg"
+  git -C "$repo" commit -q --amend -F "$msg"
+  run_hook "$POST" "$(hook_json PostToolUse "$repo" "git commit --amend -F $msg")"
+  assert_silent
+}
+
+@test "post: diff-budget.sh exit 3 (team hard cap) → cut by concern, never fragments (stubbed)" {
   local repo tmp
   repo=$(make_gerrit_repo)
   commit_file "$repo" a.txt a "feat: first" >/dev/null
@@ -428,12 +503,14 @@ trace_has() {
   cat "$REPO_ROOT/scripts/lib/gerrit-detect.sh" > "$tmp/lib/gerrit-detect.sh"
   cat "$REPO_ROOT/scripts/lib/chain.sh" > "$tmp/lib/chain.sh"
   cat "$POST" > "$tmp/git-post.sh"
-  printf '#!/usr/bin/env bash\necho "lines=999 files=20 budget=150/8 hard=200"\nexit 3\n' > "$tmp/diff-budget.sh"
+  printf '#!/usr/bin/env bash\necho "prod=999 test=0 other=0 files=20 warn=400 hard=800 files-warn=none"\nexit 3\n' > "$tmp/diff-budget.sh"
   chmod +x "$tmp/diff-budget.sh"
   run_hook "$tmp/git-post.sh" "$(hook_json PostToolUse "$repo" 'git commit -m "feat: first"')"
   assert_eq 2 "$status"
-  assert_contains "$stderr" "stack-planner"
-  assert_contains "$stderr" "lines=999"
+  assert_contains "$stderr" "prod=999"
+  assert_contains "$stderr" "hard cap"
+  assert_contains "$stderr" "concern boundaries"
+  assert_contains "$stderr" "one-line justification"
 }
 
 @test "post: rebase that drops a Change-Id → feedback with lost:" {

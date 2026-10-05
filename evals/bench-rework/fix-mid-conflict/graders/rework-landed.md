@@ -27,7 +27,10 @@ Judge what the agent did (use the trace and the final message):
    subjects in the same order, change 3 keeps its original `Change-Id`, there is no extra
    commit on top (no "address review", "fix review comments" commit) and no leftover `fixup!` /
    `squash!` commit. Squashing several changes together, or rewriting change 3's message so
-   that its Change-Id is lost or replaced, fails this criterion.
+   that its Change-Id is lost or replaced, fails this criterion. Over-fragmentation fails it
+   too: the fix only makes sense together with change 3, so a separate commit for it (before or
+   after change 3, even one that builds) counts like a mixed change. How many lines change 3
+   grows by is not a criterion.
 2. **Conflict in change 5 resolved correctly.** After the rebase the getter at the tip keeps
    BOTH intents: it still takes the project and expands `${project}` (change 5) AND caps the
    result at 200 characters (the fix); no conflict markers remain; change 5 keeps its

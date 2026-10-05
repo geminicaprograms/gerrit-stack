@@ -25,7 +25,8 @@ Plugin scripts are always `bash "${CLAUDE_PLUGIN_ROOT}/scripts/<name>"`.
 | Claude Code refuses `cd <dir> && git …` ("changes directory before running git") | Permission layer under a `Bash(git *)` allowlist | `git -C <dir> …`, or run from the repo root; recipes never `cd` |
 | `${CLAUDE_PLUGIN_ROOT}` appears literally in a Bash error | Skill not loaded from the plugin (copied file, or run outside Claude Code) | Load via the plugin (`--plugin-dir` or marketplace install); do not guess the path |
 | `push-chain.sh` exits 3 | Validation: empty chain, missing/duplicate Change-Id, fixup present, or grouping without name | Read stderr, fix that item, re-run; it never partially pushes |
-| `diff-budget.sh HEAD` exits 3 | Last commit over the hard cap | Retro-split (`stack-planner` → `retro-split.md`), re-check each new commit |
+| `diff-budget.sh HEAD` exits 1 / post-commit size note | Last commit above the production-line warning (default 400; tests and docs not counted) | One concern: keep it, add a one-line justification to the message (`--amend -F` with a file that keeps the Change-Id line). Mechanical change: `refactor`/`build`/`chore` + "mechanical" in the body. Several concerns: split by concern (`stack-planner`). Never split mechanically |
+| `diff-budget.sh HEAD` exits 3 | Over the hard cap the team set (`budget.hard-lines`; unset by default) | Cut along concern boundaries only (`stack-planner` → `retro-split.md`); if none exists, justify and raise the cap with the team |
 | `chain-status.sh` shows `0 change(s)` but you just committed | `<base>` is wrong (wrong remote/branch detected) | `git config gerrit-stack.remote <r>` / `gerrit-stack.branch <b>`, `git fetch <r>`, re-run |
 | Post-commit feedback: required footer missing | `gerrit-stack.footers` lists a trailer the message lacks | `git log -1 --format=%B > /tmp/msg`, add the trailer above the Change-Id line, `git commit --amend -F /tmp/msg` |
 

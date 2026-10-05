@@ -203,6 +203,11 @@ def build_s2(root):
         "mcp-only": dict(purity_pct=50, completeness_pct=66.7, builds_alone_pct=100, tests_travel_pct=50),
         "without": dict(purity_pct=0, completeness_pct=100, builds_alone_pct=100, tests_travel_pct=100),
     }
+    size = {
+        "with": dict(prod_lines_median=40, prod_lines_max=120, test_lines_total=90),
+        "mcp-only": dict(prod_lines_median=150, prod_lines_max=210, test_lines_total=60),
+        "without": dict(prod_lines_median=520, prod_lines_max=520, test_lines_total=0),
+    }
     shape = {"with": (6, 30, 100), "mcp-only": (2, 150, 50), "without": (1, 300, 0)}
     conv = {
         "with": {"commit_subjects_total": 3, "commit_subjects_conforming": 3, "commitlint_available": True,
@@ -215,7 +220,7 @@ def build_s2(root):
     for arm in ("with", "mcp-only", "without"):
         length, lines, within = shape[arm]
         b.write_run(name, arm, 1, _trace_lines(0.5, 20, 100_000, commits=length), None,
-                    _chain(length, lines, within, 100, **quality[arm]),
+                    _chain(length, lines, within, 100, **quality[arm], **size[arm]),
                     files={"conventions.json": conv[arm]}, record={"score": 1.0}, case_fields=case)
     b.write_run(name + "@nudged", "with", 1, _trace_lines(0.9, 40, 300_000, commits=6), None,
                 _chain(6, 35, 100, 100, purity_pct=83.3, completeness_pct=100, builds_alone_pct=100,
@@ -422,13 +427,13 @@ class ImplementUnprompted(Base):
         self.assertAlmostEqual(ov["without"]["metrics"]["cost_usd"]["mean"], 0.25)
         d = s["deltas"]["overall"]
         self.assertAlmostEqual(d["with-mcp-only"]["chain_length"], 2)
-        self.assertAlmostEqual(d["with-mcp-only"]["within_budget_pct"], 100)
+        self.assertNotIn("within_budget_pct", d["with-mcp-only"])     # size is not scored
         self.assertAlmostEqual(d["with-mcp-only"]["cost_usd"], 0.20)
         self.assertAlmostEqual(d["with-without"]["cost_usd"], 0.35)
         self.assertAlmostEqual(d["with-without"]["one_change_id_pct"], 100)
         self.assertIsNone(ov["with"]["metrics"]["builds_alone_pct"]["mean"])
         targets = {t["key"]: t for t in s["targets"]}
-        self.assertTrue(targets["within_budget_pct"]["pass"])
+        self.assertEqual(list(targets), ["one_change_id_pct", "violations", "cost_overhead_pct"])
         self.assertTrue(targets["one_change_id_pct"]["pass"])
         self.assertFalse(targets["violations"]["pass"])
         self.assertAlmostEqual(targets["cost_overhead_pct"]["value"], 50.0)
@@ -470,9 +475,15 @@ class ImplementUnprompted(Base):
             self.assertNotIn(heading, md)
         self.assertIn("Runs / errors — C with: 2 / 1, B mcp-only: 1 / 1, A without: 2 / 0", md)
         self.assertIn("| chain length | 3 / 3 | 1 / 1 | 1 / 1 | +2 | +2 |", md)
-        self.assertIn("| within budget | 100 % / 100 % | 0 % / 0 % | 0 % / 0 % | +100 % | +100 % |", md)
+        self.assertNotIn("within budget", md)
+        self.assertNotIn("budget compliance", md)
+        # S1 runs predate the production-line counts: the size rows show, empty
+        self.assertIn("| production lines / change (median, info) | – | – | – | – | – |", md)
+        self.assertIn("| production lines, largest change (info) | – | – | – | – | – |", md)
+        self.assertIn("| test lines, whole chain (info) | – | – | – | – | – |", md)
+        self.assertIn("Size is information, not a target.", md)
         self.assertIn("| cost | $0.600 / $0.600 | $0.400 / $0.400 | $0.250 / $0.250 | +$0.200 | +$0.350 |", md)
-        self.assertIn("| budget compliance | >= 90 % | 100.0 % | PASS |", md)
+        self.assertIn("| exactly one Change-Id | >= 100 % | 100.0 % | PASS |", md)
         self.assertIn("| cost overhead vs mcp-only | <= 30 % | 50.0 % | FAIL |", md)
         self.assertIn("Total: 7 run(s), 2 error(s).", md)
         self.assertIn("suite `bench-unprompted`, 7 run(s), 2 error(s), claude %s" % VERSION, md)
@@ -497,7 +508,8 @@ class ImplementUnprompted(Base):
         self.assertTrue(all(t["pass"] is None for t in rep["targets"]))
         md = collect.render_markdown(rep, [], generated="now")
         self.assertIn("No runs yet", md)
-        self.assertIn("| budget compliance | >= 90 % | – | – |", md)
+        self.assertIn("| exactly one Change-Id | >= 100 % | – | – |", md)
+        self.assertNotIn("budget", md)
         self.assertIn("## Reproduce", md)
 
 
@@ -533,6 +545,29 @@ class ImplementSplit(Base):
         self.assertAlmostEqual(sec["deltas"]["with-mcp-only"]["purity_pct"], 50)
         self.assertAlmostEqual(sec["deltas"]["with-mcp-only"]["completeness_pct"], 33.3)
         self.assertAlmostEqual(sec["deltas"]["with-without"]["tests_travel_pct"], -20)
+        # size is information: production / test lines per arm, no budget metric
+        self.assertEqual((m["prod_lines_median"]["mean"], m["prod_lines_max"]["mean"], m["test_lines_total"]["mean"]),
+                         (40, 120, 90))
+        self.assertNotIn("within_budget_pct", m)
+        a = [r for r in self.rows if r["suite"] == "bench-split" and r["case_key"] == "maintenance-mode"
+             and r["arm"] == "without"]
+        self.assertEqual([r["prod_lines_max"] for r in a], [520])
+
+    def test_size_rows_are_information_only(self):
+        rep = collect.build_report(self.rows)
+        md = collect.render_markdown(rep, self.sources, generated="now")
+        split = md.split("## Split quality")[1].split("## Conventions")[0]
+        self.assertIn("Production and test lines are shown for information only (no pass/fail).", split)
+        self.assertIn("| production lines / change (median, info) | 40 / 40 | 150 / 150 | 520 / 520 | -110 | -480 |",
+                      split)
+        self.assertIn("| production lines, largest change (info) | 120 / 120 | 210 / 210 | 520 / 520 | -90 | -400 |",
+                      split)
+        self.assertIn("| test lines, whole chain (info) | 90 / 90 | 60 / 60 | 0 / 0 | +30 | +90 |", split)
+        for suite in rep["suites"].values():
+            self.assertFalse(any("lines" in t["key"] or "budget" in t["key"] for t in suite["targets"]))
+        targets = md.split("### Targets (bench-split, arm C)")[1].split("###")[0]
+        self.assertNotIn("lines", targets)
+        self.assertNotIn("budget", targets)
 
     def test_conventions_block(self):
         rep = collect.build_report(self.rows)

@@ -3,7 +3,10 @@
 # gerrit-stack. Fires only after a successful Bash call. Per git invocation in
 # a Gerrit repo:
 #   commit       mark the session, check exactly one Change-Id on HEAD, run
-#                diff-budget.sh HEAD when present (exit 3 → retro-split hint),
+#                diff-budget.sh HEAD when present (exit 1/3 → ask for a
+#                one-line size justification in the message; silent for a
+#                refactor/build/chore commit whose body says "mechanical" and
+#                for a message-only --amend),
 #                check required footers (gerrit-stack.footers), lint the message
 #                with the repo's own commitlint config when active, refresh the
 #                Change-Id snapshot; fixup!/squash! commits: mark + snapshot only
@@ -48,6 +51,28 @@ feedback() {
 
 # ---------------------------------------------------------------- commit
 
+# budget_exempt <args> — 0 when the size note must stay silent for HEAD:
+# a declared mechanical change (type refactor/build/chore, "mechanical" in the
+# body) or an --amend that changed only the message (same tree as before).
+budget_exempt() {
+  local args="$1" subject body before after
+  subject=$(gs_subject_of HEAD)
+  if printf '%s\n' "$subject" | grep -Eq '^(refactor|build|chore)(\([^)]*\))?!?:'; then
+    body=$(git -C "$GS_TOPLEVEL" log -1 --format=%b HEAD 2>/dev/null) || body=''
+    if printf '%s\n' "$body" | grep -qi 'mechanical'; then
+      return 0
+    fi
+  fi
+  if gs_git_args_have "$args" --amend; then
+    before=$(git -C "$GS_TOPLEVEL" rev-parse -q --verify 'HEAD@{1}^{tree}' 2>/dev/null) || before=''
+    after=$(git -C "$GS_TOPLEVEL" rev-parse -q --verify 'HEAD^{tree}' 2>/dev/null) || after=''
+    if [ -n "$before" ] && [ "$before" = "$after" ]; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
 post_commit() {
   local args="$1" ids n out rc footers f body missing='' head_id
 
@@ -71,12 +96,13 @@ post_commit() {
     feedback "HEAD carries $n Change-Id trailers ($(printf '%s' "$ids" | tr '\n' ' ')); Gerrit rejects commits with more than one. Keep exactly one line: git commit --amend (edit the message)."
   fi
 
-  if [ -n "$script_dir" ] && [ -x "$budget_script" ]; then
+  if [ -n "$script_dir" ] && [ -x "$budget_script" ] && ! budget_exempt "$args"; then
     out=$(bash "$budget_script" HEAD 2>/dev/null)
     rc=$?
-    if [ "$rc" -eq 3 ]; then
-      feedback "this commit exceeds the hard diff budget ($out). Consider a retro-split into smaller changes: invoke the stack-planner skill on the diff of HEAD (git show --stat HEAD) before pushing."
-    fi
+    case "$rc" in
+      1) feedback "size note for HEAD ($out): above the reviewer-load warning. If this commit is one concern, keep it one change and add a one-line justification to its message (why it is this size); write the message to a file that keeps the existing Change-Id line, then git commit --amend -F <file>. Broad mechanical changes (library migration, rename, API move, formatter, codemod) stay one change: give them a refactor/build/chore type and say \"mechanical\" in the body. Do not split a concern into parts to get under the number; only a commit that mixes several concerns belongs in separate changes (stack-planner)." ;;
+      3) feedback "size note for HEAD ($out): above the hard cap this repository set (gerrit-stack.budget.hard-lines). Cut only along concern boundaries, each part building, tested and meaningful alone (stack-planner, retro-split.md) — never into fragments or \"part 1/2\". A single concern or a mechanical change with no such cut stays one change: add a one-line justification to its message (git commit --amend -F <file> keeping the Change-Id line) and raise the cap with the team." ;;
+    esac
   fi
 
   footers=$(gs_config footers "")

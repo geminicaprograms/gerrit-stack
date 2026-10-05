@@ -346,127 +346,223 @@ hooks_dir() {
 }
 
 # ================================================================ diff-budget
+# Production lines only count against the warning (default 400); tests, docs
+# and lock files are reported but never warned about. No hard cap and no file
+# warning unless budget.hard-lines / budget.files are set.
 
-@test "diff-budget: 10-line commit is within budget" {
+@test "diff-budget: production, test and docs/lock lines are counted separately" {
   local repo
   repo=$(make_gerrit_repo)
-  write_lines "$repo/ten.txt" 10
-  git -C "$repo" add ten.txt
-  git -C "$repo" commit -q -m "feat: ten"
+  write_lines "$repo/src/main/java/App.java" 10
+  write_lines "$repo/src/test/java/AppTest.java" 20
+  write_lines "$repo/lib/parse_test.go" 3
+  write_lines "$repo/web/app.spec.ts" 4
+  write_lines "$repo/tools/test_cli.py" 5
+  write_lines "$repo/docs/guide.html" 6
+  write_lines "$repo/Documentation/config.adoc" 2
+  write_lines "$repo/NOTES.rst" 1
+  write_lines "$repo/package-lock.json" 7
+  write_lines "$repo/go.sum" 2
+  write_lines "$repo/yarn.lock" 3
+  printf 'x\n' > "$repo/README.md"            # -1 +1
+  git -C "$repo" add .
+  git -C "$repo" commit -q -m "feat: mixed"
   cd "$repo"
   run --separate-stderr bash "$DIFF_BUDGET" HEAD
   assert_eq 0 "$status"
-  assert_eq "lines=10 files=1 budget=150/8 hard=200" "$output"
+  assert_eq "prod=10 test=32 other=23 files=12 warn=400 hard=none files-warn=none" "$output"
+  assert_eq "" "$stderr"
   # no argument means HEAD
   run --separate-stderr bash "$DIFF_BUDGET"
   assert_eq 0 "$status"
-  assert_eq "lines=10 files=1 budget=150/8 hard=200" "$output"
+  assert_eq "prod=10 test=32 other=23 files=12 warn=400 hard=none files-warn=none" "$output"
 }
 
-@test "diff-budget: 160 lines exits 1 (soft), 250 lines exits 3 (hard)" {
-  local repo big
+@test "diff-budget: warns (exit 1) only above 400 production lines; tests never count" {
+  local repo first
   repo=$(make_gerrit_repo)
-  write_lines "$repo/soft.txt" 160
-  git -C "$repo" add soft.txt
-  git -C "$repo" commit -q -m "feat: soft"
-  big=$(git -C "$repo" rev-parse HEAD)
-  cd "$repo"
-  run --separate-stderr bash "$DIFF_BUDGET" HEAD
-  assert_eq 1 "$status"
-  assert_eq "lines=160 files=1 budget=150/8 hard=200" "$output"
-
-  write_lines "$repo/hard.txt" 250
-  git -C "$repo" add hard.txt
-  git -C "$repo" commit -q -m "feat: hard"
-  run --separate-stderr bash "$DIFF_BUDGET" HEAD
-  assert_eq 3 "$status"
-  assert_eq "lines=250 files=1 budget=150/8 hard=200" "$output"
-  # an explicit older rev still works
-  run --separate-stderr bash "$DIFF_BUDGET" "$big"
-  assert_eq 1 "$status"
-}
-
-@test "diff-budget: too many files exits 1 even when lines are few" {
-  local repo i
-  repo=$(make_gerrit_repo)
-  for i in 1 2 3 4 5 6 7 8 9; do printf '%s\n' "$i" > "$repo/f$i.txt"; done
+  write_lines "$repo/src/main/Feature.java" 400
+  write_lines "$repo/src/test/FeatureTest.java" 900
   git -C "$repo" add .
-  git -C "$repo" commit -q -m "feat: nine files"
+  git -C "$repo" commit -q -m "feat: at the warning"
+  first=$(git -C "$repo" rev-parse HEAD)
   cd "$repo"
   run --separate-stderr bash "$DIFF_BUDGET" HEAD
+  assert_eq 0 "$status"
+  assert_eq "prod=400 test=900 other=0 files=2 warn=400 hard=none files-warn=none" "$output"
+
+  write_lines "$repo/src/main/More.java" 401
+  git -C "$repo" add .
+  git -C "$repo" commit -q -m "feat: over the warning"
+  run --separate-stderr bash "$DIFF_BUDGET" HEAD
   assert_eq 1 "$status"
-  assert_eq "lines=9 files=9 budget=150/8 hard=200" "$output"
+  assert_eq "prod=401 test=0 other=0 files=1 warn=400 hard=none files-warn=none" "$output"
+  [[ $stderr == *"one-line justification"* ]] || fail "$stderr"
+  [[ $stderr == *mechanical* ]] || fail "$stderr"
+  [[ $stderr == *"Do not split mechanically"* ]] || fail "$stderr"
+  # an explicit older rev still works
+  run --separate-stderr bash "$DIFF_BUDGET" "$first"
+  assert_eq 0 "$status"
 }
 
-@test "diff-budget: custom budgets from config" {
+@test "diff-budget: no hard cap unless budget.hard-lines is set (exit 3 then)" {
   local repo
   repo=$(make_gerrit_repo)
-  write_lines "$repo/ten.txt" 10
-  git -C "$repo" add ten.txt
-  git -C "$repo" commit -q -m "feat: ten"
-  git -C "$repo" config gerrit-stack.budget.lines 5
-  git -C "$repo" config gerrit-stack.budget.files 2
-  git -C "$repo" config gerrit-stack.budget.hard-lines 20
+  write_lines "$repo/src/Big.java" 2000
+  git -C "$repo" add .
+  git -C "$repo" commit -q -m "build: vendor parser"
   cd "$repo"
   run --separate-stderr bash "$DIFF_BUDGET" HEAD
   assert_eq 1 "$status"
-  assert_eq "lines=10 files=1 budget=5/2 hard=20" "$output"
-  git -C "$repo" config gerrit-stack.budget.hard-lines 8
+  assert_eq "prod=2000 test=0 other=0 files=1 warn=400 hard=none files-warn=none" "$output"
+  git config gerrit-stack.budget.hard-lines 1000
   run --separate-stderr bash "$DIFF_BUDGET" HEAD
   assert_eq 3 "$status"
-  assert_eq "lines=10 files=1 budget=5/2 hard=8" "$output"
+  assert_eq "prod=2000 test=0 other=0 files=1 warn=400 hard=1000 files-warn=none" "$output"
+  [[ $stderr == *"hard cap"* ]] || fail "$stderr"
+  # a non-numeric value is ignored (back to none), with a note
+  git config gerrit-stack.budget.hard-lines lots
+  run --separate-stderr bash "$DIFF_BUDGET" HEAD
+  assert_eq 1 "$status"
+  assert_eq "prod=2000 test=0 other=0 files=1 warn=400 hard=none files-warn=none" "$output"
+  [[ $stderr == *non-numeric* ]] || fail "$stderr"
+}
+
+@test "diff-budget: no file warning unless budget.files is set; custom line warning" {
+  local repo i
+  repo=$(make_gerrit_repo)
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do printf '%s\n' "$i" > "$repo/f$i.sh"; done
+  git -C "$repo" add .
+  git -C "$repo" commit -q -m "chore: twelve files"
+  cd "$repo"
+  run --separate-stderr bash "$DIFF_BUDGET" HEAD
+  assert_eq 0 "$status"
+  assert_eq "prod=12 test=0 other=0 files=12 warn=400 hard=none files-warn=none" "$output"
+  git config gerrit-stack.budget.files 8
+  run --separate-stderr bash "$DIFF_BUDGET" HEAD
+  assert_eq 1 "$status"
+  assert_eq "prod=12 test=0 other=0 files=12 warn=400 hard=none files-warn=8" "$output"
+  [[ $stderr == *"12 files"* ]] || fail "$stderr"
+  git config --unset gerrit-stack.budget.files
+  git config gerrit-stack.budget.lines 5
+  run --separate-stderr bash "$DIFF_BUDGET" HEAD
+  assert_eq 1 "$status"
+  assert_eq "prod=12 test=0 other=0 files=12 warn=5 hard=none files-warn=none" "$output"
+}
+
+@test "diff-budget: team file values apply; old values in a clone are kept" {
+  local repo
+  repo=$(make_gerrit_repo)
+  team_config "$repo" budget.lines 150
+  team_config "$repo" budget.hard-lines 200
+  git -C "$repo" add .gerrit-stack
+  git -C "$repo" commit -q -m "chore: team budget"
+  write_lines "$repo/src/Mid.java" 180
+  git -C "$repo" add .
+  git -C "$repo" commit -q -m "feat: mid"
+  cd "$repo"
+  run --separate-stderr bash "$DIFF_BUDGET" HEAD
+  assert_eq 1 "$status"
+  assert_eq "prod=180 test=0 other=0 files=1 warn=150 hard=200 files-warn=none" "$output"
+  git config gerrit-stack.budget.hard-lines 170
+  run --separate-stderr bash "$DIFF_BUDGET" HEAD
+  assert_eq 3 "$status"
+  assert_eq "prod=180 test=0 other=0 files=1 warn=150 hard=170 files-warn=none" "$output"
+}
+
+@test "diff-budget: a rename is classified by its new path" {
+  local repo
+  repo=$(make_gerrit_repo)
+  write_lines "$repo/lib/Helper.java" 50
+  git -C "$repo" add .
+  git -C "$repo" commit -q -m "feat: helper"
+  mkdir -p "$repo/tests"
+  git -C "$repo" mv lib/Helper.java tests/Helper.java
+  printf 'extra\n' >> "$repo/tests/Helper.java"
+  git -C "$repo" add .
+  git -C "$repo" commit -q -m "refactor: move helper to tests"
+  cd "$repo"
+  run --separate-stderr bash "$DIFF_BUDGET" HEAD
+  assert_eq 0 "$status"
+  assert_eq "prod=0 test=1 other=0 files=1 warn=400 hard=none files-warn=none" "$output"
 }
 
 @test "diff-budget: --worktree counts staged, unstaged and untracked changes" {
   local repo
   repo=$(make_gerrit_repo)
-  write_lines "$repo/ten.txt" 10
-  git -C "$repo" add ten.txt
+  write_lines "$repo/ten.sh" 10
+  git -C "$repo" add ten.sh
   git -C "$repo" commit -q -m "feat: ten"
   cd "$repo"
   run --separate-stderr bash "$DIFF_BUDGET" --worktree
   assert_eq 0 "$status"
-  assert_eq "lines=0 files=0 budget=150/8 hard=200" "$output"
-  printf 'more\nmore\n' >> ten.txt            # unstaged: +2
-  write_lines new.txt 4                        # untracked: +4
-  git add new.txt                              # staged
-  printf 'x\n' > README.md                     # unstaged: -1 +1
+  assert_eq "prod=0 test=0 other=0 files=0 warn=400 hard=none files-warn=none" "$output"
+  printf 'more\nmore\n' >> ten.sh              # unstaged: +2 prod
+  write_lines new.sh 4                         # staged new file: +4 prod
+  git add new.sh
+  write_lines tests/new_test.sh 3              # untracked: +3 test
+  printf 'x\n' > README.md                     # unstaged: -1 +1 docs
   run --separate-stderr bash "$DIFF_BUDGET" --worktree
   assert_eq 0 "$status"
-  assert_eq "lines=8 files=3 budget=150/8 hard=200" "$output"
+  assert_eq "prod=6 test=3 other=2 files=4 warn=400 hard=none files-warn=none" "$output"
+}
+
+@test "diff-budget: --cached / --staged count only staged changes" {
+  local repo
+  repo=$(make_gerrit_repo)
+  printf 'a\nb\nc\n' > "$repo/staged.sh"; printf 'x\n' > "$repo/unstaged.sh"
+  git -C "$repo" add staged.sh
+  cd "$repo"
+  run --separate-stderr bash "$DIFF_BUDGET" --cached
+  assert_eq 0 "$status"
+  assert_eq "prod=3 test=0 other=0 files=1 warn=400 hard=none files-warn=none" "$output"
+  run --separate-stderr bash "$DIFF_BUDGET" --staged
+  assert_eq 0 "$status"
+  assert_eq "prod=3 test=0 other=0 files=1 warn=400 hard=none files-warn=none" "$output"
 }
 
 @test "diff-budget: --estimate sums existing files and counts missing paths as 40" {
   local repo
   repo=$(make_gerrit_repo)
-  write_lines "$repo/src/a.txt" 12
-  write_lines "$repo/src/b.txt" 30
+  write_lines "$repo/src/a.sh" 12
+  write_lines "$repo/src/b.sh" 30
+  write_lines "$repo/src/test/b_test.sh" 9
   cd "$repo"
-  run --separate-stderr bash "$DIFF_BUDGET" --estimate src/a.txt src/b.txt
+  run --separate-stderr bash "$DIFF_BUDGET" --estimate src/a.sh src/b.sh
   assert_eq 0 "$status"
-  assert_eq "lines=42 files=2 budget=150/8 hard=200" "$output"
-  run --separate-stderr bash "$DIFF_BUDGET" --estimate src/a.txt src/new.txt
+  assert_eq "prod=42 test=0 other=0 files=2 warn=400 hard=none files-warn=none" "$output"
+  run --separate-stderr bash "$DIFF_BUDGET" --estimate src/a.sh src/New.java
   assert_eq 0 "$status"
-  assert_eq "lines=52 files=2 budget=150/8 hard=200" "$output"
-  [[ $stderr == *"src/new.txt"* ]] || fail "missing path not noted: $stderr"
+  assert_eq "prod=52 test=0 other=0 files=2 warn=400 hard=none files-warn=none" "$output"
+  [[ $stderr == *"src/New.java"* ]] || fail "missing path not noted: $stderr"
   [[ $stderr == *40* ]] || fail "40-line note missing: $stderr"
+  # a directory counts every file under it, classified per file
+  run --separate-stderr bash "$DIFF_BUDGET" --estimate src
+  assert_eq 0 "$status"
+  assert_eq "prod=42 test=9 other=0 files=3 warn=400 hard=none files-warn=none" "$output"
 }
 
 @test "diff-budget: works in a plain (non-Gerrit) repo and --json is valid" {
   local repo
   repo=$(make_plain_repo)
-  write_lines "$repo/ten.txt" 10
-  git -C "$repo" add ten.txt
+  write_lines "$repo/ten.sh" 10
+  write_lines "$repo/ten_test.sh" 5
+  git -C "$repo" add .
   git -C "$repo" commit -q -m "feat: ten"
   cd "$repo"
   run --separate-stderr bash "$DIFF_BUDGET" HEAD
   assert_eq 0 "$status"
-  assert_eq "lines=10 files=1 budget=150/8 hard=200" "$output"
+  assert_eq "prod=10 test=5 other=0 files=2 warn=400 hard=none files-warn=none" "$output"
   run --separate-stderr bash "$DIFF_BUDGET" --json HEAD
   assert_eq 0 "$status"
   printf '%s\n' "$output" | jq -e '
-    .lines == 10 and .files == 1 and .budget.lines == 150 and .budget.files == 8
-    and .budget.hard_lines == 200 and .status == "ok"' >/dev/null || fail "$output"
+    .prod == 10 and .test == 5 and .other == 0 and .total == 15 and .files == 2
+    and .budget.lines == 400 and .budget.hard_lines == null and .budget.files == null
+    and .status == "ok"' >/dev/null || fail "$output"
+  git config gerrit-stack.budget.hard-lines 8
+  run --separate-stderr bash "$DIFF_BUDGET" --json HEAD
+  assert_eq 3 "$status"
+  printf '%s\n' "$output" | jq -e '.budget.hard_lines == 8 and .status == "over-hard"' >/dev/null || fail "$output"
   run --separate-stderr bash "$DIFF_BUDGET" no-such-rev
   assert_eq 2 "$status"
 }
@@ -575,15 +671,4 @@ hooks_dir() {
   run --separate-stderr bash "$INSTALL_HOOK" --from "$FIXTURE_HOOK"
   assert_eq 1 "$status"
   [[ $stderr == *git* ]] || fail "$stderr"
-}
-
-@test "diff-budget --cached counts only staged changes" {
-  local repo
-  repo=$(make_gerrit_repo)
-  printf 'a\nb\nc\n' > "$repo/staged.txt"; printf 'x\n' > "$repo/unstaged.txt"
-  git -C "$repo" add staged.txt
-  cd "$repo"
-  run bash "$REPO_ROOT/scripts/diff-budget.sh" --cached
-  [ "$status" -eq 0 ]
-  [[ "$output" == lines=3\ files=1* ]] || { echo "$output"; false; }
 }

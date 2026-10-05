@@ -24,6 +24,7 @@ kind: implement
 #   ssh      `rate limited` from the SSH command: PingCommand(Test).java
 concerns:
   - name: setting
+    joins: first-consumer   # a setting may ship with the first change that uses it
     paths:
       - '/DemoPluginConfig(Test|IT)?\.java$'
   - name: limiter

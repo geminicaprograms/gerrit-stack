@@ -31,6 +31,7 @@ concerns:
     paths:
       - '/Health(Check)?(Result|Status|State|Outcome)?(Test|IT)?\.java$'
   - name: setting
+    joins: first-consumer   # a setting may ship with the first change that uses it
     paths:
       - '/DemoPluginConfig(Test|IT)?\.java$'
   - name: config-check

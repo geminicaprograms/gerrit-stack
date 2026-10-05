@@ -4,7 +4,7 @@ How to cut work into changes that each build, are tested, and make sense alone. 
 
 ## Patterns
 
-### Vertical slice (the default)
+### Vertical slice
 
 One step = one user-visible behaviour across whatever layers it needs. A reviewer verifies it end to end.
 
@@ -68,15 +68,9 @@ Split a step when any of these holds:
 
 Size alone is **not** a split signal. Over the production-line warning (default 400) with one concern: keep it, justify it in one line.
 
-## Merge signals (anti-fragmentation)
+## Merge signals
 
-Merge a step into its neighbour when:
-
-- It adds a class, function or endpoint with no caller in the same step (tests aside).
-- It is scaffolding only the next step explains (an interface with no implementation, a config key nothing reads).
-- It is "part 1" of something, or half of one file's change.
-- It cannot be verified on its own ("add import", "add constant"), or is under ~10 lines with no standalone meaning.
-- A reviewer would ask "why is this separate?" or the reviewer note says "used in the next change".
+Merge a step into its neighbour when it cannot be verified on its own ("add import", "add constant"), is "part 1" of something, or is half of one file's change. Whether a helper class or a setting gets its own step is a judgement call (see the skill's "Granularity is a judgement call"), not a merge signal.
 
 ## Worked example: config-driven greeting
 
@@ -93,4 +87,4 @@ Concerns by behaviour: "greeting is served over REST" · "greeting is served ove
 
 Chain summary: 2 changes, ~125 production / ~65 test lines total, largest change ~90 production lines, depth 2, target Gerrit relation chain on origin/master.
 
-Why not one change: it bundles two behaviours; a reviewer who objects to the SSH argument format would block the REST work too. Why not three (config, REST, SSH): the config step would be a class with no caller, approved on faith (merge signal).
+Why not one change: it bundles two behaviours; a reviewer who objects to the SSH argument format would block the REST work too. Three steps (config, REST, SSH) would be equally valid; two were chosen here because the config class is small and only REST needs it at first. That is a judgement call, stated so the user can ask for three.

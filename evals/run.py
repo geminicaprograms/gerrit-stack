@@ -2976,6 +2976,27 @@ def dry_run_pipeline(pipe: Pipeline, arm: str, n: int, opts: argparse.Namespace,
               f"comments/votes by non-{REVIEWER} accounts, admin drafts (/changes/<n>/drafts) -> review-metrics.json")
 
 
+LIMIT_RETRIES = 2  # re-runs of one run after an account session-limit (HTTP 429) error
+_RESET_RE = re.compile(r"resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)", re.I)
+
+
+def session_limit_wait(error: Optional[str], now: Optional[_dt.datetime] = None) -> Optional[int]:
+    """Seconds to sleep before retrying a run that failed on the account's session limit
+    ("api error 429: You've hit your session limit · resets 8:30pm (...)"): until the stated local
+    reset time plus 5 minutes (next day if already past). None when the error is something else."""
+    if not error or "429" not in error or "session limit" not in error.lower():
+        return None
+    now = now or _dt.datetime.now()
+    m = _RESET_RE.search(error)
+    if not m:
+        return 30 * 60
+    hour = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "pm" else 0)
+    reset = now.replace(hour=hour, minute=int(m.group(2) or 0), second=0, microsecond=0)
+    if reset <= now:
+        reset += _dt.timedelta(days=1)
+    return int((reset - now).total_seconds()) + 5 * 60
+
+
 def run_arm(arm: str, pipelines: list[Pipeline], opts: argparse.Namespace, out_dir: str, judge_factory,
             per_case: dict, budget: dict) -> bool:
     """Run every (pipeline, n) of one arm, serially or on a thread pool (-j). Returns True when the
@@ -2992,9 +3013,16 @@ def run_arm(arm: str, pipelines: list[Pipeline], opts: argparse.Namespace, out_d
         return False
 
     def execute(pipe: Pipeline, n: int) -> dict:
-        rec = run_pipeline(pipe, arm, n, opts, out_dir, judge_factory)
-        with budget["lock"]:
-            budget["spent"] += run_cost(rec)
+        for attempt in range(1, LIMIT_RETRIES + 2):
+            rec = run_pipeline(pipe, arm, n, opts, out_dir, judge_factory)
+            with budget["lock"]:
+                budget["spent"] += run_cost(rec)
+            wait = session_limit_wait(rec.get("error"))
+            if wait is None or attempt > LIMIT_RETRIES:
+                return rec
+            log(f"{pipe.key}/{arm}/{n}: account session limit; waiting {wait // 60} min for the reset, "
+                f"then re-running from scratch (attempt {attempt + 1})")
+            time.sleep(wait)
         return rec
 
     def status_line(rec: dict) -> str:

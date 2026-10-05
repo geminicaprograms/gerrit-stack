@@ -1,6 +1,6 @@
 ---
 name: stack-planner
-description: Split a feature, refactor, or bugfix into an ordered chain of single-concern changes, each a vertical slice that builds, is tested and makes sense on its own — never fragments that only the next change explains. Size is a reviewer-load warning on production lines (tests and docs not counted), not a quota; broad mechanical changes (library migration, rename, formatter, codemod) stay one change. Use before writing code for any multi-file change (anything likely to touch more than one file), when asked to "plan", "break this down", "split this", "stack this", "make it reviewable", "plan the chain", or when a commit or dirty worktree mixes several concerns and must be split into reviewable commits (retro-split). VCS-agnostic (Gerrit relation chains, GitHub stacked PRs).
+description: Split a feature, refactor, or bugfix into an ordered chain of single-concern changes, each building and tested on its own; how fine to cut is the author's judgement, stated in the plan. Size is a reviewer-load warning on production lines (tests and docs not counted), not a quota; broad mechanical changes (library migration, rename, formatter, codemod) stay one change. Use before writing code for any multi-file change (anything likely to touch more than one file), when asked to "plan", "break this down", "split this", "stack this", "make it reviewable", "plan the chain", or when a commit or dirty worktree mixes several concerns and must be split into reviewable commits (retro-split). VCS-agnostic (Gerrit relation chains, GitHub stacked PRs).
 ---
 
 # Stack Planner
@@ -38,8 +38,8 @@ Vocabulary is VCS-agnostic: a *step* in the plan becomes a *change* (one commit)
 Run scripts from inside the target repository. The literal `${CLAUDE_PLUGIN_ROOT}` is substituted when this skill is loaded from the plugin; if it ever reaches Bash unexpanded, the skill was not plugin-loaded — say so and stop.
 
 1. **Map.** List every file you expect to create or modify and tag each with its layer. Find callers with `git grep <symbol>`; list neighbours with `git ls-files <dir>`. Output: a file → layer table (it feeds the plan's *files* column).
-2. **Find the concerns.** Each concern is one behaviour or one mechanical transformation a reviewer can state in one sentence ("prefix is read from config with a default"; "all callers move to the v5 client"). Pure infrastructure (build wiring, a new dependency, a test harness) counts as a concern only when it builds and is verifiable alone. Patterns: `references/split-patterns.md`.
-3. **Make every concern a vertical slice.** It builds, carries its tests, and is *used* — by a caller, an endpoint, a command or a test that exercises the behaviour. Bundle layers that are meaningless apart (an endpoint and its only caller). Apply the [anti-fragmentation rule](#anti-fragmentation-rule).
+2. **Find the concerns.** Each concern is one behaviour or one mechanical transformation a reviewer can state in one sentence ("prefix is read from config with a default"; "all callers move to the v5 client"). How fine to cut is a judgement call, not a rule of this skill: follow the codebase's and the team's habits (look at recent history with `git log --stat`), and state your reasoning in the plan so the user can push back. Patterns to choose from: `references/split-patterns.md`.
+3. **Make every step stand on its own.** It builds and carries its tests. Avoid both extremes: a step that mixes unrelated work, and a step that means nothing alone (an import, a constant, "part 1"). Everything in between is the author's call.
 4. **Order by dependency.** infra → data/migration → API → caller. Tests travel with the code they test. A mechanical change or refactor the feature needs comes first, behaviour on top. Each step must build and pass with only the earlier steps present.
 5. **Estimate each step.** `bash "${CLAUDE_PLUGIN_ROOT}/scripts/diff-budget.sh" --estimate <path>...` prints `prod=<n> test=<t> other=<o> files=<m> warn=<L> hard=<H|none> files-warn=<F|none>` and exits 0 (within), 1 (over the warning), 3 (over a hard cap the team set). The figures are a proxy: for a small edit in a large file estimate the hunk; for a new file estimate its size. Record production and test lines per step and say which figures you adjusted.
 6. **Check against the warning, not toward it.** A step over the warning gets a one-line justification in its reviewer note (it becomes the commit message line). Split it only if it actually holds two concerns. Chain length follows the concerns: never merge two concerns to shorten the chain; land the bottom changes as they are approved.
@@ -69,19 +69,12 @@ A change belongs in the chain when a reviewer can say "yes" or "no" to it withou
 - **one concern**: statable in one sentence without "and";
 - **builds and passes alone** with only earlier steps present;
 - **tested**: the tests for what it adds travel with it;
-- **used**: the new code has a caller, an entry point or a test that exercises the behaviour — it leads somewhere on its own;
+- **tested or used**: the new code has its own tests, a caller or an entry point;
 - **revertable** without breaking its neighbours.
 
-### Anti-fragmentation rule
+### Granularity is a judgement call
 
-Over-fragmentation counts against a chain exactly like a mixed change. Never plan:
-
-- a class, function or endpoint with **no caller** in the same change (other than its tests);
-- **scaffolding that only the next change explains** (an interface with no implementation, a config key nothing reads, an empty module);
-- **"part 1 / part 2"** of one concern, or "first half / second half" of a file;
-- a step under ~10 lines with no standalone meaning (an import, a constant) — merge it into the step that uses it.
-
-Test: if the reviewer note needs "will be used in the next change", merge the step into that change.
+This skill does not prescribe how fine to cut. Splitting by component (a helper class with its tests, then each surface that uses it) and by user-visible behaviour (each behaviour with the code it needs) are both fine; so is keeping a config setting in its own step or folding it into its first user. Pick what fits the codebase and the team, say why in the plan, and let the user change it. Only the two extremes are wrong: a step mixing unrelated work, and a step that means nothing on its own.
 
 ## Size: a reviewer-load warning, not a quota
 
@@ -118,10 +111,9 @@ When a commit or the worktree mixes several concerns (not merely because it is l
 | Anti-pattern | Fix |
 |---|---|
 | "Step N: implement the feature" | Slice by concern / user-visible behaviour |
-| "Part 1 / part 2", a class with no caller, scaffolding for the next step | Merge into the step that uses it ([anti-fragmentation](#anti-fragmentation-rule)) |
+| "Part 1 / part 2", a step that means nothing alone (an import, a constant) | Merge it into its neighbour |
 | Splitting one concern to get under ~400 lines | Keep it one change; justify the size in one line |
 | Splitting a migration/rename/formatter run into arbitrary batches | One mechanical change; by module only when each part builds and means something alone |
-| Horizontal slices (all endpoints, then all UI) | Vertical slices; bundle a layer pair only when meaningless apart |
 | Final "add tests" step | Tests travel with the code in every step |
 | Behaviour change inside a mechanical or refactor step | Mechanical/refactor first, behaviour on top |
 | Concerns merged to keep the chain short | One concern per change; length is not a defect |

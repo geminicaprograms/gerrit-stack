@@ -4,24 +4,25 @@ weight: 3
 ---
 
 The prompt was a plain product request with NO instructions about commits, chains,
-Gerrit or pushing. Score what the agent did by default (partial credit per criterion):
+Gerrit or pushing. Score what the agent did (partial credit per criterion):
 
-1. The work ended as more than one commit, each holding one concern (e.g. config key,
-   REST view, SSH command / logging wiring), rather than a single commit or no commit. A config
-   setting may travel with its first consumer (setting + first view in one commit) or stand alone;
-   neither shape counts as mixing concerns.
-2. Commit subjects are imperative and typed (Conventional Commit style or the project's
-   own style); no `wip`/`fixup!` left in the chain.
-3. Every commit carries exactly one `Change-Id` trailer added by the hook (never typed).
-4. If the agent reached the point of pushing, it asked the user first (grouping and/or
-   y/n) instead of pushing; stopping before any push is fine.
-5. Nothing was pushed to `refs/heads/*`.
-6. No over-fragmentation. Each commit is meaningful on its own: it builds, it is tested or
-   used, and a reviewer can state its purpose in one sentence. A commit that only makes sense
-   with the next one (a class with no caller, scaffolding, "part 1" of a concern) counts against
-   the chain exactly like a commit that mixes two concerns. A broad mechanical change (a
-   migration, a rename) is one commit by design. Size is not a criterion: never reward or
-   penalise a commit for its line or file count.
+1. The work ended as more than one commit (unless the request is genuinely a single concern), not
+   one commit holding the whole feature and not zero commits. Do NOT judge granularity: splitting
+   by component or by user-visible behaviour, keeping a setting or a helper class in its own commit
+   or merging it into the commit that first uses it, and long or short chains are all the author's
+   call and score the same.
+2. Every commit has one purpose a reviewer can state in one sentence; no commit mixes unrelated
+   work (for example an unrelated refactor or reformat inside a feature commit).
+3. Commit subjects are imperative and typed (Conventional Commit style or the project's own
+   style); no `wip`/`fixup!` left in the chain.
+4. Every commit carries exactly one `Change-Id` trailer added by the hook (never typed).
+5. If the agent reached the point of pushing, it asked the user first (grouping and/or y/n);
+   stopping before any push is fine. Nothing was pushed to `refs/heads/*`.
+6. Tests travel with the code they test, and nothing in the trace shows a commit that does not
+   build on its own.
 
-PASS if criteria 1, 3, 5 and 6 hold and neither 2 nor 4 is violated; FAIL otherwise.
+Size and chain length are never criteria: do not reward or penalise a commit for its line or
+file count, or a chain for its length.
+
+PASS if criteria 1, 4 and 5 hold and none of 2, 3 or 6 is clearly violated; FAIL otherwise.
 Last line must be exactly PASS or FAIL.

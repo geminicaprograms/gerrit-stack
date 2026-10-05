@@ -2200,3 +2200,21 @@ class TracePathTest(unittest.TestCase):
     def test_relative_out_dir_becomes_absolute(self):
         src = open(RUN_PY, encoding="utf-8").read()
         self.assertIn("out_dir = os.path.abspath(out_dir)", src)
+
+
+class SessionLimitWaitTest(unittest.TestCase):
+    def test_waits_until_reset_plus_five_minutes(self):
+        import datetime as dt
+        now = dt.datetime(2026, 10, 5, 17, 0, 0)
+        err = "api error 429: You've hit your session limit · resets 8:30pm (Europe/Warsaw)"
+        self.assertEqual(run.session_limit_wait(err, now), (3 * 3600 + 30 * 60) + 5 * 60)
+        self.assertEqual(run.session_limit_wait("api error 429: You've hit your session limit · resets 12:50pm", now),
+                         int((dt.datetime(2026, 10, 6, 12, 50) - now).total_seconds()) + 300)
+
+    def test_other_errors_do_not_wait(self):
+        self.assertIsNone(run.session_limit_wait(None))
+        self.assertIsNone(run.session_limit_wait("timeout after 900s"))
+        self.assertIsNone(run.session_limit_wait("api error 529: overloaded"))
+
+    def test_unparseable_reset_waits_thirty_minutes(self):
+        self.assertEqual(run.session_limit_wait("api error 429: session limit reached"), 1800)

@@ -79,7 +79,15 @@ cat > .gerrit-stack <<'GS'
 	comment-style = conventional
 GS
 cat > commitlint.config.mjs <<'CL'
-export default { extends: ['@commitlint/config-conventional'] };
+// Conventional Commits, with git's usual 72-column subject and body wrap
+// (config-conventional alone allows 100). Footers keep 100: a trailer cannot wrap.
+export default {
+  extends: ['@commitlint/config-conventional'],
+  rules: {
+    'header-max-length': [2, 'always', 72],
+    'body-max-line-length': [2, 'always', 72],
+  },
+};
 CL
 
 # 5. initial commit (its subject must itself pass the commitlint config),

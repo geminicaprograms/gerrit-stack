@@ -383,7 +383,17 @@ if [ "$clone_ok" -eq 1 ]; then
     # config, review comments use Conventional Comments. Nothing is installed here; without a `commitlint`
     # command the plugin only mentions that the config is not being checked.
     printf '[gerrit-stack]\n\tcommit-lint = auto\n\tcomment-style = conventional\n' > "$clone_dir/.gerrit-stack"
-    printf "export default { extends: ['@commitlint/config-conventional'] };\n" > "$clone_dir/commitlint.config.mjs"
+    cat > "$clone_dir/commitlint.config.mjs" <<'CL'
+// Conventional Commits, with git's usual 72-column subject and body wrap
+// (config-conventional alone allows 100). Footers keep 100: a trailer cannot wrap.
+export default {
+  extends: ['@commitlint/config-conventional'],
+  rules: {
+    'header-max-length': [2, 'always', 72],
+    'body-max-line-length': [2, 'always', 72],
+  },
+};
+CL
     if [ -n "$(git -C "$clone_dir" status --porcelain)" ]; then
       if git -C "$clone_dir" add -A \
         && git -C "$clone_dir" -c user.name=Admin -c user.email=admin@example.com commit -q -m "$seed_subject"; then

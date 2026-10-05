@@ -44,7 +44,7 @@ Exit codes: `0` overall score ≥ threshold · `1` below threshold · `2` partia
 | `with` (default) | C | gerrit-mcp + gerrit-stack via `--plugin-dir` | the plugin under test plus the official Gerrit MCP |
 
 Arm C is "gerrit-mcp + gerrit-stack + team files". The team files (`.gerrit-stack` and
-`commitlint.config.mjs`) are in **every** arm's fixture, committed in the base commit: they are the
+`commitlint.config.mjs`: Conventional Commits with a 72-column subject and body wrap) are in **every** arm's fixture, committed in the base commit: they are the
 repo's property. Arms A and B simply have no tooling that honours them, so any difference in
 conforming commit subjects or labelled comments is the plugin's doing, not the fixture's.
 

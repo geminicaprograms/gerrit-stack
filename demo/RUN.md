@@ -27,7 +27,7 @@ bash demo/work/demo-plugin/tools/quick-check.sh   # < 1 s, exit 0
       "yes, don't ask again" to the permission prompts for `git …` and `bash tools/quick-check.sh`, so the show
       runs without prompts (settings land in `demo/work/demo-plugin/.claude/settings.local.json`; a reset wipes them).
 - [ ] The demo project carries the team files from the seed commit: `git -C demo/work/demo-plugin show --stat HEAD`
-      lists `.gerrit-stack` (`commit-lint = auto`, `comment-style = conventional`) and `commitlint.config.mjs`;
+      lists `.gerrit-stack` (`commit-lint = auto`, `comment-style = conventional`) and `commitlint.config.mjs` (Conventional Commits, subject and body at 72 columns);
       `commitlint --version` works in tab A (installed globally: `npm i -g @commitlint/cli @commitlint/config-conventional`).
       The session-start line names both team conventions. Without commitlint the commit highlight below is silent.
 - [ ] Font size 18+, `Ctrl-L` in both tabs, notifications off, `demo/recording/` open in Finder as the fallback.

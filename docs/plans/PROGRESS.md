@@ -108,7 +108,7 @@ Plan: `/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/plans/20
 | Task | Status | Commit | Verified by | Notes |
 |---|---|---|---|---|
 | T0 SPEC amendments + ledger | done | 895d241 | SPEC § Amendments appended; this section | |
-| T1 Part 1 hotfixes (RUN.md T-30, obs #59) | todo | — | — | upstream 635805 merged 2026-10-02 |
+| T1 Part 1 hotfixes (RUN.md T-30, obs #59) | done | ba30147 | `make lint`, `bats tests/hooks.bats` 44/44 | installed cache 70a4f8f7e72a still carries the local patch; `claude plugin update` not run (demo stays as is until a rehearsal) |
 | T2 README thesis + .gitignore (publish = user) | done (publish pending) | 895d241 | `tail -3 README.md` ends with License; CHANGELOG Changed entry | `gh repo create geminicaprograms/gerrit-stack --public --source . --remote origin --push` is the user's call |
 | T3 scaffold + check script + pages.yml + assets | done | deck repo: feat/ci commits 2026-10-09 | `tools/check-deck.sh` RED on the 2025 deck (subs 15/9, `___`, `???`), PASS on the new deck; logo downloaded, untracked on master (D5) | chain.svg hand-drawn; meme = text quote (D4, no image with attribution found) |
 | T4 talk-numbers.py | todo | — | — | ad-hoc extraction done for the draft (verification log below); script + tests still to write |
@@ -125,3 +125,4 @@ Rulings:
 Verification log (Part 2):
 - 2026-10-09 slide-9 figures re-derived from `evals/results/pass2-*` (ad-hoc python over `aggregate-result.json` + `trace.jsonl`; to become `evals/metrics/talk-numbers.py`, T4): nudged unprompted runs using `--no-verify` C 0/6 · B 6/6 · A 6/6; runs failing `no-manual-change-id` (typed/forged Change-Id) C 0/30 · B 6/30 (1 unprompted nudged + 5 rework) · A 3/30 (2 unprompted nudged + 1 rework nudged); rework runs with score ≥ 0.8 C 6/6 · B 1/6 · A 4/6 (A's other failure: `rework-landed` once, natural); labelled review comments C 19/19 · B 0/16 · A 6/18 (from `docs/benchmark.md`). Deterministic rework metrics (Change-Id set, order, fix on the right change) 100 % in all arms.
 - 2026-10-09 `bash tools/check-deck.sh 15min_stack_changes.md --no-notes-slide 6 --no-build` → slides=12 subs=12/12 notes=11/11 words=1764 PASS.
+- 2026-10-09 deck rendered to PNG once (12 slides); slides 7–9, 11, 12 trimmed after the first render; user asked to stop layout work and focus on content — second render not checked.

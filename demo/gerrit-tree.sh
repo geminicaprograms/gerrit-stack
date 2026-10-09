@@ -39,7 +39,7 @@ fi
 # 1. plugins/demo-plugin symlink
 link=$tree/plugins/demo-plugin
 if [ -L "$link" ]; then
-  current=$(cd "$link" 2>/dev/null && pwd -P || true)
+  current=$(cd "$link" 2>/dev/null && pwd -P) || current=""
   if [ "$current" = "$plugin_dir" ]; then
     echo "symlink  : $link -> $plugin_dir (unchanged)"
   else

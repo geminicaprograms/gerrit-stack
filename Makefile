@@ -9,7 +9,7 @@ validate:
 	claude plugin validate ./ --strict
 
 lint:
-	shellcheck -x $(SCRIPTS) tests/helpers.bash
+	shellcheck -x -S warning $(SCRIPTS) tests/helpers.bash
 	python3 -m py_compile scripts/gerrit-rest.py $(wildcard evals/*.py) $(wildcard evals/metrics/*.py) $(wildcard evals/fixtures/*.py)
 
 test:

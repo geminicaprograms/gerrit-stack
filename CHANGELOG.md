@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- README opens with the revised thesis (the agent already splits; gerrit-stack
+  keeps the chain intact under pressure, in rework and in review) and quotes
+  the pass 2 benchmark; the https-rewrite troubleshooting row points at the
+  merged upstream fix (change 635805). `demo/recording/` is ignored.
+
 ### Added
 
 - Team config file: a committed `.gerrit-stack` at the repo top level

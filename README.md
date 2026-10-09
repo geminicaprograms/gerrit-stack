@@ -1,20 +1,33 @@
 # gerrit-stack
 
-A Claude Code plugin that makes Gerrit relation chains — not GitHub-style pull
-requests — the coding agent's default output shape. Every stacking skill on
-the market today (gh-stack, the Graphite skill, GitButler's `but agent
-setup`, thoughtbot's atomic-commits hook, Cursor's `/split-to-prs`, PostHog's
-stacking-prs, Codex's change-size guidance) is PR-shaped: branches and pull
-requests. Gerrit works differently — one `Change-Id` per concern, chained by
-parent/child commits, uploaded with a single `git push … refs/for/<branch>` —
-and the official `gerrit@gerrit-mcp` plugin only covers the review side
-(`get_related_changes`, `set_topic`, `post_review_comment`, a
-`gerrit-workflow` skill) with no planning, splitting, or push step. No
-existing skill makes relation chains the agent's default; gerrit-stack fills
-that gap. It plans a chain of small, single-concern commits, gets each
-`Change-Id` from the real `commit-msg` hook (never hand-written), prints —
-never runs — the push command so a human confirms it, and iterates on review
-by amending the right commit and re-pushing the whole chain.
+A Claude Code plugin that keeps the coding agent's **Gerrit relation chain
+intact**. Current agents already split work into chains of single-concern
+changes when a repo asks for it. What breaks without guards is the chain
+*around* the code: under a plausible nudge ("the hook is slow, pass
+`--no-verify`") the agent bypasses the `commit-msg` hook and types or forges
+a `Change-Id`; a rework of a middle change loses identity; review comments
+ignore the team's format. gerrit-stack sits on top of the official
+[`gerrit@gerrit-mcp`](https://gerrit.googlesource.com/gerrit-mcp-server)
+plugin (review-side MCP tools and the `gerrit-workflow` skill) and adds the
+author side: a planning skill that cuts a feature into a chain of
+single-concern commits, hooks that deny `--no-verify`, hand-written
+`Change-Id` trailers, `--amend -m` and direct pushes to `refs/heads/*`, a
+push step that prints — never runs — `git push … HEAD:refs/for/<branch>` so a
+human confirms it, a rework loop that amends the right commit, re-verifies
+every `Change-Id` after the rebase and re-pushes the whole chain, and a
+review skill that honours the team's committed conventions (commitlint,
+Conventional Comments).
+
+Every other agent stacking skill (gh-stack, the Graphite skill, GitButler's
+`but agent setup`, thoughtbot's atomic-commits hook, Cursor's
+`/split-to-prs`, PostHog's stacking-prs, Codex's change-size guidance) is
+PR-shaped: branches and pull requests. None speaks `Change-Id`, and none
+guards the chain once the agent is under pressure. The benchmark in
+[`docs/benchmark.md`](docs/benchmark.md) (90 sandboxed runs, three arms)
+measures exactly that: with the plugin, 0 of 6 nudged runs used
+`--no-verify` (6 of 6 without it), 0 of 30 runs typed a `Change-Id` (6 of 30
+with the MCP plugin alone), and 19 of 19 drafted review comments carried a
+Conventional Comments label (0 of 16 with the MCP plugin alone).
 
 ## Requirements
 
@@ -278,6 +291,18 @@ first sandboxed pass; see `evals/README.md` for suites, metrics and how to repro
 - **MCP not configured** — `gerrit@gerrit-mcp`'s `SessionStart` hook keeps
   nagging until it is; run `/gerrit:setup`.
 
+- **Gerrit MCP tools fail with `curl: (35) … tlsv1 alert protocol version`
+  against a plain-HTTP Gerrit (e.g. the local demo)** — `gerrit@gerrit-mcp`
+  older than [change 635805](https://gerrit-review.googlesource.com/c/gerrit-mcp-server/+/635805)
+  (merged 2026-10-02) rewrote `http://` to `https://` for every host. Run
+  `claude plugin update gerrit@gerrit-mcp`; on an older cache apply
+  `demo/patch-gerrit-mcp.sh`, or let the skills use the REST fallback
+  (`gerrit-rest.py`, which honours `http://`).
+- **MCP tools are named `mcp__plugin_gerrit_gerrit__<tool>`** — plugin-scoped
+  naming in Claude Code (`mcp__plugin_<plugin>_<server>__<tool>`); grant or
+  allow them with that prefix, e.g.
+  `--allowedTools mcp__plugin_gerrit_gerrit__get_related_changes`.
+
 ## Design principles
 
 - Scripts never run `git commit`/`git push` themselves — the agent runs raw
@@ -308,6 +333,3 @@ first sandboxed pass; see `evals/README.md` for suites, metrics and how to repro
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).
-
-| Gerrit MCP tools fail with `curl: (35) … tlsv1 alert protocol version` against a plain-HTTP Gerrit (e.g. the local demo) | The official server rewrites `http://` to `https://` for every host | Apply `demo/patch-gerrit-mcp.sh` (upstream fix: [change 635805](https://gerrit-review.googlesource.com/c/gerrit-mcp-server/+/635805)), or let the skills use the REST fallback (`gerrit-rest.py`, which honours `http://`) |
-| MCP tools are named `mcp__plugin_gerrit_gerrit__<tool>` | Plugin-scoped naming in Claude Code (`mcp__plugin_<plugin>_<server>__<tool>`) | Grant/allow them with that prefix, e.g. `--allowedTools mcp__plugin_gerrit_gerrit__get_related_changes` |

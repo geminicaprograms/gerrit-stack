@@ -11,6 +11,8 @@ __pycache__/
 .venv/
 # eval and benchmark run artifacts
 evals/results/
+# demo fallback recordings (large, made at rehearsal)
+demo/recording/
 # editors / os
 .DS_Store
 .idea/

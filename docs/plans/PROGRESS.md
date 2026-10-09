@@ -98,3 +98,28 @@ Decisions (user, 2026-09-30):
 - 2026-09-30 unprompted `maintenance-mode` (6-concern feature), one run per arm: **C** 6-change chain (169/167/226/329/93/191), judge PASS, chain-depth rule applied (push #1–5, #6 later), 60 turns (cap), $3.02; **B** one 951-line commit on a branch, 43 turns, $1.94; **A** one 1253-line commit, 45 turns, $2.14. Observations: only 1/6 changes within the 150-line budget (two over the 200 cap with justifications); the with-arm hit `max_turns: 60`. Rendered into `docs/benchmark-unprompted.md`.
 - 2026-09-30 upstream 635805 PS3 (mdformat fix): Zuul Verified +1.
 - 2026-09-30 `maintenance-mode` run 2 (kept workspaces): C 5-change chain (183/207/92/177/164), 61 turns, $2.46; B 1269 lines, 45 turns, $2.44; A 1060 lines, 36 turns, $1.90. All three arms pushed to the demo Gerrit via `evals/push-arms.sh`: changes 5–9 (with), 10 (mcp-only), 11 (without), hashtags `bench-maintenance-mode-<arm>` + `run-20260930-100850`. Runner now has `--push-to` for future runs.
+
+## Part 2 — talk (GUS 2026)
+
+Plan: `/Users/jcentkowski/workspace/open/code_review_like_a_pro/.claude/plans/2026-10-09-part2-talk-execution-plan.md` (SPEC § Part 2 + Amendments 2026-10-09). Deck repo: `~/workspace/open/code_review_like_a_pro`, deck `15min_stack_changes.md`, checks `tools/check-deck.sh`.
+
+**Resume here (2026-10-09):** executing T0–T7 inline (deck draft first; demo undecided — user focuses on slides). D2: README/.gitignore refreshed, publishing left to the user. D4: meme if found with attribution. D5: logo allowed; master stays un-themed, `events/gus-2026` adds the footer.
+
+| Task | Status | Commit | Verified by | Notes |
+|---|---|---|---|---|
+| T0 SPEC amendments + ledger | in-progress | — | — | |
+| T1 Part 1 hotfixes (RUN.md T-30, obs #59) | todo | — | — | upstream 635805 merged 2026-10-02 |
+| T2 README thesis + .gitignore (publish = user) | todo | — | — | |
+| T3 scaffold + check script + pages.yml + assets | in-progress | — | — | |
+| T4 talk-numbers.py | todo | — | — | ad-hoc extraction done for the draft, see verification log |
+| T5 research slides + docs/sources.md | todo | — | — | citation agent running |
+| T6 slides 6, 9–12 | todo | — | — | |
+| T7 notes (v1) | todo | — | — | plain English for a non-native speaker |
+| T8 demo reconcile + rehearsal #1 | todo | — | — | D1 open |
+| T9 recordings + rehearsals | todo | — | — | |
+| T10 freeze, event branch, offline kit | todo | — | — | |
+
+Rulings:
+- 2026-10-09 T0: ledger lives here (not in a `.superpowers/sdd` workspace) and deck work happens on `master` of the deck repo, as the reviewed plan states — cost if wrong: a branch can be cut later from the commits.
+
+Verification log (Part 2):

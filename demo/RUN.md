@@ -9,13 +9,16 @@ Paths below are relative to the repo root (`/Users/jcentkowski/workspace/open/ge
 ## T-30 — checklist (every rehearsal, every show)
 
 ```
-make demo-up demo-seed demo-warm` and `bash demo/patch-gerrit-mcp.sh` (gerrit-mcp must keep http:// for localhost)        # Gerrit 3.14 on :8080 (init ~90 s the first time), admin + rena,
+make demo-up demo-seed demo-warm        # Gerrit 3.14 on :8080 (init ~90 s the first time), admin + rena,
                                         # project demo-plugin with the skeleton, ~/.netrc, gerrit-mcp config,
                                         # in-tree Bazel build warmed (2nd run < 20 s)
 bash demo/work/demo-plugin/tools/quick-check.sh   # < 1 s, exit 0
 ```
 
 - [ ] `docker compose -f demo/docker-compose.yml ps` → `healthy`.
+- [ ] gerrit-mcp keeps `http://` for localhost: upstream change 635805 is merged (2026-10-02); on a plugin cache older
+      than that, `bash demo/patch-gerrit-mcp.sh` (the installed cache `70a4f8f7e72a` is patched; `claude plugin update
+      gerrit@gerrit-mcp` replaces it with a fixed release, re-check with `bash demo/patch-gerrit-mcp.sh check`).
 - [ ] Browser tab 1: `http://localhost:8080/q/status:open+project:demo-plugin` (empty list; you are `admin`
       — if the UI shows you logged out, open `http://localhost:8080/login/?user_name=admin`).
       Tab 2 stays free for change 2 (opened after the push).

@@ -57,7 +57,7 @@ git rebase --continue
 | Command | Decision | Why |
 |---|---|---|
 | `git commit --amend --no-edit` | allowed | Message untouched, Change-Id kept |
-| `git commit --amend -F <file>` | **ask** | Allowed only when the file still contains the current `Change-Id` line; the user confirms |
+| `git commit --amend -F <file>` | **allowed / ask** | Silent when `<file>` contains HEAD's `Change-Id:` line verbatim (same change, new patchset); otherwise the guard asks the user to confirm, because a changed or missing line opens a NEW change (`scripts/git-guard.sh`) |
 | `git commit --amend -m '…'` | **deny** | Replaces the entire message; the Change-Id is gone, the hook stamps a fresh one, Gerrit opens a **new** change and the old one is orphaned |
 | `git commit --amend` (editor) | avoid | No interactive editor in an agent session; use `-F` |
 
@@ -173,7 +173,7 @@ back, copied from Gerrit, never invented:
 #    (fallback: python3 "${CLAUDE_PLUGIN_ROOT}/scripts/gerrit-rest.py" detail <old number>)
 git log -1 --format=%B > /tmp/msg
 git interpret-trailers --in-place --if-exists replace --trailer Change-Id=<old id copied from Gerrit> /tmp/msg
-git commit --amend -F /tmp/msg           # guard asks: confirm the file keeps the (old) Change-Id
+git commit --amend -F /tmp/msg           # silent when /tmp/msg keeps the old Change-Id line; the guard asks otherwise
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh" --verify-ids
 ```
 

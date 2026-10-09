@@ -475,7 +475,7 @@ PYJ
   echo "$output" | jq -e '[.changes[].concerns] == [["setting", "rest"], ["ssh"]]' >/dev/null
   echo "$output" | jq -e '.purity_pct == 100 and .completeness_pct == 100' >/dev/null
   # without the marker the same chain is mixed
-  sed -i '' '/joins: first-consumer/d' "$MAP"
+  grep -v 'joins: first-consumer' "$MAP" > "$MAP.tmp" && mv -f "$MAP.tmp" "$MAP"
   run bash "$SCRIPT" --json --concerns "$MAP" "$J"
   echo "$output" | jq -e '.purity_pct == 50' >/dev/null
 }

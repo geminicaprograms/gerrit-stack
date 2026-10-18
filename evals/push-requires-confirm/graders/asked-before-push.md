@@ -1,4 +1,5 @@
 ---
+arm: "!upstream"
 type: llm
 weight: 2
 ---

@@ -50,8 +50,15 @@ import re
 import statistics
 import sys
 
-ARMS = ["with", "mcp-only", "without"]
-ARM_SHORT = {"with": "C with", "mcp-only": "B mcp-only", "without": "A without"}
+ARMS = ["upstream", "with", "mcp-only", "without"]
+ARM_SHORT = {"upstream": "D upstream", "with": "C with", "mcp-only": "B mcp-only", "without": "A without"}
+# (minuend, subtrahend, column): the C pairs always render; the D pairs only when arm D has runs.
+DELTA_PAIRS = [("with", "mcp-only", "Δ C−B"), ("with", "without", "Δ C−A")]
+UPSTREAM_DELTA_PAIRS = [("upstream", "with", "Δ D−C"), ("upstream", "mcp-only", "Δ D−B")]
+
+
+def _delta_pairs(arms):
+    return DELTA_PAIRS + (UPSTREAM_DELTA_PAIRS if "upstream" in arms else [])
 KINDS = ["implement", "rework", "review"]
 SUITE_ORDER = ["bench-unprompted", "bench-split", "bench-rework", "bench-review"]
 SUITE_LABEL = {
@@ -628,6 +635,7 @@ def load_results_dir(results_dir):
         "dir": results_dir,
         "aggregate": bool(aggregate),
         "claudeVersion": agg.get("claudeVersion"),
+        "upstreamPlugin": _dict(agg.get("upstreamPlugin")),
         "overallScore": _dict(agg.get("aggregates")).get("overallScore"),
         "costUsd": agg.get("costUsd"),
         "suites": _suite_order({r["suite"] for r in rows}),
@@ -723,7 +731,7 @@ def _block_deltas(block, spec):
             mb = block[b]["metrics"][key].get(field)
             out[key] = (ma - mb) if (ma is not None and mb is not None) else None
         return out
-    return {"with-mcp-only": one("with", "mcp-only"), "with-without": one("with", "without")}
+    return {"%s-%s" % (a, b): one(a, b) for a, b, _ in _delta_pairs(block)}
 
 
 def _counts(rows, include_errors):
@@ -764,7 +772,7 @@ def _classic_deltas(block):
             mb = block[b]["metrics"][k]["mean"]
             out[k] = (ma - mb) if (ma is not None and mb is not None) else None
         return out
-    return {"with-mcp-only": one("with", "mcp-only"), "with-without": one("with", "without")}
+    return {"%s-%s" % (a, b): one(a, b) for a, b, _ in _delta_pairs(block)}
 
 
 def evaluate_targets(overall):
@@ -915,6 +923,10 @@ def _capability_verdict(arm, n, used_mcp, used_stack, denied, unflagged):
         text = "gerrit MCP used in %d/%d runs" % (used_mcp, n)
         if not used_mcp:
             text += " (capability unused)"
+    elif arm == "upstream":
+        text = "ported skills or guard used in %d/%d runs, gerrit MCP in %d/%d" % (used_stack, n, used_mcp, n)
+        if not used_stack:
+            text += " (capability unused)"
     else:
         text = "gerrit-stack (skill or hook) used in %d/%d runs, gerrit MCP in %d/%d" % (used_stack, n, used_mcp, n)
         if not used_stack:
@@ -939,7 +951,8 @@ def aggregate_isolation(rows):
         caps = [r["capability"] for r in subset if r["capability"] is not None]
         totals = {k: sum((c.get(k) or 0.0) for c in caps) for k in CAPABILITY_KEYS}
         used_mcp = sum(1 for c in caps if (c.get("mcp_calls") or 0) > 0)
-        used_stack = sum(1 for c in caps if (c.get("skill_calls") or 0) > 0 or (c.get("hook_lines") or 0) > 0)
+        used_stack = sum(1 for c in caps if (c.get("skill_calls") or 0) > 0 or (c.get("hook_lines") or 0) > 0
+                         or (c.get("guard_denies") or 0) > 0)
         out[arm] = {
             "runs": len(subset),
             "errors": sum(1 for r in subset if r["errored"]),
@@ -1008,9 +1021,10 @@ KIND_UNIT = {"bool": "%", "ratio": "%", "pct": "%", "usd": "USD", "s": "s", "cou
 
 
 def _metric_table(block, arms, deltas):
+    pairs = _delta_pairs(arms)
     lines = ["| metric | " + " | ".join(ARM_SHORT.get(a, a) + " (mean / median)" for a in arms)
-             + " | Δ C−B | Δ C−A |",
-             "|---|" + "---|" * len(arms) + "---|---|"]
+             + " | " + " | ".join(p[2] for p in pairs) + " |",
+             "|---|" + "---|" * len(arms) + "---|" * len(pairs)]
     for key, label, unit, _lower in ALL_METRICS:
         cells = []
         any_value = False
@@ -1023,9 +1037,8 @@ def _metric_table(block, arms, deltas):
                 cells.append("–")
         if not any_value and key not in SIZE_INFO_KEYS:
             continue
-        d1 = fmt_delta((deltas.get("with-mcp-only") or {}).get(key), unit)
-        d2 = fmt_delta((deltas.get("with-without") or {}).get(key), unit)
-        lines.append("| %s | %s | %s | %s |" % (label, " | ".join(cells), d1, d2))
+        ds = [fmt_delta((deltas.get("%s-%s" % (a, b)) or {}).get(key), unit) for a, b, _ in pairs]
+        lines.append("| %s | %s | %s |" % (label, " | ".join(cells), " | ".join(ds)))
     return lines
 
 
@@ -1051,8 +1064,10 @@ def _kind_table(section, spec, first_col="metric"):
     """Metric x arm table with C−B / C−A deltas; rows no arm has are omitted."""
     block, deltas = section["arms"], section["deltas"]
     arms = _arm_order(section["counts"])
-    lines = ["| %s | " % first_col + " | ".join(ARM_SHORT.get(a, a) for a in arms) + " | Δ C−B | Δ C−A |",
-             "|---|" + "---|" * len(arms) + "---|---|"]
+    pairs = _delta_pairs(arms)
+    lines = ["| %s | " % first_col + " | ".join(ARM_SHORT.get(a, a) for a in arms)
+             + " | " + " | ".join(p[2] for p in pairs) + " |",
+             "|---|" + "---|" * len(arms) + "---|" * len(pairs)]
     for item in spec:
         key, label, kind = item[0], item[1], item[2]
         cells, any_value = [], False
@@ -1066,9 +1081,8 @@ def _kind_table(section, spec, first_col="metric"):
         if not any_value and key not in SIZE_INFO_KEYS:
             continue
         unit = KIND_UNIT[kind]
-        d1 = fmt_delta((deltas.get("with-mcp-only") or {}).get(key), unit)
-        d2 = fmt_delta((deltas.get("with-without") or {}).get(key), unit)
-        lines.append("| %s | %s | %s | %s |" % (label, " | ".join(cells), d1, d2))
+        ds = [fmt_delta((deltas.get("%s-%s" % (a, b)) or {}).get(key), unit) for a, b, _ in pairs]
+        lines.append("| %s | %s | %s |" % (label, " | ".join(cells), " | ".join(ds)))
     return lines
 
 
@@ -1078,17 +1092,27 @@ def _runs_line(counts):
         "%s: %d / %d" % (ARM_SHORT.get(a, a), counts[a]["runs"], counts[a]["errors"]) for a in _arm_order(counts))
 
 
-def _arms_section():
+def _arms_section(arms=()):
+    upstream = [
+        "- **D — `upstream`**: the official plugin loaded from a `gerrit-mcp-server` checkout that carries the "
+        "gerrit-stack skills and guard ported upstream (`gerrit-workflow` chain rules, `stack-planner`, "
+        "`gerrit-review`, a PreToolUse git guard), without `gerrit-stack`. Its fixtures add an `AGENTS.md` "
+        "stating the team conventions, because the ported skills read conventions from the repository's docs "
+        "rather than from `.gerrit-stack`. **D vs C asks whether the port keeps what C measured.** "
+        "D ran later than A–C (see Sources for the Claude Code version and the checkout).",
+    ] if "upstream" in arms else []
     return [
         "## Arms",
         "",
-        "Same prompts, same fixture repos, same pinned model, three arms in a scrubbed sandbox "
-        "(environment allowlist, account connectors off, startup check against a per-arm allowlist):",
+        ("Same prompts, same fixture repos, same pinned model, %s arms in a scrubbed sandbox "
+         "(environment allowlist, account connectors off, startup check against a per-arm allowlist):")
+        % ("four" if upstream else "three"),
         "",
         "- **A — `without`**: vanilla Claude Code, no plugins (the floor).",
         "- **B — `mcp-only`**: vanilla + the official `gerrit@gerrit-mcp` plugin (its MCP server and `gerrit-workflow` skill).",
         "- **C — `with`**: B + `gerrit-stack` (this plugin) honouring the team files. **C vs B is the honest claim**; "
         "C vs A shows the floor.",
+    ] + upstream + [
         "",
         "Outcome metrics come from `scripts/chain-metrics.sh --json` over each run's workspace; process/cost metrics from the "
         "stream-json trace (`type: result` → cost, turns, duration) and the hook trace (`GERRIT_STACK_TRACE`: `ask`/`deny` per verb). "
@@ -1315,7 +1339,7 @@ def render_markdown(report, sources, generated=None):
         lines += _footer()
         return "\n".join(lines)
 
-    lines += _arms_section()
+    lines += _arms_section(report.get("arms") or ())
     lines += _reading_section(report)
     lines += ["## Sources", ""]
     for meta in sources:
@@ -1326,6 +1350,9 @@ def render_markdown(report, sources, generated=None):
             extra.append("%d run(s), %d error(s)" % (meta["runs"], meta.get("errors") or 0))
         if meta.get("claudeVersion"):
             extra.append("claude %s" % meta["claudeVersion"])
+        if (meta.get("upstreamPlugin") or {}).get("head"):
+            up = meta["upstreamPlugin"]
+            extra.append("upstream checkout `%s` (%s)" % (up["head"], up.get("ahead") or "?"))
         if meta.get("overallScore") is not None:
             extra.append("overall score %s" % fmt(_num(meta["overallScore"])))
         if meta.get("costUsd") is not None:

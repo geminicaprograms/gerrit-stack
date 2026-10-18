@@ -158,4 +158,31 @@ if [ "$distinct" -ne "$expected_changes" ]; then
   exit 1
 fi
 
+# arm `upstream` only (the runner sets EVAL_ARM for fixtures): its skills read
+# team conventions from the repo's docs instead of .gerrit-stack. The seed push
+# rebases the chain onto the Gerrit project's master and drops this fixture's
+# base commit, so AGENTS.md stays untracked and git-excluded: it is in the
+# session's worktree without entering any commit or the runner's leftover check.
+if [ "${EVAL_ARM:-}" = upstream ]; then
+  cat > AGENTS.md <<'AG'
+# Contributor conventions
+
+## Commit messages
+
+Conventional Commits, checked by commitlint with `commitlint.config.mjs`
+(72-column subject and body). Check a message offline before pushing:
+`git log -1 --format=%B <sha> | commitlint`.
+
+## Review comments
+
+Label every review comment with Conventional Comments
+(https://conventionalcomments.org): `<label> [(decorations)]: <subject>`,
+for example `issue (blocking): …` or `suggestion (non-blocking): …`.
+
+## Verify
+
+Every change must pass `bash tools/quick-check.sh` on its own.
+AG
+  printf 'AGENTS.md\n' >> "$(git rev-parse --git-path info)/exclude"
+fi
 echo "fixture.sh: workspace ready at $workspace (remote ../remote.git, base origin/master $(git rev-parse --short "$base"), $count seeded changes)"

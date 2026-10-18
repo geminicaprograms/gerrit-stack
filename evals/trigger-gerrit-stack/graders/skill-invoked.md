@@ -1,4 +1,5 @@
 ---
+arm: "!upstream"
 type: tool_used
 tool: Skill
 input_match: '[:"]gerrit-stack"'

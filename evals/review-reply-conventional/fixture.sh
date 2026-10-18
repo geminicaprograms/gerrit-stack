@@ -22,4 +22,10 @@ while [ ! -s .stub-port ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 port=$(cat .stub-port)
 git config gerrit-stack.host "http://127.0.0.1:$port"
 printf '.stub-port\n.stub-pid\n.stub.log\nreview-posts.jsonl\n' >> "$(git rev-parse --git-path info)/exclude"
+# Arm `upstream` reaches the stub through its MCP server: the runner passes this
+# file, next to the workspace, as GERRIT_CONFIG_PATH (loopback keeps http://).
+if [ "${EVAL_ARM:-}" = upstream ]; then
+  printf '{"default_gerrit_base_url":"http://127.0.0.1:%s/","gerrit_hosts":[{"name":"eval stub","external_url":"http://127.0.0.1:%s/","authentication":{"type":"http_basic"}}]}\n' \
+    "$port" "$port" > ../.gerrit-mcp-config.json
+fi
 echo "stub on http://127.0.0.1:$port (pid $(cat .stub-pid))"

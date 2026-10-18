@@ -787,6 +787,32 @@ class Reviewer(Base):
 
 
 # ------------------------------------------------------ everything ----
+class UpstreamArm(unittest.TestCase):
+    """Arm D renders next to A-C; reports without it keep their two delta columns."""
+
+    def test_delta_columns_follow_the_arms(self):
+        self.assertEqual([p[2] for p in collect._delta_pairs(["with", "mcp-only", "without"])], ["Δ C−B", "Δ C−A"])
+        self.assertEqual([p[2] for p in collect._delta_pairs({"upstream": 1, "with": 1})],
+                         ["Δ C−B", "Δ C−A", "Δ D−C", "Δ D−B"])
+        self.assertEqual(collect._arm_order({"without", "upstream", "with"}), ["upstream", "with", "without"])
+
+    def test_block_deltas_and_table(self):
+        spec = [("cost_usd", "cost", "usd")]
+        block = {a: {"runs": 1, "metrics": {"cost_usd": {"mean": m, "median": m}}}
+                 for a, m in (("upstream", 1.5), ("with", 1.0), ("mcp-only", 0.5))}
+        d = collect._block_deltas(block, spec)
+        self.assertAlmostEqual(d["upstream-with"]["cost_usd"], 0.5)
+        self.assertAlmostEqual(d["upstream-mcp-only"]["cost_usd"], 1.0)
+        self.assertEqual(d["with-without"], {})
+        lines = collect._kind_table({"arms": block, "deltas": d, "counts": block}, spec)
+        self.assertTrue(lines[0].endswith("| Δ C−B | Δ C−A | Δ D−C | Δ D−B |"), lines[0])
+        self.assertEqual(lines[0].count("|"), lines[1].count("|"))
+        self.assertTrue(lines[2].endswith("| +$0.500 | – | +$0.500 | +$1.000 |"), lines[2])
+
+    def test_capability_verdict(self):
+        self.assertEqual(collect._capability_verdict("upstream", 3, 1, 2, 0, 0),
+                         "ported skills or guard used in 2/3 runs, gerrit MCP in 1/3")
+
 class AllSuites(Base):
     def setUp(self):
         super().setUp()

@@ -10,6 +10,8 @@ evals/README.md), and three arms for the benchmark:
   with      --plugin-dir <repo> (gerrit-stack) + gerrit-mcp enabled
   mcp-only  no --plugin-dir, gerrit-mcp enabled
   without   no --plugin-dir, gerrit-mcp disabled for the duration
+  upstream  --plugin-dir <gerrit-mcp-server checkout> only: the official plugin with the
+            gerrit-stack skills and guard ported into it (no gerrit-stack plugin)
 
 Case kinds (case.yaml `kind:`), one session per run in every kind:
 
@@ -22,7 +24,7 @@ Case kinds (case.yaml `kind:`), one session per run in every kind:
 rework and review need --push-to. The runner never submits and never votes except rena's -1.
 
 Sandbox: every `claude` child gets an allowlisted environment (PATH HOME USER SHELL TMPDIR LANG
-LC_* TERM, EVAL_*, GERRIT_HOST, GERRIT_STACK_TRACE, ENABLE_CLAUDEAI_MCP_SERVERS=false), stdin
+LC_* TERM, EVAL_*, GERRIT_HOST, GERRIT_STACK_TRACE, GERRIT_CONFIG_PATH, ENABLE_CLAUDEAI_MCP_SERVERS=false), stdin
 /dev/null and a pinned --model; the session's init record is checked against the arm's allowlist
 (isolation.json) and a failed check fails the run.
 
@@ -63,7 +65,8 @@ from typing import Any, Callable, Optional
 DEFAULT_ALLOWED_TOOLS = ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "Skill", "AskUserQuestion"]
 DEFAULT_MAX_TURNS = 30
 DEFAULT_TIMEOUT = 600
-ARMS = ("with", "without", "mcp-only")
+ARMS = ("with", "without", "mcp-only", "upstream")
+MCP_ARMS = ("with", "mcp-only", "upstream")  # arms whose session loads a gerrit-mcp plugin
 GRADER_TYPES = ("regex", "tool_used", "tool_order", "file_exists", "llm", "baseline")
 KINDS = ("implement", "rework", "review")
 VARIANTS = ("natural", "nudged")
@@ -77,9 +80,15 @@ DEFAULT_MODEL = "claude-opus-5-5"  # pinned: results must not depend on the acco
 DEFAULT_VERIFY_CMD = "bash tools/quick-check.sh"
 CHAIN_METRICS_TIMEOUT = 1800  # --verify-cmd builds every commit of the chain
 ENV_PASS = ("PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "TERM")  # plus LC_*
-ENV_RUNNER = ("EVAL_PLUGIN_ROOT", "GERRIT_HOST", "GERRIT_STACK_TRACE")  # plus the case's EVAL_*
-ARM_PLUGINS = {"with": ("gerrit", "gerrit-stack"), "mcp-only": ("gerrit",), "without": ()}
-ARM_MCP_SERVERS = {"with": ("plugin:gerrit:gerrit",), "mcp-only": ("plugin:gerrit:gerrit",), "without": ()}
+ENV_RUNNER = ("EVAL_PLUGIN_ROOT", "GERRIT_HOST", "GERRIT_STACK_TRACE", "GERRIT_CONFIG_PATH")  # plus the case's EVAL_*
+ARM_PLUGINS = {"with": ("gerrit", "gerrit-stack"), "mcp-only": ("gerrit",), "without": (), "upstream": ("gerrit",)}
+ARM_MCP_SERVERS = {"with": ("plugin:gerrit:gerrit",), "mcp-only": ("plugin:gerrit:gerrit",), "without": (),
+                   "upstream": ("plugin:gerrit:gerrit",)}
+# `upstream` loads the same plugin name as `mcp-only`; its ported skills tell the two apart.
+ARM_REQUIRED_SKILLS = {"upstream": ("gerrit:gerrit-workflow", "gerrit:stack-planner", "gerrit:gerrit-review")}
+UPSTREAM_DEFAULT_DIR = os.path.join(os.path.expanduser("~"), "workspace", "open", "gerrit-mcp-server")
+UPSTREAM_PLUGIN_DATA = os.path.join(os.path.expanduser("~"), ".claude", "plugins", "data", "gerrit-inline")
+UPSTREAM_MCP_CONFIG = ".gerrit-mcp-config.json"  # a fixture may write it into the workspace (stub host)
 MCP_DENIED_HINT = "haven't granted"  # tool_result text of an MCP call refused for lack of permission
 CONVENTIONAL_COMMIT_RE = re.compile(r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?!?: .+")
 
@@ -454,6 +463,16 @@ class Case:
         nudges = self.cfg.get("nudges")
         self.nudges: dict = nudges if isinstance(nudges, dict) else {}
         self.graders: list[Grader] = load_graders(os.path.join(self.dir, "graders"))
+        # prompt@<arm>.md: that arm's prompt body (its frontmatter is ignored; prompt.md's applies)
+        self.arm_prompts: dict[str, str] = {}
+        for arm in ARMS:
+            path = os.path.join(self.dir, f"prompt@{arm}.md")
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as fh:
+                    self.arm_prompts[arm] = split_frontmatter(fh.read())[1]
+
+    def prompt_for(self, arm: Optional[str]) -> str:
+        return self.arm_prompts.get(arm or "", self.prompt)
 
     def _block(self, name: str, spec: dict) -> dict:
         if not spec or not spec.get("target_subject"):
@@ -841,8 +860,18 @@ def grade_llm(g: Grader, ctx: GradeContext) -> dict:
     return _grader_result(g, passed, detail)
 
 
+def grader_applies(spec: Any, arm: str) -> bool:
+    """Grader `arm:` — absent: every arm; `x` or `[x, y]`: only those; `!x`: every arm but x."""
+    if not spec:
+        return True
+    names = [str(a).strip() for a in (spec if isinstance(spec, list) else [spec])]
+    if all(n.startswith("!") for n in names):
+        return arm not in {n[1:] for n in names}
+    return arm in names
+
+
 def grade(g: Grader, ctx: GradeContext, arm: str) -> dict:
-    if g.arm and str(g.arm) != arm:
+    if not grader_applies(g.arm, arm):
         return _grader_result(g, None, f"only for arm {g.arm}", skipped=True)
     if g.type == "baseline":
         warn(f"grader {g.name}: type 'baseline' is not supported by evals/run.py; skipped")
@@ -878,24 +907,27 @@ def find_mcp_plugin_dir() -> Optional[str]:
 
 
 def build_claude_cmd(prompt: str, case: Case, arm: str, plugin_dir: Optional[str], model: Optional[str],
-                     max_turns: Optional[int] = None, mcp_plugin_dir: Optional[str] = None) -> list[str]:
+                     max_turns: Optional[int] = None, mcp_plugin_dir: Optional[str] = None,
+                     upstream_plugin_dir: Optional[str] = None) -> list[str]:
     # --model is always passed (explicit, else the case's, else DEFAULT_MODEL): a scrubbed session
     # would otherwise fall back to whatever the account defaults to.
     # --allowedTools is variadic: it swallows every following bare argument, so it must be
     # followed by another option (--max-turns is always present) before the prompt goes last.
     # --setting-sources project,local keeps the user's own CLAUDE.md, hooks and user-scope
     # plugins out of the run, so every arm sees only what the case declares; the official
-    # gerrit-mcp plugin is therefore loaded explicitly for the arms that want it.
+    # gerrit-mcp plugin is therefore loaded explicitly for the arms that want it; `upstream` loads
+    # the gerrit-mcp-server checkout in its place (same plugin name, same MCP server).
+    mcp_dir = upstream_plugin_dir if arm == "upstream" else mcp_plugin_dir
     tools = list(case.allowed_tools)
-    if arm in ("with", "mcp-only") and mcp_plugin_dir and MCP_TOOL_RULE not in tools:
+    if arm in MCP_ARMS and mcp_dir and MCP_TOOL_RULE not in tools:
         tools.append(MCP_TOOL_RULE)  # every tool of the plugin's `gerrit` MCP server
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose",
            "--setting-sources", "project,local",
            "--allowedTools", ",".join(tools),
            "--max-turns", str(max_turns or case.max_turns)]
     cmd += ["--model", model or case.model or DEFAULT_MODEL]
-    if arm in ("with", "mcp-only") and mcp_plugin_dir:
-        cmd += ["--plugin-dir", mcp_plugin_dir]
+    if arm in MCP_ARMS and mcp_dir:
+        cmd += ["--plugin-dir", mcp_dir]
     if arm == "with" and plugin_dir:
         cmd += ["--plugin-dir", plugin_dir]
     cmd.append(prompt)
@@ -1252,7 +1284,8 @@ def check_isolation(init: dict, arm: str) -> dict:
     """Compare a session's init record with the arm's allowlist -> isolation.json content.
     Plugins: the arm's plugins plus any cc-plugin-*; MCP servers: exactly ARM_MCP_SERVERS (a server
     that failed to connect still counts as loaded); namespaced skills/agents (`plugin:name`) only
-    from allowed plugins. `missing` lists what the arm should have had and did not."""
+    from allowed plugins; ARM_REQUIRED_SKILLS must all be loaded. `missing` lists what the arm
+    should have had and did not."""
     exp_plugins = set(ARM_PLUGINS.get(arm, ()))
     exp_mcp = set(ARM_MCP_SERVERS.get(arm, ()))
     plugins = _plugin_names(init.get("plugins"))
@@ -1271,9 +1304,12 @@ def check_isolation(init: dict, arm: str) -> dict:
         "agents": foreign(agents),
     }
     missing: dict[str, Any] = {"plugins": sorted(exp_plugins - set(plugins)), "mcp_servers": sorted(exp_mcp - set(mcp))}
+    required = set(ARM_REQUIRED_SKILLS.get(arm, ()))
+    if required:
+        missing["skills"] = sorted(required - set(skills))
     if not init:
         missing = {"plugins": [], "mcp_servers": [], "init": True}
-    ok = bool(init) and not any(unexpected.values()) and not missing["plugins"] and not missing["mcp_servers"]
+    ok = bool(init) and not any(unexpected.values()) and not any(v for k, v in missing.items() if k != "init")
     return {
         "ok": ok,
         "arm": arm,
@@ -1307,13 +1343,16 @@ def isolation_error(iso: dict) -> Optional[str]:
 
 def capability_counts(trace: Trace, hook_trace_path: str) -> dict:
     """How often the arm's distinguishing capabilities were exercised: MCP tool calls (and how many
-    were refused for lack of permission), Skill calls, lines the plugin's hooks wrote to the trace."""
+    were refused for lack of permission), Skill calls, lines the plugin's hooks wrote to the trace,
+    and Bash calls a hook refused as read from the trace (the only trace a guard without
+    GERRIT_STACK_TRACE, such as the `upstream` arm's, leaves)."""
     mcp = [tc for tc in trace.tool_calls if tc.name.startswith("mcp__")]
     return {
         "mcp_calls": len(mcp),
         "mcp_denied": sum(1 for tc in mcp if MCP_DENIED_HINT in (tc.result or "")),
         "skill_calls": sum(1 for tc in trace.tool_calls if tc.name == "Skill"),
         "hook_lines": hook_trace_counts(hook_trace_path)["lines"],
+        "guard_denies": trace_guard_counts(trace)["denies"],
     }
 
 
@@ -1351,12 +1390,18 @@ def run_session(case: Case, prompt: str, arm: str, ws: str, env: dict, run_dir: 
     rec = new_run_record(run_dir, started)
     hook_trace = os.path.join(run_dir, "hook-trace.log")
     open(hook_trace, "a").close()
-    env = sandbox_env({**env, "GERRIT_STACK_TRACE": hook_trace}, parent=env)
+    extra = {**env, "GERRIT_STACK_TRACE": hook_trace}
+    if arm == "upstream":
+        mcp_config = upstream_mcp_config(ws, opts)
+        if mcp_config:
+            extra["GERRIT_CONFIG_PATH"] = mcp_config
+    env = sandbox_env(extra, parent=env)
     model = session_model(case, opts)
     before = snapshot(ws)
     ran = error is None
     if ran:
-        cmd = build_claude_cmd(prompt, case, arm, opts.plugin_dir, model, mcp_plugin_dir=opts.mcp_dir)
+        cmd = build_claude_cmd(prompt, case, arm, opts.plugin_dir, model, mcp_plugin_dir=opts.mcp_dir,
+                               upstream_plugin_dir=getattr(opts, "upstream_dir", None))
         with open(os.path.join(run_dir, "command.txt"), "w", encoding="utf-8") as fh:
             fh.write(shlex.join(cmd) + "\n# env: " + " ".join(sorted(env)) + "\n# stdin: /dev/null\n")
         log(f"{label}: {shlex.join(cmd)[:160]}…")
@@ -1411,9 +1456,11 @@ def run_session(case: Case, prompt: str, arm: str, ws: str, env: dict, run_dir: 
     return rec
 
 
-def make_workspace(case: Case, opts: argparse.Namespace, run_dir: str) -> tuple[str, str, dict, Optional[str]]:
-    """Temp dir + workspace; runs the fixture (parent env minus CLAUDE*). -> (tmp, ws, session env, error);
-    the session env is the scrubbed allowlist."""
+def make_workspace(case: Case, opts: argparse.Namespace, run_dir: str,
+                   arm: str = "") -> tuple[str, str, dict, Optional[str]]:
+    """Temp dir + workspace; runs the fixture (parent env minus CLAUDE*, plus EVAL_ARM so a fixture can
+    add what only one arm's tooling reads). -> (tmp, ws, session env, error); the session env is the
+    scrubbed allowlist and never carries EVAL_ARM."""
     tmp = tempfile.mkdtemp(prefix=f"gs-eval-{case.name}-")
     ws = os.path.join(tmp, "workspace")
     os.makedirs(ws)
@@ -1424,11 +1471,82 @@ def make_workspace(case: Case, opts: argparse.Namespace, run_dir: str) -> tuple[
     own["GERRIT_STACK_TRACE"] = hook_trace
     error: Optional[str] = None
     if case.scaffold_script:
-        rc, timed_out = run_process(["bash", case.scaffold_script], ws, fixture_env(own), 600,
+        rc, timed_out = run_process(["bash", case.scaffold_script], ws, fixture_env({**own, "EVAL_ARM": arm}), 600,
                                     os.path.join(run_dir, "fixture.stdout"), os.path.join(run_dir, "fixture.stderr"))
         if rc != 0 or timed_out:
             error = f"fixture exited {rc}" + (" (timeout)" if timed_out else "")
     return tmp, ws, sandbox_env(own), error
+
+
+GUARD_PROBE_COMMAND = "git commit --no-verify -m probe"  # every guard version denies it in a Gerrit repo
+
+
+def prepare_upstream(opts: argparse.Namespace, data_dir: str = UPSTREAM_PLUGIN_DATA) -> tuple[dict, Optional[str]]:
+    """Before any `upstream` session: build the checkout's environment where the plugin's MCP server
+    and guard look for it (<plugin data>/.venv, the data dir of an inline `gerrit` plugin), then probe
+    the guard hook with a command it must deny. The guard fails open when its console script is
+    missing (a venv built from an older checkout), so an unprobed arm could run without its guard.
+    -> (provenance for aggregate-result.json, problem or None)."""
+    root = opts.upstream_dir
+    venv = os.path.join(data_dir, ".venv")
+    meta: dict[str, Any] = {"dir": root, "head": None, "ahead": None, "venv": venv, "guardProbe": None,
+                            "contextProbe": None}
+
+    def git(*args: str) -> str:
+        out = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, timeout=30)
+        return out.stdout.strip() if out.returncode == 0 else ""
+
+    meta["head"] = git("rev-parse", "--short=12", "HEAD") or None
+    count = git("rev-list", "--count", "@{upstream}..HEAD")
+    meta["ahead"] = f"{count} commit(s) ahead of {git('rev-parse', '--abbrev-ref', '@{upstream}') or 'upstream'}" if count else "no upstream"
+    meta["commits"] = git("log", "--format=%h %s", "@{upstream}..HEAD").splitlines() if count else []
+    sync = subprocess.run(["uv", "sync", "--frozen", "--directory", root], capture_output=True, text=True,
+                          timeout=600, env=fixture_env({"UV_PROJECT_ENVIRONMENT": venv}), stdin=subprocess.DEVNULL)
+    if sync.returncode != 0:
+        return meta, f"uv sync failed ({sync.returncode}): {(sync.stderr or sync.stdout).strip()[-400:]}"
+    if not os.access(os.path.join(venv, "bin", "gerrit-git-guard"), os.X_OK):
+        return meta, f"{venv}/bin/gerrit-git-guard missing after uv sync: the checkout has no guard"
+    probe = tempfile.mkdtemp(prefix="gs-upstream-probe-")
+    try:
+        subprocess.run(["git", "init", "-q", probe], check=True, timeout=30)
+        with open(os.path.join(probe, ".gitreview"), "w", encoding="utf-8") as fh:
+            fh.write("[gerrit]\nhost=localhost\nproject=probe\n")
+        payload = json.dumps({"session_id": "probe", "cwd": probe, "hook_event_name": "PreToolUse",
+                              "tool_name": "Bash", "tool_input": {"command": GUARD_PROBE_COMMAND}})
+        hook_env = fixture_env({"CLAUDE_PLUGIN_ROOT": root, "CLAUDE_PLUGIN_DATA": data_dir})
+        out = subprocess.run(["bash", os.path.join(root, "hooks", "git-guard.sh")], input=payload, cwd=probe,
+                             capture_output=True, text=True, timeout=60, env=hook_env)
+        # a checkout with the SessionStart context hook must print it in a Gerrit repo (it fails open too)
+        context_hook = os.path.join(root, "hooks", "session-context.sh")
+        if os.path.isfile(context_hook):
+            ctx = subprocess.run(["bash", context_hook], cwd=probe, capture_output=True, text=True, timeout=60,
+                                 env=hook_env, input=json.dumps({"hook_event_name": "SessionStart", "cwd": probe}))
+            try:
+                text = json.loads(ctx.stdout or "{}").get("hookSpecificOutput", {}).get("additionalContext")
+            except (ValueError, AttributeError):
+                text = None
+            meta["contextProbe"] = "context" if text else "silent"
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+    try:
+        decision = json.loads(out.stdout or "{}").get("hookSpecificOutput", {}).get("permissionDecision")
+    except (ValueError, AttributeError):
+        decision = None
+    meta["guardProbe"] = decision or "silent"
+    if decision != "deny":
+        return meta, f"guard probe `{GUARD_PROBE_COMMAND}` gave {meta['guardProbe']!r}, expected 'deny'"
+    if meta["contextProbe"] == "silent":
+        return meta, "hooks/session-context.sh printed no context in a Gerrit repo (environment not built?)"
+    return meta, None
+
+
+def upstream_mcp_config(ws: str, opts: argparse.Namespace) -> Optional[str]:
+    """gerrit_config.json for the `upstream` arm's MCP server and guard (GERRIT_CONFIG_PATH): the one
+    a fixture wrote next to the workspace (a stub host), else --upstream-mcp-config."""
+    own = os.path.join(os.path.dirname(ws), UPSTREAM_MCP_CONFIG)
+    if os.path.isfile(own):
+        return own
+    return getattr(opts, "upstream_mcp_config", None)
 
 
 def finish_workspace(tmp: str, ws: str, run_dir: str, rec: dict, keep: bool) -> None:
@@ -1745,10 +1863,10 @@ class Pipeline:
         return self.key
 
     def prompt(self, changes: Optional[list[int]] = None, url: str = "", project: str = "",
-               target: Optional[int] = None) -> str:
-        """implement: prompt.md as is; rework/review: prompt.md with {changes} {url} {project} {target}
-        filled in. The nudged variant appends the case's nudge line."""
-        text = self.case.prompt
+               target: Optional[int] = None, arm: Optional[str] = None) -> str:
+        """implement: prompt.md (or the arm's prompt@<arm>.md) as is; rework/review: the same with
+        {changes} {url} {project} {target} filled in. The nudged variant appends the case's nudge line."""
+        text = self.case.prompt_for(arm)
         if self.kind != "implement":
             text = render_message(text, changes=", ".join(str(c) for c in changes or []) or "<seeded changes>",
                                   url=url, project=project, target=target if target is not None else "<target change>")
@@ -2386,10 +2504,10 @@ def run_implement(pipe: Pipeline, arm: str, n: int, opts: argparse.Namespace, ou
     started = _dt.datetime.now(_dt.timezone.utc)
     t0 = time.time()
     rec = _base_record(pipe, run_dir, started, opts)
-    tmp, ws, env, error = make_workspace(case, opts, run_dir)
+    tmp, ws, env, error = make_workspace(case, opts, run_dir, arm)
     try:
         rh0 = remote_master_sha(ws)
-        rec.update(run_session(case, pipe.prompt(), arm, ws, env, run_dir, opts, judge_factory, label,
+        rec.update(run_session(case, pipe.prompt(arm=arm), arm, ws, env, run_dir, opts, judge_factory, label,
                                error=error, started=started))
         trace = parse_trace_file(rec["tracePath"])
         left = uncommitted(ws)
@@ -2426,7 +2544,7 @@ def run_rework(pipe: Pipeline, arm: str, n: int, opts: argparse.Namespace, out_d
     tags = push_hashtags(case.name, arm, os.path.basename(os.path.normpath(out_dir)), variant, n)
     rec["hashtags"] = tags
     base_url, prefix, project = gerrit_from_push_url(opts.push_to)
-    tmp, ws, env, error = make_workspace(case, opts, run_dir)
+    tmp, ws, env, error = make_workspace(case, opts, run_dir, arm)
     review: Optional[dict] = None
     rework: Optional[dict] = None
     seeded_numbers: list[int] = []
@@ -2470,7 +2588,7 @@ def run_rework(pipe: Pipeline, arm: str, n: int, opts: argparse.Namespace, out_d
         prepare_session_workspace(ws, base_url)
         env2 = dict(env)
         env2["GERRIT_HOST"] = base_url
-        prompt = pipe.prompt(seeded_numbers, base_url, project, t_num)
+        prompt = pipe.prompt(seeded_numbers, base_url, project, t_num, arm=arm)
         rh0, gm0 = remote_master_sha(ws), gerrit_branch_sha(rest, project)
         rec.update(run_session(case, prompt, arm, ws, env2, run_dir, opts, judge_factory, label, started=started))
         committed = commit_leftovers(ws, case.name, "fix")
@@ -2531,7 +2649,7 @@ def run_review(pipe: Pipeline, arm: str, n: int, opts: argparse.Namespace, out_d
     tags = push_hashtags(case.name, arm, os.path.basename(os.path.normpath(out_dir)), variant, n)
     rec["hashtags"] = tags
     base_url, prefix, project = gerrit_from_push_url(opts.push_to)
-    tmp, ws, env, error = make_workspace(case, opts, run_dir)
+    tmp, ws, env, error = make_workspace(case, opts, run_dir, arm)
     review: Optional[dict] = None
     metrics: Optional[dict] = None
     try:
@@ -2560,7 +2678,7 @@ def run_review(pipe: Pipeline, arm: str, n: int, opts: argparse.Namespace, out_d
         prepare_session_workspace(ws, base_url)
         env2 = dict(env)
         env2["GERRIT_HOST"] = base_url
-        prompt = pipe.prompt(seeded_numbers, base_url, project, t_num)
+        prompt = pipe.prompt(seeded_numbers, base_url, project, t_num, arm=arm)
         rh0, gm0 = remote_master_sha(ws), gerrit_branch_sha(rest, project)
         session_start = _utc_now_str()
         review["sessionStartedAt"] = session_start
@@ -2660,7 +2778,7 @@ def aggregate_case(case: Any, arms: dict[str, list[dict]], threshold: float, pip
     pass_rate = by_arm[primary]["passRate"] if primary else None
     deltas = {}
     if "with" in by_arm and by_arm["with"]["score"] is not None:
-        for other in ("without", "mcp-only"):
+        for other in ("without", "mcp-only", "upstream"):
             if other in by_arm and by_arm[other]["score"] is not None:
                 deltas[f"with-{other}"] = round(by_arm["with"]["score"] - by_arm[other]["score"], 4)
     delta = next(iter(deltas.values()), None)
@@ -2698,6 +2816,7 @@ def aggregate(cases: list[dict], threshold: float, meta: dict) -> dict:
         "partialReason": meta.get("partialReason"),
         "threshold": threshold,
         "arms": meta.get("arms", []),
+        **({"upstreamPlugin": meta["upstreamPlugin"]} if meta.get("upstreamPlugin") else {}),
         "aggregates": {
             "casesTotal": total,
             "casesPassed": passed,
@@ -2853,7 +2972,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--bench", action="store_true", help="use <eval-dir>/bench instead")
     ap.add_argument("--case", action="append", default=[], metavar="GLOB", help="case name glob (repeatable)")
     ap.add_argument("--runs", type=int, default=None, help="runs per case × arm (default: prompt.md `runs` or 1)")
-    ap.add_argument("--arms", default="with", help="comma list of with,without,mcp-only (default: with)")
+    ap.add_argument("--arms", default="with", help="comma list of with,without,mcp-only,upstream (default: with)")
     ap.add_argument("--ablation", action="store_true", help="shorthand for --arms with,without")
     ap.add_argument("--threshold", type=float, default=0.8)
     ap.add_argument("--max-cost-usd", type=float, default=None, help="stop (partial, exit 2) once spent")
@@ -2863,6 +2982,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--judge-votes", type=int, default=1)
     ap.add_argument("--plugin-dir", default=os.path.dirname(here), help="plugin root for the `with` arm")
     ap.add_argument("--mcp-plugin-dir", default=None, help="installed gerrit-mcp plugin dir for the with/mcp-only arms (default: newest ~/.claude/plugins/cache/gerrit-mcp/gerrit/*)")
+    ap.add_argument("--upstream-plugin-dir", default=None, metavar="DIR",
+                    help=f"gerrit-mcp-server checkout for the `upstream` arm (default: {UPSTREAM_DEFAULT_DIR})")
+    ap.add_argument("--upstream-mcp-config", default=None, metavar="FILE",
+                    help="gerrit_config.json for the `upstream` arm, passed as GERRIT_CONFIG_PATH (default: the "
+                         "installed gerrit-mcp plugin's gerrit_mcp_server/gerrit_config.json); a fixture may "
+                         f"override it per run with ../{UPSTREAM_MCP_CONFIG}")
     ap.add_argument("--keep", action="store_true", help="keep run workspaces under the run dir")
     ap.add_argument("--push-to", default=None, metavar="GERRIT_PROJECT_URL",
                     help="Gerrit project the runs push to (refs/for/master, hashtags bench-<case>-<arm>, run-<id>, "
@@ -2891,6 +3016,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         if a not in ARMS:
             ap.error(f"unknown arm {a!r} (choose from {', '.join(ARMS)})")
     args.arm_list = arms
+    args.upstream_dir = os.path.abspath(args.upstream_plugin_dir or UPSTREAM_DEFAULT_DIR)
+    if "upstream" in arms:
+        if not os.path.isfile(os.path.join(args.upstream_dir, ".claude-plugin", "plugin.json")):
+            ap.error(f"--upstream-plugin-dir {args.upstream_dir}: no .claude-plugin/plugin.json")
+        if args.upstream_mcp_config is None and args.mcp_dir:
+            installed = os.path.join(args.mcp_dir, "gerrit_mcp_server", "gerrit_config.json")
+            args.upstream_mcp_config = installed if os.path.isfile(installed) else None
     variants = [v.strip() for v in args.variants.split(",") if v.strip()] or ["natural"]
     for v in variants:
         if v not in VARIANTS:
@@ -2956,11 +3088,14 @@ def dry_run_pipeline(pipe: Pipeline, arm: str, n: int, opts: argparse.Namespace,
         own["GERRIT_HOST"] = base_url
         print(f"# session prep: origin synced with review/master; review remote removed; "
               f"git config gerrit-stack.host {base_url}")
+    if arm == "upstream":
+        own["GERRIT_CONFIG_PATH"] = f"../{UPSTREAM_MCP_CONFIG} if the fixture writes it, else {getattr(opts, 'upstream_mcp_config', None)}"
     env = sandbox_env(own)
     print(f"# session env (scrubbed; stdin=/dev/null): {env_summary(env)}")
-    prompt = pipe.prompt(None, base_url, project, None)
+    prompt = pipe.prompt(None, base_url, project, None, arm=arm)
     print(shlex.join(build_claude_cmd(prompt, case, arm, opts.plugin_dir, session_model(case, opts),
-                                      mcp_plugin_dir=opts.mcp_dir)))
+                                      mcp_plugin_dir=opts.mcp_dir,
+                                      upstream_plugin_dir=getattr(opts, "upstream_dir", None))))
     print(f"# after the session: isolation.json (expected plugins: {', '.join(ARM_PLUGINS[arm]) or 'none'} + cc-plugin-*; "
           f"MCP servers: {', '.join(ARM_MCP_SERVERS[arm]) or 'none'}), capability counters, chain-metrics "
           f"(--verify-cmd{' --concerns' if case.has_concerns else ''}), conventions.json")
@@ -3152,12 +3287,22 @@ def main(argv=None) -> int:
         print(f"# out-dir would be {out_dir}")
         return 0
 
+    upstream_meta = None
+    if "upstream" in opts.arm_list:
+        upstream_meta, problem = prepare_upstream(opts)
+        if problem:
+            print(f"run.py: upstream arm: {problem}", file=sys.stderr)
+            return 2
+        say(f"# upstream arm: {upstream_meta['dir']} @ {upstream_meta['head']} ({upstream_meta['ahead']}); "
+            f"guard probe: {upstream_meta['guardProbe']}; context probe: {upstream_meta['contextProbe'] or 'no hook'}; MCP config: {opts.upstream_mcp_config or 'none'}")
     os.makedirs(out_dir, exist_ok=True)
     eval_dir = os.path.abspath(opts.eval_dir)
     meta: dict[str, Any] = {"startedAt": started.isoformat(), "claudeVersion": claude_version(),
                             "arms": opts.arm_list, "partial": False, "partialReason": None, "costUsd": 0.0,
                             "suite": os.path.basename(eval_dir.rstrip("/")), "evalDir": eval_dir,
                             "model": opts.model or DEFAULT_MODEL, "variants": opts.variant_list}
+    if upstream_meta:
+        meta["upstreamPlugin"] = upstream_meta
     per_case: dict[str, dict[str, list[dict]]] = {p.key: {a: [] for a in opts.arm_list} for p in pipelines}
     budget: dict[str, Any] = {"spent": 0.0, "lock": threading.Lock(), "partialReason": None}
     t0 = time.time()

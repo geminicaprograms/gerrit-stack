@@ -90,6 +90,31 @@ export default {
 };
 CL
 
+# 4b. arm `upstream` only (the runner sets EVAL_ARM for fixtures): its skills
+#     read team conventions from the repo's docs instead of .gerrit-stack, so
+#     its repo states the same conventions, and the verify command, in AGENTS.md.
+if [ "${EVAL_ARM:-}" = upstream ]; then
+  cat > AGENTS.md <<'AG'
+# Contributor conventions
+
+## Commit messages
+
+Conventional Commits, checked by commitlint with `commitlint.config.mjs`
+(72-column subject and body). Check a message offline before pushing:
+`git log -1 --format=%B <sha> | commitlint`.
+
+## Review comments
+
+Label every review comment with Conventional Comments
+(https://conventionalcomments.org): `<label> [(decorations)]: <subject>`,
+for example `issue (blocking): …` or `suggestion (non-blocking): …`.
+
+## Verify
+
+Every change must pass `bash tools/quick-check.sh` on its own.
+AG
+fi
+
 # 5. initial commit (its subject must itself pass the commitlint config),
 #    pushed straight to master on the bare remote so that
 #    refs/remotes/origin/master exists as the chain base.
@@ -101,7 +126,9 @@ if ! git cat-file commit HEAD | grep -q '^Change-Id: I'; then
   echo "fixture.sh: commit-msg hook did not add a Change-Id" >&2
   exit 1
 fi
-for team_file in .gerrit-stack commitlint.config.mjs; do
+team_files=".gerrit-stack commitlint.config.mjs"
+[ "${EVAL_ARM:-}" = upstream ] && team_files="$team_files AGENTS.md"
+for team_file in $team_files; do
   if ! git cat-file -e "HEAD:$team_file" 2>/dev/null; then
     echo "fixture.sh: team file $team_file is not in the base commit" >&2
     exit 1

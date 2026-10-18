@@ -131,3 +131,27 @@ Verification log (Part 2):
 - 2026-10-17 talk: `--no-verify` nudge scenario removed from the deck (user: a hook is never slow); slide 9 = rework (natural + "-m and squash" advice) 6/6 · 1/6 · 4/6, re-typed Change-Id lines in rework 0/6 · 5/6 · 1/6, labels 19/19 · 0/16 · 6/18. Guard moment for the demo = `--amend -m`. Uncommitted in both repos by the user's commit-cadence rule.
 - 2026-10-18 dogfooding (upstream rework in `~/workspace/open/gerrit-mcp-server`, 8-change chain, not pushed): metrics reviewed; skills pulled back from the trimmed upstream versions (stack-planner 437 → 347 lines, gerrit-review ~100) with the script integration kept; ten course corrections turned into planner rules; observations #81–#88 triaged: #81 (no rejected alternatives in shipped prose) → CLAUDE.md; #83 (per-commit verify after a fixup) → skill; #84 (guard false positive on `grep Change-Id:`) → fixed + 2 bats; #85 (verify env) → `verify_tail` + usage; #88 (0 vs null) → fixed + bats; #82 (enumerate git's parser features before a guard; bash guard lacks the alias / `-c` / abbreviation classes the Python port handles) → **open follow-up**: port the hardened guard back or document the classes as out of scope; #86/#87 applied.
 
+- 2026-10-18 pushed dbff515..fixup (3 commits + an unsquashed `fixup!` for the guard hardening: force-push was blocked by the tool policy; squash later if wanted). Guard hardening after the security review: args-only matching applies only to literal `-m`; file/stdin/heredoc/variable messages fall back to file content or the whole command (4 bats). Installed plugin refreshed by uninstall+install because `plugin update` keys on the unchanged version string → bump the version next time.
+
+## Arm D — upstream port (2026-10-18)
+
+Goal: qualify and benchmark the gerrit-stack port in `~/workspace/open/gerrit-mcp-server` (8 commits on origin/master, head `dabf225`) as a fourth arm next to pass 2's A/B/C, without re-running A–C.
+
+Decisions (user, 2026-10-18): qualification = the 7 eval cases; arm D's fixtures add an `AGENTS.md` stating the team conventions (its skills read docs, not `.gerrit-stack`), A–C fixtures unchanged; improvements are suggested, the user picks, they land as fixups in the upstream chain, then the benchmark runs on the improved chain; benchmark = full pass-2 shape (4 suites, 3 runs/cell, 30 runs, cap $45, opus-5-5).
+
+Runner (`evals/run.py`): arm `upstream` = `--plugin-dir <checkout>` only; isolation also requires the ported skills (tells D from B, same plugin name); per-run `GERRIT_CONFIG_PATH`; `EVAL_ARM` reaches fixtures only; `prompt@<arm>.md` overrides; grader `arm:` takes lists and `!arm`; preflight syncs `~/.claude/plugins/data/gerrit-inline/.venv` and probes the guard (it was stale: no `gerrit-git-guard`, the guard would have failed open). Collector: D column, Δ D−C / Δ D−B only when D has runs; pass-2 report re-renders byte-identically.
+
+| Step | Status | Result |
+|---|---|---|
+| Runner + collector + fixtures + graders | done (uncommitted) | `make check` green: 186 bats, 204 Python |
+| Qualification `evals/results/qual-upstream-1` | done | 3/7 cases, score 0.56, $0.92; skills fired only on explicit wording, `gerrit-workflow` never; guard denied the forged Change-Id (after the attempt) |
+| C reference qualification `evals/results/qual-with-ref-1` (user: $1, current CLI) | done | 6/7, score 0.964, $1.35; split-over-budget misses `planner-invoked` (gerrit-stack skill only) |
+| Suggestions → user picked the SessionStart context only | done | upstream `55ec2e1` "Tell the model the chain rules in Gerrit repositories" (new 9th change: it names all three ported skills, so no fixup target); 438 pytest, ruff, mdformat green; runner preflight also probes this hook |
+| Re-qualification `evals/results/qual-upstream-2` | done | 6/7, score 0.964, $1.20 (= C); remaining miss: one run put config + tests + docs in one commit |
+| Benchmark D, S1–S4 → `evals/results/pass2d-*` | done | 30 runs, 0 errors, $30.11, isolation 30/30 → `docs/benchmark.md` (4 arms, A–C = pass 2; D summary and "Open after arm D" at the top). Runs passed D·C·B·A: S1 12/12·10/12·7/12·9/12, S2 9/9·8/9·9/9·7/9, S3 5/6·6/6·1/6·4/6, S4 2/3·3/3·3/3·3/3; forged/re-typed Change-Id 1·0·6·3; nudged `--no-verify` 0·0·most·most; review labels 16/16·19/19·0/16·6/18. D's one re-type: own Change-Id written into an `--amend -F` file (guard allows a matching value) |
+
+Open after arm D: the re-typed-Change-Id path (gerrit-workflow recipe should write the message file from `git log -1 --format=%B`, or the guard should deny a typed trailer even when it matches); D's unprompted chains are coarser (2.5 vs 3.5 changes); all changes in both repos uncommitted except upstream `55ec2e1`.
+
+Caveats for the D-vs-C comparison: Claude Code 2.1.302 (pass 2: 2.1.289); chain-metrics now reports null for unmeasured rates (5993edd); D's S3/S4 AGENTS.md is untracked (the seed push drops the fixture's base commit).
+- 2026-10-18 stage prompt test, fresh clones of the demo project, headless `claude -p` to the approval question: prototype (installed plugins) → 3-step plan (REST+setting, SSH, project override), 10 turns, 64 s, $0.82; port (`--plugin-dir ~/workspace/open/gerrit-mcp-server`, installed plugins disabled, AGENTS.md + .gitreview in the clone, data venv `~/.claude/plugins/data/gerrit-inline/.venv`) → same 3 steps, 10 turns, 58 s, $0.85. `demo/feature-request.md` replaced accordingly; old prompt kept as `-prompted.md`.
+

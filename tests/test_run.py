@@ -336,6 +336,63 @@ class CommandBuilderTest(unittest.TestCase):
             self.assertNotIn("--plugin-dir", c2)
             self.assertEqual(c2[c2.index("--model") + 1], "sonnet")
 
+    def test_upstream_arm_loads_the_checkout_instead_of_both_plugins(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        cd = os.path.join(d, "c")
+        os.makedirs(cd)
+        with open(os.path.join(cd, "prompt.md"), "w") as fh:
+            fh.write("---\nallowed_tools: [Read, Bash]\n---\nHello prompt\n")
+        case = run.Case(cd)
+        cmd = run.build_claude_cmd(case.prompt, case, "upstream", "/plug", None, mcp_plugin_dir="/cache/gerrit",
+                                   upstream_plugin_dir="/src/gerrit-mcp-server")
+        dirs = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--plugin-dir"]
+        self.assertEqual(dirs, ["/src/gerrit-mcp-server"])
+        self.assertEqual(cmd[cmd.index("--allowedTools") + 1], "Read,Bash," + run.MCP_TOOL_RULE)
+        b = run.build_claude_cmd(case.prompt, case, "mcp-only", "/plug", None, mcp_plugin_dir="/cache/gerrit",
+                                 upstream_plugin_dir="/src/gerrit-mcp-server")
+        self.assertEqual([b[i + 1] for i, a in enumerate(b) if a == "--plugin-dir"], ["/cache/gerrit"])
+
+    def test_parse_args_upstream(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        with self.assertRaises(SystemExit):  # not a plugin checkout
+            run.parse_args(["--arms", "upstream", "--upstream-plugin-dir", d])
+        os.makedirs(os.path.join(d, ".claude-plugin"))
+        open(os.path.join(d, ".claude-plugin", "plugin.json"), "w").close()
+        a = run.parse_args(["--arms", "upstream", "--upstream-plugin-dir", d, "--upstream-mcp-config", "/cfg.json"])
+        self.assertEqual((a.arm_list, a.upstream_dir, a.upstream_mcp_config), (["upstream"], d, "/cfg.json"))
+
+    def test_arm_prompt_override_and_grader_arms(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        cd = os.path.join(d, "c")
+        os.makedirs(cd)
+        with open(os.path.join(cd, "prompt.md"), "w") as fh:
+            fh.write("---\nmax_turns: 7\n---\nUse the REST fallback.\n")
+        with open(os.path.join(cd, "prompt@upstream.md"), "w") as fh:
+            fh.write("---\nmax_turns: 99\n---\nUse the MCP.\n")
+        case = run.Case(cd)
+        self.assertEqual((case.prompt_for("upstream"), case.prompt_for("with"), case.prompt_for(None)),
+                         ("Use the MCP.", "Use the REST fallback.", "Use the REST fallback."))
+        self.assertEqual(case.max_turns, 7)  # the override's frontmatter is ignored
+        self.assertEqual(run.Pipeline(case).prompt(arm="upstream"), "Use the MCP.")
+        for spec, arm, want in ((None, "x", True), ("with", "with", True), ("with", "upstream", False),
+                                (["with", "upstream"], "upstream", True), ("!upstream", "with", True),
+                                ("!upstream", "upstream", False), (["!a", "!b"], "b", False)):
+            self.assertEqual(run.grader_applies(spec, arm), want, (spec, arm))
+
+    def test_upstream_mcp_config_prefers_the_fixtures(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        ws = os.path.join(d, "workspace")
+        os.makedirs(ws)
+        opts = run.argparse.Namespace(upstream_mcp_config="/installed.json")
+        self.assertEqual(run.upstream_mcp_config(ws, opts), "/installed.json")
+        own = os.path.join(d, run.UPSTREAM_MCP_CONFIG)
+        open(own, "w").close()
+        self.assertEqual(run.upstream_mcp_config(ws, opts), own)
+
     def test_parse_args_arms(self):
         a = run.parse_args(["--ablation", "--case", "x*", "--case", "y"])
         self.assertEqual(a.arm_list, ["with", "without"])
@@ -729,6 +786,8 @@ INIT_BY_ARM = {
                   ["gerrit:gerrit-workflow", "gerrit-stack:stack-planner", "init"], ["general-purpose", "gerrit-stack:stack-reviewer"]),
     "mcp-only": _init(["gerrit"], ["plugin:gerrit:gerrit"], ["gerrit:gerrit-workflow"], ["general-purpose"]),
     "without": _init([], [], ["init", "review"], ["general-purpose"]),
+    "upstream": _init(["gerrit"], ["plugin:gerrit:gerrit"],
+                      ["gerrit:gerrit-workflow", "gerrit:stack-planner", "gerrit:gerrit-review"], ["general-purpose"]),
 }
 
 
@@ -876,7 +935,7 @@ class SandboxEnvTest(unittest.TestCase):
         run_dir = os.path.join(self.tmp, "run")
         os.makedirs(run_dir)
         opts = argparse.Namespace(plugin_dir=ROOT)
-        tmp, ws, env, error = run.make_workspace(case, opts, run_dir)
+        tmp, ws, env, error = run.make_workspace(case, opts, run_dir, "upstream")
         self.addCleanup(shutil.rmtree, tmp, True)
         self.assertIsNone(error)
         with open(os.path.join(tmp, "fixture-env.txt")) as fh:
@@ -891,6 +950,8 @@ class SandboxEnvTest(unittest.TestCase):
         self.assertEqual(env["EVAL_CASE_VAR"], "yes-please")  # the case's own EVAL_* reach the session
         self.assertEqual(env["EVAL_PLUGIN_ROOT"], ROOT)
         self.assertTrue(env["GERRIT_STACK_TRACE"].endswith("hook-trace.log"))
+        self.assertEqual(fixture_env["EVAL_ARM"], "upstream")  # the fixture knows the arm …
+        self.assertNotIn("EVAL_ARM", env)                      # … the session does not
 
     def _session(self, arm, lines, env=None, case=None, opts_model=None, rc=0):
         case = case or make_case(self.tmp, f"s-{arm}-{len(os.listdir(self.tmp))}")
@@ -909,10 +970,20 @@ class SandboxEnvTest(unittest.TestCase):
         ws = os.path.join(self.tmp, f"ws-{len(os.listdir(self.tmp))}")
         os.makedirs(ws)
         run_dir = os.path.join(self.tmp, f"run-{len(os.listdir(self.tmp))}")
-        opts = argparse.Namespace(plugin_dir=ROOT, mcp_dir="/mcp", model=opts_model, threshold=0.8)
+        opts = argparse.Namespace(plugin_dir=ROOT, mcp_dir="/mcp", model=opts_model, threshold=0.8,
+                                  upstream_dir="/src/gerrit-mcp-server", upstream_mcp_config="/installed.json")
         rec = run.run_session(case, "PROMPT", arm, ws, env if env is not None else run.sandbox_env({"EVAL_PLUGIN_ROOT": ROOT}),
                               run_dir, opts, None, "label")
         return rec, seen, run_dir
+
+    def test_upstream_session_gets_its_mcp_config(self):
+        rec, seen, _ = self._session("upstream", trace_with_init("upstream"))
+        self.assertIsNone(rec["error"], rec)
+        self.assertTrue(rec["isolation"]["ok"], rec["isolation"])
+        self.assertEqual(seen["env"]["GERRIT_CONFIG_PATH"], "/installed.json")
+        self.assertIn("/src/gerrit-mcp-server", seen["cmd"])
+        _, seen_b, _ = self._session("mcp-only", trace_with_init("mcp-only"))
+        self.assertNotIn("GERRIT_CONFIG_PATH", seen_b["env"])
 
     def test_session_env_model_and_isolation_files(self):
         rec, seen, run_dir = self._session("with", trace_with_init("with"))
@@ -927,7 +998,7 @@ class SandboxEnvTest(unittest.TestCase):
         self.assertEqual(rec["model"], "claude-opus-5-5")
         self.assertEqual(rec["modelReported"], "claude-opus-5-5")
         self.assertTrue(rec["isolation"]["ok"])
-        self.assertEqual(rec["capability"], {"mcp_calls": 0, "mcp_denied": 0, "skill_calls": 1, "hook_lines": 0})
+        self.assertEqual(rec["capability"], {"mcp_calls": 0, "mcp_denied": 0, "skill_calls": 1, "hook_lines": 0, "guard_denies": 0})
         with open(os.path.join(run_dir, "isolation.json")) as fh:
             iso = json.load(fh)
         self.assertEqual(set(iso) >= {"ok", "unexpected", "fingerprint", "capability"}, True)
@@ -1081,10 +1152,31 @@ class IsolationTest(unittest.TestCase):
         hook = os.path.join(tmp, "hook-trace.log")
         with open(hook, "w") as fh:
             fh.write("git-guard.sh\tpush\tdeny\ngit-post.sh\tcommit\tfeedback\n\n")
-        self.assertEqual(run.capability_counts(tr, hook), {"mcp_calls": 2, "mcp_denied": 1, "skill_calls": 2, "hook_lines": 2})
+        self.assertEqual(run.capability_counts(tr, hook),
+                         {"mcp_calls": 2, "mcp_denied": 1, "skill_calls": 2, "hook_lines": 2, "guard_denies": 0})
         bare = run.parse_trace_lines(trace_with_init("without"))
         self.assertEqual(run.capability_counts(bare, os.path.join(tmp, "missing")),
-                         {"mcp_calls": 0, "mcp_denied": 0, "skill_calls": 1, "hook_lines": 0})
+                         {"mcp_calls": 0, "mcp_denied": 0, "skill_calls": 1, "hook_lines": 0, "guard_denies": 0})
+
+    def test_guard_denies_counted_from_the_trace(self):
+        # the upstream guard writes no GERRIT_STACK_TRACE; its denial shows only as a refused Bash call
+        extra = [
+            _assistant(_tool_use("b1", "Bash", {"command": "git commit --no-verify -m x"})),
+            _tool_result_err("b1", "PreToolUse:Bash hook denied: --no-verify skips the commit-msg hook. Nothing in this command ran."),
+        ]
+        tr = run.parse_trace_lines(trace_with_init("upstream", extra=extra))
+        self.assertEqual(run.capability_counts(tr, "/nonexistent")["guard_denies"], 1)
+
+    def test_upstream_needs_its_ported_skills(self):
+        self.assertTrue(run.check_isolation(INIT_BY_ARM["upstream"], "upstream")["ok"])
+        # the released plugin (arm B's) under the upstream arm: same plugin and server, no ported skills
+        iso = run.check_isolation(INIT_BY_ARM["mcp-only"], "upstream")
+        self.assertFalse(iso["ok"])
+        self.assertEqual(iso["missing"]["skills"], ["gerrit:gerrit-review", "gerrit:stack-planner"])
+        self.assertIn("missing skills=", run.isolation_error(iso))
+        self.assertNotIn("skills", run.check_isolation(INIT_BY_ARM["mcp-only"], "mcp-only")["missing"])
+        self.assertTrue(run.check_isolation(INIT_BY_ARM["upstream"], "mcp-only")["ok"])  # B forbids nothing extra
+        self.assertEqual(run.check_isolation(INIT_BY_ARM["upstream"], "without")["unexpected"]["plugins"], ["gerrit"])
 
 
 class VariantsAndKindsTest(unittest.TestCase):
@@ -1749,7 +1841,7 @@ class ReworkGlueTest(unittest.TestCase):
         gerrit.fail_push = fail_push
         state: dict = {}
         self.addCleanup(setattr, run, "make_workspace", run.make_workspace)
-        run.make_workspace = lambda case_, opts, run_dir: (wstmp, ws, {"EVAL_PLUGIN_ROOT": ROOT}, None)
+        run.make_workspace = lambda case_, opts, run_dir, arm="": (wstmp, ws, {"EVAL_PLUGIN_ROOT": ROOT}, None)
 
         def good(ws_):
             replay(ws_, root, good_rework_steps(shas))
@@ -1877,7 +1969,7 @@ class ReviewGlueTest(unittest.TestCase):
         gerrit = _Gerrit(self, ws, root, **gerrit_kw)
         state: dict = {}
         self.addCleanup(setattr, run, "make_workspace", run.make_workspace)
-        run.make_workspace = lambda case_, opts, run_dir: (wstmp, ws, {"EVAL_PLUGIN_ROOT": ROOT}, None)
+        run.make_workspace = lambda case_, opts, run_dir, arm="": (wstmp, ws, {"EVAL_PLUGIN_ROOT": ROOT}, None)
         _fake_session(self, state, arm, final)
         out_dir = os.path.join(tmp, "results", "run-8")
         import contextlib
@@ -1940,7 +2032,7 @@ class ImplementGlueTest(unittest.TestCase):
         gerrit = _Gerrit(self, ws, root)
         state: dict = {}
         self.addCleanup(setattr, run, "make_workspace", run.make_workspace)
-        run.make_workspace = lambda case_, opts, run_dir: (wstmp, ws, {"EVAL_PLUGIN_ROOT": ROOT}, None)
+        run.make_workspace = lambda case_, opts, run_dir, arm="": (wstmp, ws, {"EVAL_PLUGIN_ROOT": ROOT}, None)
 
         def leave_dirty(ws_):
             with open(os.path.join(ws_, "NOTES.md"), "w") as fh:

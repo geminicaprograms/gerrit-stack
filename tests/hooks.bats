@@ -648,3 +648,52 @@ big_file() {
   run_hook "$STOP" "$(hook_json Stop "$repo" "" sess-d)"
   assert_silent
 }
+
+@test "guard: 'Change-Id:' in another segment (a grep) is not a hand-written trailer" {
+  local repo
+  repo=$(make_gerrit_repo)
+  echo x > "$repo/x.txt"
+  run_hook "$GUARD" "$(hook_json PreToolUse "$repo" 'git add x.txt && git commit -q -m "feat: x" && git log -1 --format=%B | grep -c "Change-Id:"')"
+  assert_silent
+}
+
+@test "guard: Change-Id inside a heredoc commit message is denied" {
+  local repo
+  repo=$(make_gerrit_repo)
+  run_hook "$GUARD" "$(hook_json PreToolUse "$repo" $'git commit -q -F - <<\'EOF\'\nfeat: y\n\nChange-Id: I0123456789abcdef0123456789abcdef01234567\nEOF')"
+  assert_deny "Change-Id"
+}
+
+@test "guard: a message file written earlier in the same call with a Change-Id is denied" {
+  local repo
+  repo=$(make_gerrit_repo)
+  run_hook "$GUARD" "$(hook_json PreToolUse "$repo" $'printf \'feat: x\\n\\nChange-Id: I0123456789abcdef0123456789abcdef01234567\\n\' > /tmp/gs-msg-$$ && git commit -q -F /tmp/gs-msg-$$')"
+  assert_deny "Change-Id"
+}
+
+@test "guard: -m with a shell variable holding a typed Change-Id is denied" {
+  local repo
+  repo=$(make_gerrit_repo)
+  run_hook "$GUARD" "$(hook_json PreToolUse "$repo" $'MSG=$\'feat: x\\n\\nChange-Id: I0123456789abcdef0123456789abcdef01234567\'; git commit -q -m "$MSG"')"
+  assert_deny "Change-Id"
+}
+
+@test "guard: an existing message file with a typed Change-Id is denied; without one, a grep elsewhere is not" {
+  local repo
+  repo=$(make_gerrit_repo)
+  printf 'feat: x\n\nChange-Id: I0123456789abcdef0123456789abcdef01234567\n' > "$repo/typed.txt"
+  run_hook "$GUARD" "$(hook_json PreToolUse "$repo" 'git commit -q -F typed.txt')"
+  assert_deny "Change-Id"
+  printf 'feat: y\n\nbody\n' > "$repo/clean.txt"
+  run_hook "$GUARD" "$(hook_json PreToolUse "$repo" 'git commit -q -F clean.txt && git log -1 --format=%B | grep -c "Change-Id:"')"
+  assert_silent
+}
+
+@test "guard: --amend -F keeping HEAD's id plus a grep for Change-Id: in the same call is silent" {
+  local repo id
+  repo=$(make_gerrit_repo)
+  id=$(git -C "$repo" log -1 --format=%B | sed -n 's/^Change-Id: //p')
+  printf 'feat: reworded\n\nChange-Id: %s\n' "$id" > "$repo/keep.txt"
+  run_hook "$GUARD" "$(hook_json PreToolUse "$repo" 'git commit --amend -F keep.txt && git log -1 --format=%B | grep Change-Id:')"
+  assert_silent
+}

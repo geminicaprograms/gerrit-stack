@@ -68,9 +68,42 @@ _gs_message_file_arg() {
   return 1
 }
 
-guard_commit() {
+# _gs_message_is_indirect <args> — true when the commit message comes from
+# anywhere but literal -m values: a file or stdin (-F/--file), a reused or
+# template message (-C/-c/-t), a here-document, or a shell expansion inside -m.
+_gs_message_is_indirect() {
   local args="$1"
-  case "$cmd" in
+  gs_git_args_have "$args" -F || gs_git_args_have "$args" --file \
+    || gs_git_args_have "$args" -C || gs_git_args_have "$args" --reuse-message= \
+    || gs_git_args_have "$args" -c || gs_git_args_have "$args" --reedit-message= \
+    || gs_git_args_have "$args" -t || gs_git_args_have "$args" --template= && return 0
+  case "$args" in *'<<'*|*'$'*|*'`'*) return 0 ;; esac
+  return 1
+}
+
+guard_commit() {
+  local args="$1" msg_src="$1" msg_file=''
+  # Which text can carry a hand-written trailer? With a literal -m message only
+  # the commit's own arguments, so a 'Change-Id:' in another segment of the same
+  # call (a grep, a log) is not a trailer. When the message comes from a file,
+  # stdin, a here-document, a reused message or a shell expansion, it may have
+  # been composed anywhere in this call: judge an existing file by its content,
+  # anything else by the whole command line.
+  if _gs_message_is_indirect "$args"; then
+    msg_src="$cmd"
+    msg_file=$(_gs_message_file_arg "$args") || msg_file=''
+    case "$msg_file" in ''|-|/*) ;; *) msg_file="${inv_dir:-.}/$msg_file" ;; esac
+    if [ -n "$msg_file" ] && [ "$msg_file" != - ] && [ -f "$msg_file" ]; then
+      if gs_git_args_have "$args" --amend; then
+        msg_src="$args"   # the --amend -F rule below checks the file keeps HEAD's id
+      elif grep -q '^Change-Id:' "$msg_file"; then
+        msg_src="Change-Id:"
+      else
+        msg_src="$args"
+      fi
+    fi
+  fi
+  case "$msg_src" in
     *Change-Id:*)
       deny "the commit message carries a hand-written Change-Id: trailer. The commit-msg hook adds it; remove the trailer and commit again." ;;
   esac

@@ -16,7 +16,7 @@ GERRIT_URL=${GERRIT_URL:-http://localhost:8080}
 GERRIT_URL=${GERRIT_URL%/}
 demo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 token_file=$demo_dir/work/.rena-token
-default_text='issue (blocking): the config value is read on every request; cache it in the @Singleton (see DemoPluginConfig) and add a unit test for the default.'
+default_text='issue (blocking): an empty or unknown project name must produce a clear error here, not a stack trace; add a unit test for it.'
 
 usage() { sed -n '2,12p' "$0" >&2; exit 2; }
 die() { printf 'reviewer-comment.sh: %s\n' "$*" >&2; exit 1; }

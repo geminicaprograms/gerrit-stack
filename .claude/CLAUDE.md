@@ -13,3 +13,4 @@ Claude Code plugin that makes Gerrit relation chains the coding agent's default 
 - `make validate lint test test-py` must be green before any commit.
 - Guards are a safety net, not a security boundary (server rules are); say so in docs and change descriptions. Skill reference files stay short: one screen per topic, no restated rules.
 - Shipped skills and docs never describe rejected alternatives; one line in the commit message at most. Before committing prose ask what the reader does differently because of it.
+- `claude plugin update` keys on the manifest `version`: bump `.claude-plugin/plugin.json` and `marketplace.json` with every pushed user-visible change, or installed copies stay stale (reinstall is the workaround).

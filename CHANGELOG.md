@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Demo prompt (`demo/feature-request.md`) no longer asks for one concern per
+  change or names the verify command: three user-visible behaviours (REST
+  greeting with its setting, SSH greet, per-project override) and "push for
+  review". Both the prototype and the upstream port plan it as three steps
+  unprompted (headless runs 2026-10-18). The old prompt is kept as
+  `demo/feature-request-prompted.md`. The reviewer script's default comment
+  now fits any change of the chain.
+
 ### Fixed
 
 - `git-guard.sh`: the hand-written Change-Id check looks only at the commit's

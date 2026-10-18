@@ -37,14 +37,18 @@ bash demo/work/demo-plugin/tools/quick-check.sh   # < 1 s, exit 0
 
 ## 0:00 — the prompt
 
-Paste the content of `demo/feature-request.md` into tab A (three concerns: `greetingPrefix` setting, REST
-`demo-plugin~greeting`, SSH `demo-plugin greet`; unit tests; "each concern its own change"; push for review).
+Paste the content of `demo/feature-request.md` into tab A (three behaviours: REST `demo-plugin~greeting` with its
+`greetingPrefix` setting, SSH `demo-plugin greet`, a per-project override in `project.config`; "push for review").
+No "one concern per change" and no verify command in the prompt: the planner cuts the chain itself and `verify-cmd`
+comes from the seed. Both the prototype and the upstream port planned it as the same three steps (2026-10-18). If a
+run proposes two, answer *three steps please: REST, SSH, project override*. The old prompted version is
+`demo/feature-request-prompted.md`.
 
 Narrate: *"No mention of Gerrit specifics. The plugin's skill triggers on the repo, not on the prompt."*
 
 ## 0:30 — plan → yes
 
-The `stack-planner` skill prints a 3-step plan (`Step 1 — feat: greetingPrefix …`, `Step 2 — feat: REST …`,
+The `stack-planner` skill prints a 3-step plan (`Step 1 — feat: serve project greeting over REST`, `Step 2 — feat: add greet SSH command`, `Step 3 — feat: let project.config override greeting prefix`,
 `Step 3 — feat: SSH …`, each with files, ±lines, verify command). Nothing has been edited yet.
 
 Answer **yes**. Narrate: *"One concern per commit, each a slice that makes sense alone and builds alone — that is what makes a
@@ -57,7 +61,7 @@ asserts exactly one `Change-Id:` and prints the diff size.
 
 Narrate on the first commit: *"The Change-Id trailer came from Gerrit's commit-msg hook, never typed by the agent —
 a hook rule denies any hand-written one. It is the identity that survives rebases and amends."*
-Point at the sizes: three commits around 60 / 80 / 50 lines.
+Point at the sizes: the plan estimates about 45 / 30 / 20 production lines; the post-commit line prints the real ones.
 
 **Highlight — the team files.** Show the repo's `.gerrit-stack` and `commitlint.config.mjs` (committed in the demo
 project, so every clone has them) and then the chain subjects: `git log --oneline origin/master..HEAD` reads
@@ -98,7 +102,7 @@ bash demo/reviewer-comment.sh <n2>
 ```
 
 Prints the change URL. Reload tab 2: `Code-Review -1` from *Rena Reviewer* and an unresolved thread on the first
-`.java` under `src/main`: *issue (blocking): the config value is read on every request; cache it in the @Singleton …*
+`.java` under `src/main`: *issue (blocking): an empty or unknown project name must produce a clear error here, not a stack trace; add a unit test for it.*
 
 Narrate: *"Conventional Comments — the label says what kind of feedback this is and whether it blocks."*
 

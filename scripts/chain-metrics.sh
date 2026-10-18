@@ -47,6 +47,9 @@
 # gerrit-stack.budget.lines (git config, else the team file .gerrit-stack at
 # the top level; default 400); kept for information only. budget.files is
 # reported when set (default: none).
+# --verify-cmd must bootstrap its own environment in a clean checkout (for
+# example `uv run --extra dev pytest`, not `pytest`): a 0 % builds_alone with a
+# verify_tail is a setup problem, not a build failure.
 # --verify-cmd checks out every change of the chain, one after another, in a
 # temporary detached worktree (cleaned with `git clean -fdx` between changes so
 # nothing built for one change helps the next) and runs <cmd> there with
@@ -285,9 +288,11 @@ while IFS= read -r sha; do
   if [[ $subject =~ $FIXUP_RE ]]; then fixup=true; fi
   within=false
   if [ "$prod" -le "$BUDGET_LINES" ]; then within=true; fi
-  # single concern: a type, no " and ", at most one type token in the subject
-  single=false
+  # single concern: a type, no " and ", at most one type token in the subject;
+  # null (not measured) when the subject carries no Conventional Commit type
+  single=null
   if [ "$ctype" != "-" ]; then
+    single=false
     lower=$(printf '%s' "$subject" | tr '[:upper:]' '[:lower:]')
     tokens=0
     for w in $subject; do
@@ -308,6 +313,7 @@ done < "$COMMITS"
 BUILDS=$TMP/builds
 : > "$BUILDS"
 VERIFY_ERROR=""
+VERIFY_TAIL=""
 VERIFY_TIMEOUTS=0
 TIMEOUT_BIN=""
 # CHAIN_METRICS_NO_TIMEOUT_BIN=1 forces the built-in watchdog (used by the tests)
@@ -325,14 +331,14 @@ run_verify() {
   local dir=$1 rc pid wd marker=$TMP/timed-out
   rm -f "$marker"
   if [ -n "$TIMEOUT_BIN" ]; then
-    (cd "$dir" && "$TIMEOUT_BIN" -k 5 "$VERIFY_TIMEOUT" bash -c "$VERIFY_CMD") </dev/null >/dev/null 2>&1
+    (cd "$dir" && "$TIMEOUT_BIN" -k 5 "$VERIFY_TIMEOUT" bash -c "$VERIFY_CMD") </dev/null >"$TMP/verify.out" 2>&1
     rc=$?
     # 124 = stopped by TERM, 137 = needed the follow-up KILL
     if [ "$rc" -eq 137 ]; then rc=124; fi
     return "$rc"
   fi
   # no timeout(1) (stock macOS): background the command and watch it
-  (cd "$dir" && exec bash -c "$VERIFY_CMD") </dev/null >/dev/null 2>&1 &
+  (cd "$dir" && exec bash -c "$VERIFY_CMD") </dev/null >"$TMP/verify.out" 2>&1 &
   pid=$!
   (
     waited=0
@@ -368,11 +374,16 @@ if [ -n "$VERIFY_CMD" ] && [ "$CHAIN_LENGTH" -gt 0 ]; then
       # whatever the previous change built must not help this one
       git -C "$WT" clean -fdxq >/dev/null 2>&1 || true
       run_verify "$WT"
-      case $? in
+      rc=$?
+      case $rc in
         0) echo ok >> "$BUILDS" ;;
         124) echo timeout >> "$BUILDS"; VERIFY_TIMEOUTS=$((VERIFY_TIMEOUTS + 1)) ;;
         *) echo fail >> "$BUILDS" ;;
       esac
+      # the first failure's last lines, so a 0 % that is really a setup problem shows why
+      if [ "$rc" -ne 0 ] && [ -z "$VERIFY_TAIL" ] && [ -s "$TMP/verify.out" ]; then
+        VERIFY_TAIL=$(tail -n 3 "$TMP/verify.out" | tr '\n' ' ' | cut -c1-300)
+      fi
     done < "$COMMITS"
   else
     VERIFY_ERROR="git worktree add failed"
@@ -662,7 +673,18 @@ WITHIN_PCT=$(pct_of "$(count_col_eq 7 true)")
 ONE_CID_PCT=$(pct_of "$(count_col_eq 4 1)")
 CONV_COUNT=$(awk -F'\t' '$5 != "-" { c++ } END { print c + 0 }' "$ROWS")
 CONV_PCT=$(pct_of "$CONV_COUNT")
-SINGLE_PCT=$(pct_of "$(count_col_eq 8 true)")
+# No convention documented (commit-style is not conventional and no commitlint
+# config at the top level): the share was not measured, so it is null, not 0.
+COMMIT_STYLE=$(setting commit-style)
+if [ -n "$COMMIT_STYLE" ] && [ "$COMMIT_STYLE" != conventional ] \
+   && ! ls "$TOPLEVEL"/commitlint.config.* "$TOPLEVEL"/.commitlintrc* >/dev/null 2>&1; then
+  CONV_PCT=null
+fi
+SINGLE_PCT=$(awk -F'\t' '$8 == "true" { t++ } $8 == "true" || $8 == "false" { n++ } END {
+  if (n == 0) { print "null"; exit }
+  v = 100 * t / n
+  if (v == int(v)) printf "%d\n", v; else printf "%.1f\n", v
+}' "$ROWS")
 TRAVEL_PCT=$(awk -F'\t' '$9 == "true" { t++ } $9 == "true" || $9 == "false" { n++ } END {
   if (n == 0) { print "null"; exit }
   v = 100 * t / n
@@ -701,6 +723,7 @@ done < "$ROWS"
 
 CID_SET=$(sort -u "$CIDS")
 if [ -n "$VERIFY_ERROR" ]; then VERIFY_ERROR_JSON="\"$VERIFY_ERROR\""; else VERIFY_ERROR_JSON=null; fi
+if [ -n "$VERIFY_TAIL" ]; then VERIFY_TAIL_JSON=$(printf '%s' "$VERIFY_TAIL" | jq -Rs .); else VERIFY_TAIL_JSON=null; fi
 
 RESULT=$(jq -n \
   --arg repo "$TOPLEVEL" --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg base_ref "$BASE_REF" \
@@ -711,6 +734,7 @@ RESULT=$(jq -n \
   --argjson files_median "$FILES_MEDIAN" --argjson within "$WITHIN_PCT" --argjson one_cid "$ONE_CID_PCT" \
   --argjson conv "$CONV_PCT" --argjson single "$SINGLE_PCT" --argjson fixups "$FIXUPS_PRESENT" \
   --arg verify_cmd "$VERIFY_CMD" --argjson builds "$BUILDS_PCT" --argjson verify_error "$VERIFY_ERROR_JSON" \
+  --argjson verify_tail "$VERIFY_TAIL_JSON" \
   --argjson verify_timeout "$VERIFY_TIMEOUT" --argjson verify_timeouts "$VERIFY_TIMEOUTS" \
   --argjson travel "$TRAVEL_PCT" --argjson conc "$CONCERNS_JSON" \
   --argjson remote "$REMOTE_JSON" --argjson hook "$HOOK_JSON" --arg cid_set "$CID_SET" '
@@ -747,6 +771,7 @@ RESULT=$(jq -n \
     verify_timeouts: (if $verify_cmd == "" then null else $verify_timeouts end),
     builds_alone_pct: $builds,
     verify_error: $verify_error,
+    verify_tail: $verify_tail,
     remote: $remote,
     refs_for_pushed: (if $remote == null then null else $remote.refs_for_pushed end),
     hook_trace: $hook,
@@ -775,7 +800,7 @@ printf '%s\n' "$RESULT" | jq -r '
   "prod lines: median \(s(.prod_lines_median))  max \(s(.prod_lines_max))  |  test lines: total \(s(.test_lines_total))  |  prod <= \(.budget.lines): \(pct(.within_budget_pct)) (info)",
   "one Change-Id \(pct(.one_change_id_pct))  |  conventional \(pct(.conventional_pct))  |  single concern \(pct(.single_concern_pct))  |  fixups \(yn(.fixups_present))",
   "tests travel \(pct(.tests_travel_pct))\(if .concerns_seen != null then "  |  purity \(pct(.purity_pct))  |  completeness \(pct(.completeness_pct))  |  concerns seen \(.concerns_seen | length)/\(.concerns_defined | length)  |  unmapped paths \([.changes[].unmapped_paths | length] | add // 0)" else "" end)",
-  (if .verify_cmd != null then "builds alone: \(pct(.builds_alone_pct))  (\(.verify_cmd))\(if .verify_timeouts > 0 then "  timeouts: \(.verify_timeouts)" else "" end)\(if .verify_error != null then "  error: " + .verify_error else "" end)" else empty end),
+  (if .verify_cmd != null then "builds alone: \(pct(.builds_alone_pct))  (\(.verify_cmd))\(if .verify_timeouts > 0 then "  timeouts: \(.verify_timeouts)" else "" end)\(if .verify_error != null then "  error: " + .verify_error else "" end)\(if .verify_tail != null then "  first failure: " + .verify_tail else "" end)" else empty end),
   (if .hook_trace != null then "hook trace: \(.hook_trace.violations) deny \(.hook_trace.violations_by_verb | tojson)  \(.hook_trace.asks) ask \(.hook_trace.asks_by_verb | tojson)  (\(.hook_trace.lines) lines\(if .hook_trace.missing then ", file missing" else "" end))" else empty end),
   (if .remote != null then "refs/for pushed: \(s(.refs_for_pushed))  (\(.remote.name) -> \(.remote.url)\(if .remote.local then "" else ", not local" end))" else empty end),
   "change-ids: \(if (.change_id_set | length) == 0 then "(none)" else (.change_id_set | join(" ")) end)"

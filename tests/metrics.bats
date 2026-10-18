@@ -479,3 +479,21 @@ PYJ
   run bash "$SCRIPT" --json --concerns "$MAP" "$J"
   echo "$output" | jq -e '.purity_pct == 50' >/dev/null
 }
+
+@test "plain subjects: single_concern is null, not false; conventional_pct null when the repo documents no convention" {
+  git -C "$WORK" config gerrit-stack.commit-style gerrit
+  echo p > "$WORK/plain.txt"; git -C "$WORK" add plain.txt; git -C "$WORK" commit -q -m "Add a plain subject"
+  run bash "$SCRIPT" --json "$WORK"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.changes[3].conventional_type == null and .changes[3].single_concern == null' >/dev/null
+  echo "$output" | jq -e '.single_concern_pct == 66.7' >/dev/null
+  echo "$output" | jq -e '.conventional_pct == null' >/dev/null
+}
+
+@test "--verify-cmd: verify_tail carries the first failure's output" {
+  run bash "$SCRIPT" --json --verify-cmd 'echo boom >&2; false' "$WORK"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.builds_alone_pct == 0 and (.verify_tail | test("boom"))' >/dev/null
+  run bash "$SCRIPT" --json --verify-cmd true "$WORK"
+  echo "$output" | jq -e '.verify_tail == null' >/dev/null
+}

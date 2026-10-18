@@ -136,7 +136,9 @@ make_chain_repo() {
   [ -f "$WORK/untracked.txt" ]
   [ "$(git -C "$WORK" status --porcelain)" = "?? untracked.txt" ]
   [ "$(git -C "$WORK" worktree list | wc -l | tr -d ' ')" = "1" ]
-  [ ! -d "$(git -C "$WORK" rev-parse --git-path rebase-merge)" ]
+  rebase=$(git -C "$WORK" rev-parse --git-path rebase-merge)
+  case "$rebase" in /*) ;; *) rebase="$WORK/$rebase" ;; esac
+  [ ! -d "$rebase" ]
 }
 
 @test "--verify-cmd failing on one change: partial builds_alone" {

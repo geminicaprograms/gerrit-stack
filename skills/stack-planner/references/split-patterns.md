@@ -40,8 +40,11 @@ the code before and after it, ahead of the feature that needs it.
 **Refactor before feature.** Behaviour-preserving, at the bottom, existing tests
 unchanged, with its existing callers.
 
-**Tests with code.** Every step carries its tests; a test-only step only covers
-code that already exists.
+**Tests and docs with code.** Every step carries its tests; a test-only step only
+covers code that already exists. Docs travel with the step whose behaviour they
+describe, so a page covering two steps is split between them. A docs-only step
+only for docs no single step owns: an overview spanning the chain, or a
+reorganisation of existing docs.
 
 **API then caller.** Two steps when the API is meaningful alone (other
 consumers, a public surface); one slice when the caller is its only consumer.

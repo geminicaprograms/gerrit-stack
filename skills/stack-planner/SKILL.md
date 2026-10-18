@@ -25,7 +25,7 @@ next one:
 
 - one behaviour or one mechanical transformation, stated without "and";
 - builds and passes with only the earlier steps present;
-- carries its tests **and its docs** (no final "add tests" or "update docs" step);
+- carries its tests **and the docs for the behaviour it adds** (no final "add tests" or "update docs" step);
 - is used: no class without a caller, no scaffolding, no "part 1/2";
 - revertable alone.
 
@@ -89,7 +89,8 @@ where a file is shared), ask, then follow `references/retro-split.md`.
 ## Pre-flight Checklist
 
 - [ ] Each step: one concern, no "and", the repository's subject style.
-- [ ] Each step builds, is tested, carries its docs and is used on its own.
+- [ ] Each step builds, is tested, carries the docs for its own behaviour and is
+  used on its own.
 - [ ] No step is a layer; no step is "part 1/2".
 - [ ] No blank cells; new files marked `(new)`; guesses stated; ports sized by
   the existing file.

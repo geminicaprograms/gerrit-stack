@@ -305,6 +305,12 @@ first sandboxed pass; see `evals/README.md` for suites, metrics and how to repro
 
 ## Design principles
 
+- The guards are a safety net for honest mistakes and casual bypasses, not a
+  security boundary; a determined agent can route around a `PreToolUse` command
+  guard (aliases, `-c` overrides, shell expansion). The server's
+  `receive.requireChangeId` and ACLs are the boundary.
+- Tests and docs travel with the change they belong to; review and security
+  findings are folded into the owning change, never appended as fix commits.
 - Scripts never run `git commit`/`git push` themselves — the agent runs raw
   `git …` so the `PreToolUse` guard fires; `push-chain.sh` only composes and
   prints the command, and the push guard always asks for confirmation even

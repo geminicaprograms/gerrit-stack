@@ -11,3 +11,5 @@ Claude Code plugin that makes Gerrit relation chains the coding agent's default 
 - Every hook rule has a bats test; every SKILL.md has a pre-flight checklist.
 - Commits: Conventional Commits. Progress ledger: `docs/plans/PROGRESS.md` (update at every checkpoint).
 - `make validate lint test test-py` must be green before any commit.
+- Guards are a safety net, not a security boundary (server rules are); say so in docs and change descriptions. Skill reference files stay short: one screen per topic, no restated rules.
+- Shipped skills and docs never describe rejected alternatives; one line in the commit message at most. Before committing prose ask what the reader does differently because of it.

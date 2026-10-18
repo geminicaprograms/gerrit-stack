@@ -7,8 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `git-guard.sh`: the hand-written Change-Id check looks only at the commit's
+  own message sources (its arguments and a here-document body), no longer at
+  the whole command line, so a `grep 'Change-Id:'` in the same call is not a
+  false denial that silently drops the preceding `git add`.
+- `chain-metrics.sh`: `single_concern` / `single_concern_pct` are `null` for
+  subjects without a Conventional Commit type, and `conventional_pct` is `null`
+  when the repository documents no convention (`commit-style` is not
+  `conventional` and no commitlint config exists); a metric that was not
+  measured is null, not 0.
+
 ### Changed
 
+- `chain-metrics.sh` records `verify_tail` (the first failing verify's last
+  lines) and documents that `--verify-cmd` must bootstrap its environment in a
+  clean checkout (`uv run --extra dev pytest`), so a 0 % builds-alone that is a
+  setup problem says why.
+- `gerrit-stack` skill: the per-commit `rebase -i --exec` verify is mandatory
+  after a fixup into a commit below the tip.
+- Skills trimmed to the versions reworked for the upstream proposal:
+  `stack-planner` (437 → 347 lines incl. references) and `gerrit-review`
+  (158 → ~100), keeping the `diff-budget.sh`, `chain-status.sh` and
+  `gerrit-rest.py` integration. New planner rules from dogfooding the plugin on
+  its own upstream rework: tests and docs travel with the step; a layer is never
+  a step; order by what can land first for a foreign project; never plan a step
+  the target cannot do with local state; size a port by the existing file;
+  review and security findings are folded into the owning change. README and
+  the `gerrit-stack` skill state the guard threat model (safety net, not a
+  security boundary).
 - README opens with the revised thesis (the agent already splits; gerrit-stack
   keeps the chain intact under pressure, in rework and in review) and quotes
   the pass 2 benchmark; the https-rewrite troubleshooting row points at the

@@ -1,158 +1,107 @@
 ---
 name: gerrit-review
-description: Read and respond to Gerrit review feedback on a change or relation chain via the official Gerrit MCP. Lists unresolved threads, drafts replies and comments (Conventional Comments labels when the team chose them), posts them after the user approves the batch, hands back to the user for any vote or submit. Use when asked to "check review comments", "reply to comments", "address feedback", "resolve threads", or when gerrit-stack reaches its iterate phase. Never votes, never submits.
+description: Read and respond to Gerrit review feedback on a change or relation chain via the official Gerrit MCP (REST fallback when it is absent). Lists unresolved threads, sorts each into fix / answer / defer / escalate, drafts the whole batch of replies, and posts them as threaded drafts only after the user approves the batch. Writes Conventional Comments labels only when the team opted in (`comment-style = conventional`). Use when asked to "check review comments", "reply to comments", "address feedback", "resolve threads", or when gerrit-stack reaches its iterate phase. Never votes, never submits.
 ---
 
 # gerrit-review
 
-You are the author's hands on a Gerrit review, not the author's vote. The loop is always
-**read → classify → draft the whole batch → user approves → post**. Votes, submit, WIP/ready,
-abandon and revert belong to the human; this skill never touches them.
+The loop is **read → classify → draft the whole batch → user approves → post**.
+Votes, submit, WIP/ready, abandon and revert are the user's; never call them,
+never pass `labels`. Code fixes go through the `gerrit-stack` skill (Phase 5:
+fixup → autosquash → `chain-status.sh --verify-ids` → re-push); Change-Id and
+patch-set semantics are the `gerrit-workflow` skill's (from `gerrit@gerrit-mcp`).
 
-**REQUIRED BACKGROUND:** the `gerrit-stack` skill (Phase 5, Iterate) owns every code change
-that a review asks for; the `gerrit-workflow` skill (from `gerrit@gerrit-mcp`) owns
-Change-Id and patch-set semantics. Do not restate either here — hand off.
-
-## Comment style is a team choice
-
-Read the setting before drafting anything; per-clone config wins over the committed team file:
+**Comment style is a team choice.** Read it before drafting; per-clone config
+wins over the committed team file:
 
 ```
 git config --get gerrit-stack.comment-style || git config -f "$(git rev-parse --show-toplevel)/.gerrit-stack" --get gerrit-stack.comment-style
 ```
 
-| Value | New comments and author notes (top-level) | Replies in a thread |
+`conventional`: new top-level comments and author notes carry a label from
+`references/conventional-comments.md` plus `(blocking)` / `(non-blocking)` when
+the label does not say; a PreToolUse guard denies an unlabelled one. Replies
+inside a thread stay free-form. `none` or unset (the default): plain sentences.
+Reviewers' labels are read the same way in both modes.
+
+## Tools
+
+MCP tools are `mcp__plugin_gerrit_gerrit__<name>`. If they are absent or fail
+to authenticate, use the REST fallback (`~/.netrc`; host from `--host` →
+`GERRIT_HOST` → `git config gerrit-stack.host` → remote URL) or point the user
+to `/gerrit:setup`. `change` = number, Change-Id, or `project~branch~Change-Id`.
+
+| Need | MCP | Fallback |
 |---|---|---|
-| `conventional` | `<label> [(decorations)]: <subject>` with a label from `references/conventional-comments.md`; say `(blocking)` or `(non-blocking)` whenever it is not obvious from the label. A PreToolUse guard denies an unlabelled `post_review_comment` / `post_draft_comment` / `gerrit-rest.py review --comment`. | free-form: `Done.` + what changed, or a short answer |
-| `none`, or nothing printed (default) | plain, concise sentences; no labels, no decorations | free-form, same as above |
+| Whole chain | `get_related_changes(change_id)` | `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/gerrit-rest.py" related <change>` |
+| Threads on a change | `list_change_comments(change_id)` | `… gerrit-rest.py comments <change> --unresolved` (raw JSON with `id`/`in_reply_to`) |
+| Reply in a thread | `post_draft_comment(…, in_reply_to=<id>)` then one `publish_drafts(change_id)` | `… gerrit-rest.py review <change> --message "Replies" --comment FILE:LINE:MSG --in-reply-to <id> [--resolved]` |
+| Author note (top-level) | `post_draft_comment(…, unresolved=False)` in the same batch | `… gerrit-rest.py review <change> --comment FILE:LINE:MSG` |
+| New patch set exists? | `get_change_details(change_id)` | `… gerrit-rest.py detail <change>` |
+| Local chain intact? | — | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh" --verify-ids` |
 
-The SessionStart context names the choice when it is `conventional`. Reviewers' labels are still
-read the same way in both modes (the table in `references/conventional-comments.md` maps them to
-the expected author action); the setting only governs what **you** write.
+Never use `post_review_comment` for a reply: it cannot thread. `publish_drafts`
+sends every draft on the change, including the user's own: run
+`list_draft_comments` first and say so in the batch preview. Payload shapes:
+`references/review-json.md`.
 
-## Tool map
+## Read
 
-MCP tools are exposed as `mcp__plugin_gerrit_gerrit__<name>`. If they are absent, use the fallback script
-(auth via `~/.netrc`, host from `--host` → `GERRIT_HOST` → `git config gerrit-stack.host` → remote URL).
-`change` = change number, Change-Id, or `project~branch~Change-Id`; from a URL `/c/<proj>/+/<n>` use `<n>`.
-
-| Need | MCP tool | Fallback |
-|---|---|---|
-| Whole chain of a change | `get_related_changes(change_id)` | `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/gerrit-rest.py" related <change>` |
-| Comments on one change | `list_change_comments(change_id)` (text; drops `in_reply_to`/`patch_set`) | `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/gerrit-rest.py" comments <change> --unresolved` (raw JSON) |
-| Reply inside a thread | `post_draft_comment(change_id, file_path, line_number, message, unresolved, in_reply_to=<id>)` then one `publish_drafts(change_id, message=None, labels=None)` per change | `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/gerrit-rest.py" review <change> --message "Replies to review" --comment FILE:LINE:MSG --in-reply-to <id> [--resolved]` (one call per reply) |
-| New comment / author note | `post_review_comment(change_id, file_path, line_number, message, unresolved, labels=None)` (one call per comment) | `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/gerrit-rest.py" review <change> --message "Author notes" --comment FILE:LINE:MSG` |
-| Confirm the new patch set exists | `get_change_details(change_id)` | `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/gerrit-rest.py" detail <change>` |
-| Find own changes needing attention | `query_changes("is:open owner:self has:unresolved", limit=20)` | `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/gerrit-rest.py" query "is:open owner:self has:unresolved"` |
-| Verify local chain before re-push | — | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh" --verify-ids` |
-
-`post_review_comment` has no `in_reply_to`, so it can never answer a thread — a reply posted with it
-becomes an orphan thread on the same line. Threaded replies go through drafts or the fallback.
-`publish_drafts` publishes **every** draft on the change, including drafts the user left in the web UI;
-say so in the batch preview. Shapes of every payload: `references/review-json.md`.
-
-## Process A — Read
-
-1. Resolve the target. A change number/URL/Change-Id → that change; "the chain", "all my changes",
-   or a hand-off from `gerrit-stack` → `get_related_changes(change_id)` and keep only entries with
-   `status == "NEW"` (skip `MERGED`/`ABANDONED`). Empty `related_changes` + `note` = solo change.
-   If any entry has `revision_number < current_revision_number`, warn that the local chain may be
-   stale before any fixup.
-2. For each change, `list_change_comments(change_id)`.
-3. Group comments into threads. Raw JSON: root = comment without `in_reply_to`, follow `in_reply_to`
-   links; the thread is unresolved iff its chronologically **last** comment has `unresolved: true`.
-   MCP text output lacks `in_reply_to`: group by `file:line` in listed order and treat the last
-   entry's status as the thread status; if one line carries several threads, or you are about to
-   reply, switch to the fallback `comments` command for the raw `id`/`in_reply_to` values.
-4. Print the threads table, chain order (oldest change first), **unresolved only** by default;
-   include resolved ones only when asked ("show all threads").
+1. **Target**: a change → that change; a chain → `get_related_changes`, only
+   `NEW` entries. Warn if any entry's `revision_number` is behind its
+   `current_revision_number` (the local chain may be stale).
+2. **Comments** per change. A thread starts at a comment without
+   `in_reply_to`; it is unresolved when its last comment is unresolved; replies
+   go to that last comment's `id` (the MCP text output lacks ids — use the
+   fallback `comments` command before replying).
+3. **Table**, oldest change first, unresolved threads only:
 
 ```
-change | file:line | author | unresolved | summary
--------|-----------|--------|------------|----------------------------------------------
-42     | src/main/java/com/example/GreetingRestHandler.java:23 | Rena | yes | issue (blocking): prefix can be null → NPE
-42     | src/main/java/com/example/GreetingRestHandler.java:80 | Rena | yes | question: why not PluginConfigFactory?
-43     | README.md:5 | Rena | yes | nitpick: "comand" → "command"
-3 unresolved threads on 2 of 3 changes (41 has none).
+change | file:line | author | summary
+42     | src/.../GreetingRestHandler.java:23 | Rena | issue (blocking): prefix can be null → NPE
+43     | README.md:5 | Rena | nitpick: "comand" → "command"
+2 unresolved threads on 2 of 3 changes.
 ```
 
-## Process B — Respond
+## Respond
 
-Classify every unresolved thread into exactly one bucket; write the bucket next to it.
-
-| Bucket | When | What you do |
+| Bucket | When | Do |
 |---|---|---|
-| **fix** | the comment asks for a code change you agree with (`issue`, `todo`, `chore`, agreed `suggestion`/`nitpick`) | map the change to its local commit (`git log --format='%h %s' --grep='Change-Id: <Change-Id>' <base>..HEAD`), add it to the fix list, hand the list to `gerrit-stack` Phase 5 (fixup → autosquash → `chain-status.sh --verify-ids` → re-push with confirmation, same grouping). Draft the reply now, post it **only after** `get_change_details` shows the new patch set |
-| **answer** | `question`, `thought`, `note`, `praise`, or a request you decline with a reason | draft a reply; no code change |
-| **defer** | valid but out of scope for this chain | draft a reply naming the follow-up Change-Id or ticket; keep `unresolved: true` unless the reviewer marked it `(non-blocking)` |
-| **escalate** | you already disagreed once in this thread, or the reviewer asks for a decision that is not yours | draft nothing; list the thread for the human with both positions |
+| **fix** | a code change you agree with | hand to `gerrit-stack` Phase 5; the fix is folded into the owning change, never a new "fix review" commit; post `Done.` only after `get_change_details` shows the new patch set |
+| **answer** | a question, or a request you decline with a reason | reply; no code change |
+| **defer** | valid but out of scope | reply naming the follow-up; stays unresolved unless marked non-blocking |
+| **escalate** | you already disagreed once, or the decision is not yours | no reply; show the user both positions |
 
-Reply rules (checked in pre-flight): replies are free-form in both comment styles — `Done.` + one
-line saying what changed when fixed; otherwise a direct answer (with `comment-style=conventional`
-a leading `note:` / `question:` / `thought:` is welcome but never required in a reply);
-**≤ 3 sentences**; when disagreeing, cite a principle, ADR,
-or doc link; `in_reply_to` = id of the thread's last comment; `unresolved: false` only when the fix is
-in the pushed patch set or the thread asked for no change and your reply answers it.
+Replies: at most 3 sentences; `Done.` plus what changed, or a direct answer; a
+disagreement cites a principle or doc; `unresolved=False` only when fixed and
+pushed, or answered with no change asked.
 
-Then show the **whole batch** in one message and stop. Nothing is posted until the user answers yes
-in this turn; "just do it" earlier in the conversation is not approval of a batch they have not seen.
+Show the whole batch and stop:
 
 ```
-Ready to post 3 replies (0 new comments). Nothing sent yet.
+Ready to post 2 replies. Nothing sent yet.
 # | change | file:line | in_reply_to | unresolved after | reply
-1 | 42 | GreetingRestHandler.java:23 | a1b2c3 | no  | Done. Falls back to "" when greeting.prefix is unset (PS2).
-2 | 42 | GreetingRestHandler.java:80 | d4e5f6 | yes | thought: reading the file keeps config hot-reloadable per ADR-007; PluginConfigFactory caches. Happy to switch if reload is not a requirement here.
-3 | 43 | README.md:5               | g7h8i9 | no  | Done.
-publish_drafts on 42 and 43 will also publish any drafts you left in the UI. Post? (y/n/edit N)
+1 | 42 | GreetingRestHandler.java:23 | a1b2c3 | no | Done. Falls back to "" when the prefix is unset (PS2).
+2 | 43 | README.md:5 | g7h8i9 | no | Done.
+Drafts already on 43: 1 (README.md:9), published with these.
+Post? (y/n/edit N)
 ```
 
-After approval: post exactly the approved rows, one tool call per row (`labels=None` always, or no
-`--label` flag), then re-run Process A and print the table with `0 unresolved` or what remains.
-The user votes and submits themselves — tell them the chain is ready for their vote.
+Post only after a yes to **this** batch — "just do it" earlier in the
+conversation is not approval of a batch the user has not seen. After the yes,
+per change: one draft per row, then one `publish_drafts(change_id)`; if a draft
+fails, do not publish that change. Then read again and report what remains;
+the user votes and submits.
 
-## Process C — Author notes
+## Pre-flight Checklist
 
-Before or right after a push, pre-empt questions on your own change with a note on the exact line.
-With `comment-style=conventional` write `note (non-blocking): …`, e.g. `note (non-blocking): this
-change only moves code; behaviour is unchanged.`; otherwise the same sentence without the label.
-Author notes are new top-level comments, so the label guard applies to them. Post with `post_review_comment(..., unresolved=False, labels=None)`; `line_number=0`
-makes it a file-level note. Author notes join the same batch preview and wait for the same yes.
-
-## Hard rules
-
-- **Never** set `labels` (always `labels=None`; fallback has no label flag), never `set_ready_for_review`,
-  `set_work_in_progress`, `abandon_change`, `revert_*`, never submit. Voting is the human's identity.
-- Nothing is posted before the user approves the batch shown in this turn. Not one comment.
-- `Done.` is only true after the patch set containing the fix is on the server; never resolve first and fix later.
-- Replies ≤ 3 sentences. Disagreement cites a principle/ADR/doc link. One round of disagreement per
-  thread, then escalate to the human.
-- `unresolved: false` only when the concern is actually addressed; the reviewer closes what you disagreed on.
-- Only touch changes returned by `get_related_changes` for the target; never `MERGED`/`ABANDONED` ones.
-- Git recipes use `git -C <dir> …`, never `cd <dir> && git …`. Never write a `Change-Id:` trailer.
-
-| Rationalization | Reality |
-|---|---|
-| "The user said 'just do it', so the batch preview is bureaucracy" | The preview is one message; a wrong reply on a review is public and permanent. Show it. |
-| "A +1 would make the chain look ready for the demo" | A vote in the user's name is not yours to give. Say the chain is ready for their vote. |
-| "I'll resolve the thread now and push the fix in a minute" | A resolved thread disappears from the reviewer's list. Fix, push, then `Done.`. |
-| "One more explanation will convince the reviewer" | Second round = escalate. The human decides. |
-| "`post_review_comment` is the tool the spec names, so use it for replies" | It cannot thread. Drafts + `publish_drafts` or the fallback `--in-reply-to`. |
-
-## References
-
-- `references/conventional-comments.md` — labels, decorations, reviewer label → author action, reply examples (labels apply to your own new comments only when `comment-style=conventional`).
-- `references/review-json.md` — `CommentInfo`, `ReviewInput`/`CommentInput`, `RelatedChangesInfo`, identifiers, `gerrit-rest.py` subcommands.
-
-## Pre-flight checklist (re-read before the batch preview and again before posting)
-
-- [ ] Target resolved via `get_related_changes`; only `NEW` changes in scope; stale patch sets flagged.
-- [ ] Every unresolved thread has one bucket: fix / answer / defer / escalate.
-- [ ] Every **fix** reply waits for a drift-free rewrite (the post-rebase hook feedback is the drift signal: `lost:`/`new:` → stop and repair; `chain-status.sh --verify-ids` confirms, and keeps reporting drift until `--snapshot` is run after the repair) and a new patch set confirmed via `get_change_details`.
-- [ ] `comment-style` was read (clone config, else `.gerrit-stack`): new comments/author notes carry a label + `(blocking)`/`(non-blocking)` only when it is `conventional`, plain sentences otherwise.
-- [ ] Every reply ≤ 3 sentences; `Done.` + why, or a direct answer (free-form in both styles).
-- [ ] Every reply carries `in_reply_to` = last comment id of its thread (draft tool or `--in-reply-to`).
-- [ ] `unresolved: false` only on fixed-and-pushed or answered-no-change threads.
-- [ ] Every disagreement cites a principle/ADR/doc link; no thread has two rounds from me.
-- [ ] No `labels`, no vote, no submit, no WIP/ready/abandon/revert call anywhere in the batch.
-- [ ] The full batch (replies + author notes, with the `publish_drafts` warning) was shown and the user said yes this turn.
-- [ ] Recipes use `git -C`, not `cd … && git …`; no hand-written `Change-Id:`.
+- [ ] Only `NEW` changes of the target; stale patch sets flagged.
+- [ ] Every unresolved thread has one bucket; fix replies wait for the new
+  patch set and `--verify-ids` says `ok`.
+- [ ] `comment-style` read (clone config, else `.gerrit-stack`); labels on new
+  top-level comments only when it is `conventional`.
+- [ ] Replies ≤ 3 sentences, each with `in_reply_to`; one disagreement round per
+  thread.
+- [ ] No `labels`, vote, submit, WIP, abandon or revert.
+- [ ] Existing drafts listed; the user said yes to this batch.
+- [ ] Git recipes use `git -C <dir>`; no hand-written `Change-Id:`.

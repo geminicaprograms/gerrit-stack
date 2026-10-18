@@ -37,6 +37,11 @@ Several threads on several commits: create all fixups first, autosquash once.
 
 ## 3. Verify every commit builds alone
 
+Mandatory after any fixup into a commit below the tip: the full suite at the tip
+cannot see a test that depends on a later commit. When one fix touches two
+commits, split it by hunk and place new text where the later commit does not
+touch (its reformatting would otherwise conflict in the autosquash).
+
 ```
 git -c sequence.editor=true rebase -i --exec '<verify-cmd>' <base>
 ```

@@ -24,6 +24,8 @@ unexpanded, the skill was not plugin-loaded: say so and stop.
 
 ## Non-negotiables
 
+The guards are a safety net for honest mistakes and casual bypasses, not a security boundary: `receive.requireChangeId` and the server's ACLs are the boundary. Nothing below replaces them.
+
 Violating the letter of these rules is violating their spirit. No exceptions for
 "just this once", "the user is in a hurry", or "it is a one-line fix".
 
@@ -102,6 +104,8 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
 
 ## Phase 2 — Build the chain (repeat per step)
 
+Tests and docs travel with the step that changes the behaviour; never a trailing "add tests" or "update docs" commit.
+
 1. Implement exactly the files in the step (tests travel with the code).
 2. `git config --get gerrit-stack.verify-cmd` (nothing printed → `git config -f .gerrit-stack --get gerrit-stack.verify-cmd`) — if it prints a command, run that
    command as its own Bash call; fix failures before committing.
@@ -134,8 +138,10 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
 
 1. `bash "${CLAUDE_PLUGIN_ROOT}/scripts/chain-status.sh"` — every row has one
    Change-Id, no `fixup!`/`squash!` rows, subjects read as a story oldest → newest.
-2. Optional, recommended for chains ≥ 3: prove each commit builds alone
-   `git -c sequence.editor=true rebase -i --exec '<verify-cmd>' <base>`
+2. Prove each commit builds alone: `git -c sequence.editor=true rebase -i --exec '<verify-cmd>' <base>`.
+   Recommended for any chain; **mandatory after a fixup into a commit below the tip** — a fixup
+   moves code back in time, and only the verify at that point proves it belongs there
+   (a test that uses a helper from a later commit passes at the tip and fails here).
    It stops at the first failing commit: fix → `git add <paths>` →
    `git commit --amend --no-edit` → `git rebase --continue`.
 3. **Grouping question** — ask **once per chain**, and only when
@@ -181,6 +187,8 @@ Never call `set_work_in_progress`, `set_ready_for_review`, `revert_*`,
 7. Report a table `change | subject | url` and the grouping used.
 
 ## Phase 5 — Iterate on review
+
+Every finding — a reviewer thread, your own self-review, a security pass — is folded into the change that owns the code (`git commit --fixup=<sha>`, autosquash, `--verify-ids`); never a new "fix review" change on top. The chain is re-pushed whole.
 
 1. Invoke `/gerrit-stack:gerrit-review` to read the threads (its table:
    `change | file:line | author | unresolved | summary`). It never votes or submits.
